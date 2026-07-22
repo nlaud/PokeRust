@@ -54,15 +54,27 @@
 //! with no structured dex equivalent (confirmed against Download/Trace/
 //! Frisk/Forewarn) — Frisk/Forewarn are excluded because they reveal
 //! genuinely new information the user has to type anyway (revealing it IS
-//! the ability's whole purpose). Weather/terrain-setter *abilities* only
-//! fire when the field doesn't already have one active — modeling
-//! Primordial Sea/Desolate Land blocking a weaker setter, or two setters
-//! entering together, is out of scope. Intrepid Sword/Dauntless
-//! Shield/one-time abilities are gated on `one_time_ability_used` so a
-//! Pokemon that already fired one doesn't get boosted again on a later
-//! switch-in. Download only fires when the opposing actives' known Def/SpD
-//! bounds make the comparison unambiguous; Trace only fires when exactly one
-//! opposing active's ability is already `Known`.
+//! the ability's whole purpose). Weather/terrain-setter *abilities* follow
+//! the real precedence rule (see `weather_is_strong` and
+//! `simulator::helpers::set_weather`, which this mirrors): a standard
+//! weather-setting ability always replaces whatever standard weather is
+//! currently active (Sand Stream after Drought overrides Sun with
+//! Sandstorm), but fails to activate at all against the three strong/primal
+//! weathers (Desolate Land/Primordial Sea/Delta Stream) — those can only be
+//! replaced by another strong weather. Terrain has no such exception: a
+//! terrain-setting ability always replaces whatever terrain is active, full
+//! stop (mirrors `simulator::helpers::set_terrain`, which is unconditional).
+//! Because two switches/mega evolutions can land in the *same* turn (e.g.
+//! each side mega evolving on the turn's first move), `augment_turn` threads
+//! a running scratch of just the field-relevant belief state (weather,
+//! terrain) between events in one turn — see its doc comment — so the
+//! second event's gate sees the first event's synthesized change instead of
+//! stale pre-turn state. Intrepid Sword/Dauntless Shield/one-time abilities
+//! are gated on `one_time_ability_used` so a Pokemon that already fired one
+//! doesn't get boosted again on a later switch-in. Download only fires when
+//! the opposing actives' known Def/SpD bounds make the comparison
+//! unambiguous; Trace only fires when exactly one opposing active's ability
+//! is already `Known`.
 
 use std::collections::HashMap;
 
@@ -76,10 +88,58 @@ use poke_rust::state::dex_data::{MoveData, MoveTarget, PokemonData, Terrain, Wea
 
 use crate::tracker_parse::opposing_active_slots;
 
+/// Augment every event in one turn, in order, threading a scratch snapshot of
+/// field-level belief state (currently: weather, terrain) between them so a
+/// LATER event in the same turn correctly observes an EARLIER event's
+/// synthesized change. Concretely: two mega evolutions in one turn, one per
+/// side, each with a weather-setting ability — the second must see the
+/// first's weather already active to decide whether it's blocked (strong
+/// weather) or should override it (standard weather always replaces standard
+/// weather). `belief` itself is never mutated; `scratch` is a throwaway clone
+/// used only to keep `guaranteed_ability_reactions`'s gates accurate as the
+/// turn's events are synthesized one at a time.
+pub fn augment_turn(
+    events: Vec<InformationEvent>,
+    belief: &UnknownBattleState,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> Vec<InformationEvent> {
+    let mut scratch = belief.clone();
+    events
+        .into_iter()
+        .map(|e| {
+            let augmented = augment_with_guaranteed_effects(e, &scratch, move_dex, pokemon_dex);
+            fold_field_changes_into_scratch(&mut scratch, &augmented);
+            augmented
+        })
+        .collect()
+}
+
+/// Recursively scan `event` (and its already-synthesized reactions) for
+/// `WeatherChanged`/`TerrainChanged` and fold the LAST one found into
+/// `scratch` — used by `augment_turn` to keep the gates in
+/// `guaranteed_ability_reactions` accurate across a turn's events. Only
+/// weather/terrain are threaded: they're the only belief fields the ability
+/// table gates a decision on that another event earlier in the SAME turn can
+/// change (Intimidate/Download/Trace/one-time boosts don't have this
+/// same-turn ordering dependency).
+fn fold_field_changes_into_scratch(scratch: &mut UnknownBattleState, event: &InformationEvent) {
+    match &event.kind {
+        EventKind::WeatherChanged { weather } => scratch.weather = weather.clone(),
+        EventKind::TerrainChanged { terrain } => scratch.terrain = terrain.clone(),
+        _ => {}
+    }
+    for r in &event.reactions {
+        fold_field_changes_into_scratch(scratch, r);
+    }
+}
+
 /// Walk `event`'s tree and append guaranteed reactions in place. `belief` is
 /// read-only — it reflects the state *before* this turn's lines are applied,
 /// which is all the synthesis below needs (none of it depends on anything
-/// else this same turn changes first).
+/// else this same turn changes first) — EXCEPT weather/terrain, which is why
+/// `augment_turn` (not this function directly) is the entry point tracker.rs
+/// should call for a whole turn's events; see its doc comment.
 pub fn augment_with_guaranteed_effects(
     mut event: InformationEvent,
     belief: &UnknownBattleState,
@@ -129,13 +189,30 @@ pub fn augment_with_guaranteed_effects(
                 }
 
                 // Per-Pokemon payloads (status/volatile/boosts): `secondaries`
-                // apply to each connected target, `self_secondaries` to the user.
+                // normally apply to each explicitly-named target, `self_secondaries`
+                // to the user. BUT a self-targeting move's own top-level
+                // `status:`/`volatileStatus:`/`sideCondition:` effect (Protect's
+                // `protect` volatile, Focus Energy, King's Shield, …) is ALSO parsed
+                // into `secondaries` — `parse_move_entry` converts a bare top-level
+                // field the same way regardless of the move's own `target`, only a
+                // `self: { ... }` block earns `self_secondaries` (see this module's
+                // doc comment and `state/dex_data.rs::parse_move_entry`). For a
+                // `SelfTarget` move, `targets` is always empty (the tracker grammar
+                // never lets a target token name the user — see `parse_move_line`),
+                // so without this the effect would be silently dropped entirely; the
+                // only sound reading of "connected target" for a self-only move is
+                // the user itself.
+                let secondary_targets: &[FieldSlot] = if md.target == MoveTarget::SelfTarget {
+                    std::slice::from_ref(user)
+                } else {
+                    targets
+                };
                 for sec in md
                     .secondaries
                     .iter()
                     .filter(|s| s.chance == 100 && s.random_choices.is_empty())
                 {
-                    for &target in targets {
+                    for &target in secondary_targets {
                         if !target_has_failed(&event.reactions, target) {
                             synthesize_per_mon_effects(&mut event.reactions, &sec.effect, target);
                         }
@@ -342,22 +419,21 @@ fn guaranteed_ability_reactions(
                 })
             })
             .collect(),
-        Ability::Drizzle if belief.weather.is_none() => vec![weather_event(Weather::Rain)],
-        Ability::Drought if belief.weather.is_none() => vec![weather_event(Weather::Sun)],
-        Ability::SandStream if belief.weather.is_none() => vec![weather_event(Weather::Sandstorm)],
-        Ability::SnowWarning if belief.weather.is_none() => vec![weather_event(Weather::Snow)],
-        Ability::ElectricSurge if belief.terrain.is_none() => {
-            vec![terrain_event(Terrain::ElectricTerrain)]
+        Ability::Drizzle if !weather_is_strong(&belief.weather) => vec![weather_event(Weather::Rain)],
+        Ability::Drought if !weather_is_strong(&belief.weather) => vec![weather_event(Weather::Sun)],
+        Ability::SandStream if !weather_is_strong(&belief.weather) => {
+            vec![weather_event(Weather::Sandstorm)]
         }
-        Ability::GrassySurge if belief.terrain.is_none() => {
-            vec![terrain_event(Terrain::GrassyTerrain)]
+        Ability::SnowWarning if !weather_is_strong(&belief.weather) => {
+            vec![weather_event(Weather::Snow)]
         }
-        Ability::MistySurge if belief.terrain.is_none() => {
-            vec![terrain_event(Terrain::MistyTerrain)]
-        }
-        Ability::PsychicSurge if belief.terrain.is_none() => {
-            vec![terrain_event(Terrain::PsychicTerrain)]
-        }
+        // Terrain has no "strong terrain" exception — a terrain-setting
+        // ability always replaces whatever terrain is active, unconditionally
+        // (mirrors `simulator::helpers::set_terrain`).
+        Ability::ElectricSurge => vec![terrain_event(Terrain::ElectricTerrain)],
+        Ability::GrassySurge => vec![terrain_event(Terrain::GrassyTerrain)],
+        Ability::MistySurge => vec![terrain_event(Terrain::MistyTerrain)],
+        Ability::PsychicSurge => vec![terrain_event(Terrain::PsychicTerrain)],
         Ability::IntrepidSword
             if !mon_at(belief, slot).is_some_and(|m| m.one_time_ability_used) =>
         {
@@ -432,6 +508,17 @@ fn trace_reaction(slot: FieldSlot, belief: &UnknownBattleState) -> Vec<Informati
         [ability] => vec![ability_revealed_node(slot, ability.clone(), belief)],
         _ => Vec::new(),
     }
+}
+
+/// The three strong/primal weathers (Desolate Land/Primordial Sea/Delta
+/// Stream's Extreme Sunlight/Heavy Rain/Strong Winds) block every standard
+/// weather-setting ability from activating at all — mirrors
+/// `simulator::helpers::set_weather`'s `current_is_strong` check exactly.
+fn weather_is_strong(weather: &Option<Weather>) -> bool {
+    matches!(
+        weather,
+        Some(Weather::ExtremeSunlight) | Some(Weather::HeavyRain) | Some(Weather::StrongWinds)
+    )
 }
 
 fn weather_event(weather: Weather) -> InformationEvent {
@@ -554,6 +641,66 @@ mod tests {
     }
 
     #[test]
+    fn taunt_synthesizes_its_own_volatile_on_the_explicit_target() {
+        // Only reachable once `tracker_parse.rs`'s cant-reason/move-name
+        // collision fix lands ("p1 taunt o1" used to get misparsed as
+        // `Cant{Taunt}`, dropping the target and the move entirely).
+        let belief = test_belief();
+        let augmented = parse_and_augment("p1 taunt o1", &belief);
+        assert!(augmented.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::VolatileStart { target, volatile: poke_rust::state::dex_data::VolatileStatus::Taunt } if *target == o1()
+        )));
+    }
+
+    #[test]
+    fn protect_synthesizes_its_own_volatile() {
+        // Regression: Protect's `volatileStatus: 'protect'` is a bare
+        // top-level field on a `target: "self"` move — the dex parser puts
+        // it in `secondaries` regardless of the move's own target, but the
+        // tracker's `targets` list is always empty for a self-target move
+        // (the grammar never lets a target token name the user). Before the
+        // `MoveTarget::SelfTarget` special-case, this silently dropped
+        // Protect's own volatile entirely.
+        let belief = test_belief();
+        let augmented = parse_and_augment("p1 protect", &belief);
+        assert!(augmented.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::VolatileStart { target, volatile: poke_rust::state::dex_data::VolatileStatus::Protect } if *target == p1()
+        )));
+    }
+
+    #[test]
+    fn focus_energy_synthesizes_its_own_volatile() {
+        // Same bug class as Protect, different move — confirms the fix is
+        // general to self-targeting status moves, not special-cased to Protect.
+        let belief = test_belief();
+        let augmented = parse_and_augment("p1 focusenergy", &belief);
+        assert!(augmented.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::VolatileStart { target, volatile: poke_rust::state::dex_data::VolatileStatus::FocusEnergy } if *target == p1()
+        )));
+    }
+
+    #[test]
+    fn charge_and_power_trick_synthesize_their_own_volatiles() {
+        // Two more self-targeting, bare-`volatileStatus:` moves — part of the
+        // volatile-coverage audit alongside Protect/Focus Energy, confirming
+        // the `MoveTarget::SelfTarget` fix generalizes across the whole class.
+        let belief = test_belief();
+        let charge = parse_and_augment("p1 charge", &belief);
+        assert!(charge.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::VolatileStart { target, volatile: poke_rust::state::dex_data::VolatileStatus::Charge } if *target == p1()
+        )));
+        let power_trick = parse_and_augment("p1 powertrick", &belief);
+        assert!(power_trick.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::VolatileStart { target, volatile: poke_rust::state::dex_data::VolatileStatus::PowerTrick } if *target == p1()
+        )));
+    }
+
+    #[test]
     fn thunder_wave_synthesizes_guaranteed_paralysis() {
         let belief = test_belief();
         let augmented = parse_and_augment("p1 thunderwave o1", &belief);
@@ -625,6 +772,106 @@ mod tests {
         assert!(ability_node.reactions.iter().any(|r| matches!(
             &r.kind,
             EventKind::WeatherChanged { weather: Some(Weather::Sun) }
+        )));
+    }
+
+    #[test]
+    fn weather_setter_overrides_existing_standard_weather() {
+        // Regression: a second weather-setting ability used to be gated on
+        // `belief.weather.is_none()`, so it silently no-op'd whenever ANY
+        // weather (not just a strong one) was already active — the bug
+        // report's "Sand Stream after Drought: no weather changes happening
+        // here." Standard weather always replaces standard weather.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sun);
+        let augmented = parse_and_augment("o1 sandstream", &belief);
+        assert!(augmented.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::WeatherChanged { weather: Some(Weather::Sandstorm) }
+        )));
+    }
+
+    #[test]
+    fn strong_weather_blocks_standard_weather_setter() {
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::HeavyRain);
+        let augmented = parse_and_augment("p1 drought", &belief);
+        assert!(!augmented
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. })));
+    }
+
+    #[test]
+    fn two_mega_evolutions_in_one_turn_second_weather_setter_overrides_first() {
+        // The bug report's exact scenario: Charizard-Mega-Y (Drought) and
+        // Tyranitar-Mega (Sand Stream) both mega evolving the SAME turn,
+        // starting from no weather at all. `augment_with_guaranteed_effects`
+        // alone can't get this right — both events would be augmented against
+        // the same pre-turn `belief` (weather: None) — so this must go
+        // through `augment_turn`, which threads the first event's synthesized
+        // Sun into a scratch snapshot before augmenting the second.
+        let belief = test_belief();
+        let charizard = InformationEvent {
+            kind: EventKind::MegaEvolution { slot: o1(), into: Species::CharizardMegaY },
+            reactions: Vec::new(),
+        };
+        let tyranitar = InformationEvent {
+            kind: EventKind::MegaEvolution { slot: p1(), into: Species::TyranitarMega },
+            reactions: Vec::new(),
+        };
+        let augmented = augment_turn(vec![charizard, tyranitar], &belief, move_dex(), pokemon_dex());
+        let [charizard_aug, tyranitar_aug] = augmented.as_slice() else {
+            panic!("expected exactly two augmented events")
+        };
+        let drought = charizard_aug
+            .reactions
+            .iter()
+            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { ability: Ability::Drought, .. }))
+            .expect("expected a synthesized Drought reveal");
+        assert!(drought.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::WeatherChanged { weather: Some(Weather::Sun) }
+        )));
+        let sand_stream = tyranitar_aug
+            .reactions
+            .iter()
+            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { ability: Ability::SandStream, .. }))
+            .expect("expected a synthesized Sand Stream reveal");
+        assert!(sand_stream.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::WeatherChanged { weather: Some(Weather::Sandstorm) }
+        )));
+    }
+
+    #[test]
+    fn augment_turn_blocks_setter_after_same_turn_strong_weather() {
+        // A strong weather set earlier in the SAME turn must still block a
+        // later standard setter, even though it isn't in the committed
+        // pre-turn `belief` yet — proves `fold_field_changes_into_scratch`
+        // actually threads strength, not just presence.
+        let belief = test_belief();
+        let heavy_rain = leaf(EventKind::WeatherChanged { weather: Some(Weather::HeavyRain) });
+        let drought_line = parse_tracker_text("p1 drought", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(drought_event) = drought_line.into_iter().next().unwrap() else {
+            panic!("expected an event line")
+        };
+        let augmented = augment_turn(vec![heavy_rain, drought_event], &belief, move_dex(), pokemon_dex());
+        let drought_aug = &augmented[1];
+        assert!(!drought_aug
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. })));
+    }
+
+    #[test]
+    fn terrain_setter_always_overrides_existing_terrain() {
+        let mut belief = test_belief();
+        belief.terrain = Some(Terrain::GrassyTerrain);
+        let augmented = parse_and_augment("o1 electricsurge", &belief);
+        assert!(augmented.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) }
         )));
     }
 

@@ -3244,8 +3244,13 @@ fn pass1_apply_event(
                     VolatileStatusState::Charging(_, _) => false,
                 });
                 if !already {
+                    // Seed the exact default duration where one exists (see
+                    // `volatile_timer`'s doc comment for what's excluded and why —
+                    // notably Confusion, whose real 2-5 turn roll can't be
+                    // soundly tracked without a larger representation change).
+                    let duration = volatile_timer(volatile).unwrap_or(0);
                     mon.volatiles
-                        .push(VolatileStatusState::TurnStatus(volatile.clone(), 0));
+                        .push(VolatileStatusState::TurnStatus(volatile.clone(), duration));
                 }
             }
         }
@@ -3562,6 +3567,34 @@ fn pass1_apply_event(
             pass2_flinch_holder_from_cant(state, slot, ctx);
         }
 
+        // The authoritative observed signal for the Perish Song countdown — the
+        // real game announces the exact remaining count directly, so this
+        // OVERWRITES whatever `volatile_timer`'s seeded default (4, from
+        // `VolatileStart`) currently holds rather than re-deriving it. Creates
+        // the volatile if the belief doesn't already have one recorded (e.g. a
+        // tracker session that only ever sees `PerishCount` lines, never an
+        // explicit `p1 perishsong` reveal).
+        EventKind::PerishCount { target, turns_left } => {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                use crate::state::pokemon::VolatileStatusState;
+                let mut found = false;
+                for v in mon.volatiles.iter_mut() {
+                    if let VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, turns) = v {
+                        *turns = *turns_left as u16;
+                        found = true;
+                    }
+                }
+                if !found {
+                    mon.volatiles.push(VolatileStatusState::TurnStatus(
+                        VolatileStatus::PerishSong,
+                        *turns_left as u16,
+                    ));
+                }
+            }
+        }
+
         EventKind::Crit { .. }
         | EventKind::Immune { .. }
         | EventKind::Missed { .. }
@@ -3570,8 +3603,7 @@ fn pass1_apply_event(
         | EventKind::HitCount { .. }
         | EventKind::Cant { .. }
         | EventKind::MustRecharge { .. }
-        | EventKind::SingleMoveOrTurn { .. }
-        | EventKind::PerishCount { .. } => {}
+        | EventKind::SingleMoveOrTurn { .. } => {}
     }
 }
 
@@ -5610,6 +5642,30 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
                     | VolatileStatusState::MoveStatus(VolatileStatus::Electrify, _)
             )
         });
+        // Every OTHER volatile `volatile_timer` seeded an exact duration for
+        // (Taunt, Encore, Disable, ThroatChop, GlaiveRush, MustRecharge, Yawn,
+        // HealBlock, SyrupBomb, Uproar, PerishSong, and the 1-turn guard/
+        // redirection volatiles): decrement and drop once expired. Sound to
+        // remove proactively (unlike weather/terrain/side-conditions, which
+        // always wait for an observed end event) because NONE of these
+        // durations are extended by a hidden item/ability — `volatile_timer`
+        // only returns `Some` for the exact, non-ambiguous cases; `LockedMove`
+        // (count-up) and Confusion (untracked — see `volatile_timer`'s doc
+        // comment) are excluded via the same `volatile_timer(vs).is_some()`
+        // gate, so their payload is left untouched.
+        mon.volatiles.retain_mut(|v| match v {
+            VolatileStatusState::TurnStatus(vs, turns) | VolatileStatusState::MoveStatus(vs, turns)
+                if volatile_timer(vs).is_some() =>
+            {
+                if *turns > 1 {
+                    *turns -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        });
     }
     state.round_used_this_turn = false;
     state.items_consumed_this_turn.clear();
@@ -5698,6 +5754,64 @@ fn side_condition_timer(sc: &SideCondition) -> Unknown<u8> {
         | SideCondition::StealthRock
         | SideCondition::StickyWeb(_)
         | SideCondition::ToxicSpikes(_) => Unknown::Known(0),
+    }
+}
+
+/// Timer model for a newly-applied turn/move-scoped volatile status, mirroring
+/// `simulator::helpers::get_volatile_duration`/`apply_volatile_to_pokemon`'s
+/// duration tables exactly (those are the authoritative source — keep this in
+/// sync with them). Unlike weather/terrain/screens, NONE of these durations
+/// are extended by an item or ability, so every one that has a fixed turn
+/// count is `Some(n)` (exact, not a range) — a real observer can count these
+/// down precisely. Returns `None` for:
+/// - permanent-until-explicitly-removed volatiles (the vast majority — AquaRing,
+///   LeechSeed, Curse, Ingrain, MagnetRise, FocusEnergy, …): no countdown exists;
+/// - `LockedMove` (count-UP, managed by the rampage end-timing fork, never
+///   decremented generically);
+/// - `Roost`/`Electrify` (always exactly the current turn — cleared by the
+///   unconditional per-turn-flag reset in `apply_end_of_turn`, not this table);
+/// - `Confusion`, whose real 2-5 turn duration is rolled by RNG at application
+///   — a real observer can never know which value came up. Soundly ranging
+///   this would need `VolatileStatusState`'s payload to become `Unknown<u16>`
+///   (see the `volatiles` field doc comment on `UnknownPokemonState` in
+///   `unknowns.rs`) — a larger representation change out of scope here, so
+///   Confusion's duration is deliberately left untracked (payload stays `0`,
+///   the pre-existing placeholder) rather than seed a value that could be
+///   wrong in either direction.
+fn volatile_timer(v: &VolatileStatus) -> Option<u16> {
+    match v {
+        // MoveStatus-classified in the concrete simulator (mirrors
+        // `apply_volatile_to_pokemon`'s `duration` match) — the belief
+        // doesn't distinguish TurnStatus/MoveStatus wrappers (see
+        // `EventKind::VolatileStart`'s handler), but the exact values match.
+        VolatileStatus::Disable(_) => Some(4),
+        VolatileStatus::CantUseRepeatedly(_) => Some(1),
+        VolatileStatus::Encore(_) => Some(3),
+        VolatileStatus::Taunt => Some(3),
+        VolatileStatus::ThroatChop => Some(2),
+        VolatileStatus::GlaiveRush => Some(1),
+
+        // TurnStatus-classified (mirrors `get_volatile_duration`'s table).
+        VolatileStatus::Flinch
+        | VolatileStatus::Protect
+        | VolatileStatus::KingsShield
+        | VolatileStatus::SpikyShield
+        | VolatileStatus::BanefulBunker
+        | VolatileStatus::Endure
+        | VolatileStatus::MaxGuard
+        | VolatileStatus::HelpingHand
+        | VolatileStatus::FollowMe
+        | VolatileStatus::RagePowder => Some(1),
+        VolatileStatus::MustRecharge => Some(2),
+        VolatileStatus::Yawn => Some(2),
+        VolatileStatus::HealBlock => Some(2),
+        VolatileStatus::SyrupBomb => Some(3),
+        VolatileStatus::Uproar => Some(3),
+        // Also directly set (and kept in sync) by `EventKind::PerishCount`,
+        // which is the authoritative observed signal once it arrives.
+        VolatileStatus::PerishSong => Some(4),
+
+        _ => None,
     }
 }
 

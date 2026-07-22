@@ -48,8 +48,8 @@ use poke_rust::state::battle::{FieldSlot, Player};
 use crate::dto::*;
 use crate::mapping;
 use crate::routes::AppState;
-use crate::tracker_effects::augment_with_guaranteed_effects;
-use crate::tracker_parse::{ParseError, TrackerLine, parse_tracker_text};
+use crate::tracker_effects::augment_turn;
+use crate::tracker_parse::{ParseError, TrackerLine, fold_leads_and_entry_abilities, parse_tracker_text};
 
 pub struct TrackerSession {
     pub belief: UnknownBattleState,
@@ -403,6 +403,13 @@ pub async fn submit_tracker_events(
     let mut log_delta: Vec<TurnLogEntry> = Vec::new();
     let mut turn_count = session.turn_count;
     for events in turns {
+        // Merge a leading `p leads`/`o leads` pair into one combined event and
+        // fold immediately-following entry-ability reveals into its
+        // `reactions` — see `fold_leads_and_entry_abilities`'s doc comment.
+        // Must run before completeness validation / synthesis so both see the
+        // final nested shape.
+        let events = fold_leads_and_entry_abilities(events);
+
         // An incomplete turn (some active slot recorded nothing at all) is
         // rejected the same way a contradiction is — before any mutation.
         if let Err(message) = validate_turn_completeness(&events, &working, session.active_per_side)
@@ -414,13 +421,11 @@ pub async fn submit_tracker_events(
         }
 
         // Guaranteed-effect synthesis reads `working` as it stands right before
-        // THIS turn's own events apply — see `tracker_effects`'s module doc.
-        let events: Vec<InformationEvent> = events
-            .into_iter()
-            .map(|e| {
-                augment_with_guaranteed_effects(e, &working, &app.dexes.move_dex, &app.dexes.pokemon_dex)
-            })
-            .collect();
+        // THIS turn's own events apply, threading a weather/terrain scratch
+        // across the turn's own events as it goes — see `augment_turn`'s doc
+        // comment in `tracker_effects`.
+        let events: Vec<InformationEvent> =
+            augment_turn(events, &working, &app.dexes.move_dex, &app.dexes.pokemon_dex);
 
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             apply_information(

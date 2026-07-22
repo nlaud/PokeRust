@@ -9,6 +9,7 @@ mod session;
 mod tracker;
 mod tracker_effects;
 mod tracker_parse;
+mod tracker_render;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -26,16 +26,21 @@ export default function SetupPanel() {
 
   // Restore the last-used configuration (ignoring ids that no longer exist);
   // otherwise Doubles is the default format when present (covers stored
-  // format lists that still have Singles first).
+  // format lists that still have Singles first). Absent a saved team, default
+  // to favorited teams first (falling back to storage order) rather than raw
+  // `teams[0]`/`teams[1]`, so a starred team is what's pre-selected.
   const saved = loadBattleSetup()
+  const sortedTeams = favoritesFirst(teams)
   const savedFormat = formats.find((f) => f.id === saved?.formatId)
   const savedTeam1 = teams.find((t) => t.id === saved?.team1Id)
   const savedTeam2 = teams.find((t) => t.id === saved?.team2Id)
   const defaultFormat =
     savedFormat ?? formats.find((f) => f.id === 'champions-s2-doubles') ?? formats[0]
   const [formatId, setFormatId] = useState(defaultFormat?.id ?? '')
-  const [team1Id, setTeam1Id] = useState(savedTeam1?.id ?? teams[0]?.id ?? '')
-  const [team2Id, setTeam2Id] = useState(savedTeam2?.id ?? teams[1]?.id ?? teams[0]?.id ?? '')
+  const [team1Id, setTeam1Id] = useState(savedTeam1?.id ?? sortedTeams[0]?.id ?? '')
+  const [team2Id, setTeam2Id] = useState(
+    savedTeam2?.id ?? sortedTeams[1]?.id ?? sortedTeams[0]?.id ?? '',
+  )
   const [informationMode, setInformationMode] = useState<InformationMode>(
     saved?.informationMode ?? 'closedSheet',
   )
@@ -68,7 +73,7 @@ export default function SetupPanel() {
   }
 
   const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
-  const teamOptions = favoritesFirst(teams).map((t) => ({ value: t.id, label: t.name }))
+  const teamOptions = sortedTeams.map((t) => ({ value: t.id, label: t.name }))
 
   return (
     <div className="mx-auto max-w-lg p-6">

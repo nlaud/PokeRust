@@ -26,9 +26,15 @@ export interface Volatile {
   turns?: number
 }
 
+/** A field/side effect's name plus how long it has left. Under fog-of-war the
+ * exact remaining count is frequently not knowable (e.g. weather's base 5
+ * turns vs. 8 with an extension rock the setter's item hasn't revealed) —
+ * `turns` is always the lower bound (or the exact value once collapsed) and
+ * `turnsMax` is the upper bound, present ONLY when it differs from `turns`. */
 export interface NamedTurns {
   name: string
   turns?: number
+  turnsMax?: number
 }
 
 export interface MoveView {

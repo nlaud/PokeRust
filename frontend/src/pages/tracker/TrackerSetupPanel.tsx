@@ -49,9 +49,13 @@ export default function TrackerSetupPanel() {
   const [formats] = useState(loadFormats)
   const { create, busy, error, clearError } = useTracker()
 
+  // Default to favorited teams first (falling back to storage order) rather
+  // than raw `teams[0]`, so a starred team is what's pre-selected — mirrors
+  // `SetupPanel.tsx`'s default-selection behavior.
+  const sortedTeams = favoritesFirst(teams)
   const defaultFormat = formats.find((f) => f.id === 'champions-s2-doubles') ?? formats[0]
   const [formatId, setFormatId] = useState(defaultFormat?.id ?? '')
-  const [teamId, setTeamId] = useState(teams[0]?.id ?? '')
+  const [teamId, setTeamId] = useState(sortedTeams[0]?.id ?? '')
   const [informationMode, setInformationMode] = useState<TrackerInfoMode>('closedSheet')
   const [opponent, setOpponent] = useState('')
 
@@ -74,7 +78,7 @@ export default function TrackerSetupPanel() {
   }
 
   const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
-  const teamOptions = favoritesFirst(teams).map((t) => ({ value: t.id, label: t.name }))
+  const teamOptions = sortedTeams.map((t) => ({ value: t.id, label: t.name }))
 
   return (
     <div className="mx-auto max-w-lg p-6">

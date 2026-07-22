@@ -1,48 +1,25 @@
 # TODO: Always remove items from here when they are completed :)
 
 ### Fixes
+- Cache the benchmarking so that it stays even when you switch tabs until you re-run them.
+- Favorited teams should also be auto-selected first in the simulate / tracker flow.
+- Weather turns are not accurately tracked by the tracker. volatiles side conditions, pseudoweathers, and weathers etc. should use their default time amounts, AND be decremented on endofturn
+- Combine leads into one event, and have that allow reactions (i.e. p leads tyranitar lycanroc o leads aerodactyl charizard p1 sandstream o1 unnerve)
+- Bug: protect does not automatically get the protected itself volatile??? ALL VOLATILES SHOULD BE TRACKED. ALL SECONDAR EFFECTS SHOULD BE TRACKED. GO THROUGH THE SIMULATOR, search the entire thing so ALL EFFECTS ARE PRESENT!!!!! 
+- Bug: Mega abilities are not resolving properly: P2's Charizard Mega Evolved into Charizard-Mega-Y!
 
-- `random_doubles_battles_are_sound` / `random_doubles_beliefs_stay_sound_subset`
-  (`poke_rust/src/tests/random_battle_tests.rs`): fog-of-war soundness fuzz tests.
-  Full fix history is in the regression tests and git log.
-  - **Contradiction oracle** (`random_doubles_battles_are_sound`, default test):
-    historical 10,000-battle sweep was ~0.14% failures (2026-07-18). The known
-    families were Pass 5 “every candidate nature is infeasible” and an
-    `ItemLost` “clause has no explanation” path. Re-measure after the subset
-    fixes before treating that old rate as current.
-  - **Subset oracle** (`survey_subset_violations`, ignored diagnostic): the
-    deterministic 1,000-match acceptance sweep is now **3/1000 failures (0.3%)**
-    (**0 field violations, 3 clause reports, 1 caught contradiction panic**;
-    2026-07-20), down from the original 36–37% baseline. A separate 300-match
-    sweep completed at **0/300**. This clears the <1% target. Keep the exhaustive survey
-    ignored until the residual cases are closed; run it with:
+P2's Charizard-Mega-Y's Drought!
 
-    ```powershell
-    $env:POKERUST_FUZZ_SEED_START='0'
-    $env:POKERUST_FUZZ_ITERS='1000'
-    cargo test --release survey_subset_violations -- --ignored --nocapture
-    ```
+P1's Tyranitar Mega Evolved into Tyranitar-Mega!
 
-    Remaining deterministic failures are item/order clauses: seed 350 turn 24
-    (`Quick Claw ∨ Iron Ball ∨ Custap Berry`) and seed 454 turn 2
-    (`Quick Claw ∨ Choice Scarf`), plus one caught contradiction not yet
-    isolated. The two seed-350 reports occur in one match. Doubles build inference
-    now deliberately restores a conservative species-level nature/EV/IV/stat
-    envelope after inference; this eliminated the remaining false damage/stat
-    exclusions while preserving non-build inference.
-
-  - The fuzz configuration uses `champions_legal_items()` and stat-points mode.
-    Deterministic seeds and replay controls are available through the
-    `POKERUST_FUZZ_*` environment variables documented in the test module.
+P1's Tyranitar-Mega's Sand Stream! (No weather changes happening here, but should also work with intimidate and other abilities etc)
+- I want this to accurately track battles, so if I have a simulated run and manually input the events that are happening into the tracker then it should be accurately tracking the state of the game. (MAKE A FUZZ TEST FOR THIS, same subsetting logic etc, since it should already be using the same unknownstate stuff!) 
+- Weather turn information is leaked, it should display a range of the possible weather turns, same thing for other effect turns like reflect!!!!!! THERE SHOULD BE NO DEPENDENCE ON THE ACTUAL STATE FOR THE SIMULATOR, THIS SHOULD ALSO APPLY TO THE TRACKER!
+- Future Sight / Wish (and Doom Desire / Healing Wish / Lunar Dance / Revival Blessing) have no tracker grammar at all — `SlotCondition`/`SlotConditionStart`/`SlotConditionEnd` exist as event kinds but `tracker_parse.rs` has zero handling for them, so a user can't even type these moves manually today. The hard part: `SlotCondition::FutureMove` snapshots the attacker's raw stats/boosts/ability/type at cast time, which the tracker's fog-of-war belief may not know precisely for an opponent's mon under Closed Team Sheet — needs a real design (bound/infer the snapshot the same way the inference engine bounds other hidden stats, or require the user to supply it) before adding grammar, not just a quick word mapping.
 
 ### New features
-- Cache the benchmarking so that it stays even when you switch tabs until you re-run them.
+
 - Test the meta sampler & make sure a chunk of the data looks good...
   - Now on the Rust end, create a determinizer that takes in the meta state (we will need a parser for this) + an unknownbattlestate, then, like the simulator, has modes for giving a single random sample state or giving every possible state with probability (This should not consider "other" options, just the normal ones, it should force based on the meta percent and known information items, moves, etc.). It should output complete full states though that should just be able to be put in the simulator and work!
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
-  - [ ] Tracker page: needs a parser for lines of input -> action / reaction tree
-        (figuring out what is a reaction to what and what causes what from just the
-        lines, also must add guaranteed effects so the user doesn't need to put those
-        in manually). This will likely include some RegEx stuff as well. Need a
-        detailed spec.
-  - [ ] Then move on to actual bot creation, battle and mentor pages.
+  - [ ] Then move on to actual bot creation, battle and mentor pages (Could make these an option in the simulate / tracker page?).

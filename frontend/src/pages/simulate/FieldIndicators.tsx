@@ -1,4 +1,4 @@
-import type { BattleView } from '../../api/types'
+import type { BattleView, NamedTurns } from '../../api/types'
 
 /** Chip colors keyed by effect name; unlisted effects get the neutral chip. */
 const EFFECT_COLORS: Record<string, string> = {
@@ -22,13 +22,25 @@ const EFFECT_COLORS: Record<string, string> = {
   Tailwind: 'bg-teal-500/70 text-white',
 }
 
-function chip(name: string, turns: number | undefined, key: string, prefix?: string) {
-  const color = EFFECT_COLORS[name] ?? 'bg-slate-400/70 text-white'
+/** "(5)" once collapsed to an exact value, "(5-8)" while fog-of-war still
+ * leaves the effect's setter's item (an extension rock or not) unrevealed —
+ * never narrower than the belief's actual candidate range, see
+ * `NamedTurns`'s doc comment. */
+function turnsLabel(effect: NamedTurns): string {
+  if (effect.turns === undefined) return ''
+  if (effect.turnsMax !== undefined && effect.turnsMax !== effect.turns) {
+    return ` (${effect.turns}-${effect.turnsMax})`
+  }
+  return ` (${effect.turns})`
+}
+
+function chip(effect: NamedTurns, key: string, prefix?: string) {
+  const color = EFFECT_COLORS[effect.name] ?? 'bg-slate-400/70 text-white'
   return (
     <span key={key} className={`rounded-md px-2.5 py-1 text-sm font-semibold shadow-sm backdrop-blur ${color}`}>
       {prefix ? `${prefix} ` : ''}
-      {name}
-      {turns !== undefined ? ` (${turns})` : ''}
+      {effect.name}
+      {turnsLabel(effect)}
     </span>
   )
 }
@@ -38,11 +50,11 @@ export default function FieldIndicators({ view }: { view: BattleView }) {
   if (!field) return null
 
   const chips = [
-    field.weather && chip(field.weather.name, field.weather.turns, 'weather'),
-    field.terrain && chip(field.terrain.name, field.terrain.turns, 'terrain'),
-    ...field.pseudoWeathers.map((pw, i) => chip(pw.name, pw.turns, `pw-${i}`)),
-    ...(view.p1?.sideConditions ?? []).map((sc, i) => chip(sc.name, sc.turns, `p1-${i}`, 'P1')),
-    ...(view.p2?.sideConditions ?? []).map((sc, i) => chip(sc.name, sc.turns, `p2-${i}`, 'P2')),
+    field.weather && chip(field.weather, 'weather'),
+    field.terrain && chip(field.terrain, 'terrain'),
+    ...field.pseudoWeathers.map((pw, i) => chip(pw, `pw-${i}`)),
+    ...(view.p1?.sideConditions ?? []).map((sc, i) => chip(sc, `p1-${i}`, 'P1')),
+    ...(view.p2?.sideConditions ?? []).map((sc, i) => chip(sc, `p2-${i}`, 'P2')),
   ].filter(Boolean)
 
   if (chips.length === 0) return null

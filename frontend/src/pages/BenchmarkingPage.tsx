@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import * as api from '../api/client'
-import type { BenchmarkProgress, BenchmarkResponse, InferenceRow, TurnSpeedRow } from '../api/types'
+import { useBenchmark } from '../store/benchmarkStore'
+import type { InferenceRow, TurnSpeedRow } from '../api/types'
 import BenchmarkChart, { type ChartRow } from './benchmark/BenchmarkChart'
 import ProgressBar from './benchmark/ProgressBar'
 
@@ -50,32 +49,7 @@ function ChartCard({ title, rows }: { title: string; rows: ChartRow[] }) {
 }
 
 export default function BenchmarkingPage() {
-  const [data, setData] = useState<BenchmarkResponse | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [progress, setProgress] = useState<BenchmarkProgress | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const cancelRef = useRef<(() => void) | null>(null)
-
-  // Close the SSE connection if the user navigates away mid-run, rather than
-  // leaving it open (and the sweep still running server-side) indefinitely.
-  useEffect(() => () => cancelRef.current?.(), [])
-
-  const run = () => {
-    setBusy(true)
-    setError(null)
-    setProgress(null)
-    cancelRef.current = api.streamBenchmark({
-      onProgress: setProgress,
-      onResult: (result) => {
-        setData(result)
-        setBusy(false)
-      },
-      onFailed: (message) => {
-        setError(message)
-        setBusy(false)
-      },
-    })
-  }
+  const { data, busy, progress, error, run } = useBenchmark()
 
   const turnSpeedSingles = data?.turnSpeed.filter((r) => r.scenario === 'singles') ?? []
   const turnSpeedDoubles = data?.turnSpeed.filter((r) => r.scenario === 'doubles') ?? []

@@ -417,7 +417,42 @@ fn bench_pokemon_view_from_belief(
 }
 
 fn named_turns(name: String, turns: Option<u8>) -> NamedTurnsDto {
-    NamedTurnsDto { name, turns }
+    NamedTurnsDto { name, turns, turns_max: None }
+}
+
+/// Derive a display-safe range from an `Unknown<u8>` duration/turn-count.
+/// `Known(n)` is an exact `n..=n`. `Possibly(candidates)` — the common case
+/// under fog-of-war, e.g. weather's `[5, 8]` when the setter's extension rock
+/// hasn't been revealed yet — becomes the min/max of the candidate set: a
+/// real observer can't narrow it any further than that, so this must never
+/// collapse to a single value while more than one is still possible. `Not(_)`
+/// holds EXCLUDED values, not a candidate set, so there's no bounded range to
+/// report from it — falls back to `None`, same as this field's behavior
+/// before ranges existed.
+fn turn_range(turns: &Unknown<u8>) -> Option<(u8, u8)> {
+    match turns {
+        Unknown::Known(n) => Some((*n, *n)),
+        Unknown::Possibly(candidates) => {
+            let min = candidates.iter().min().copied()?;
+            let max = candidates.iter().max().copied()?;
+            Some((min, max))
+        }
+        Unknown::Not(_) => None,
+    }
+}
+
+/// Belief-driven counterpart to `named_turns`: takes an already-derived
+/// `(min, max)` range (from `turn_range`) rather than a pre-collapsed
+/// `Option<u8>`, so a `Possibly` range (e.g. "5-8 turns of weather, depending
+/// on an unrevealed rock") comes through as a range instead of silently going
+/// blank — see `NamedTurnsDto`'s doc comment. `turns_max` is omitted when the
+/// range has already collapsed to a single value.
+fn named_turns_ranged(name: String, range: Option<(u8, u8)>) -> NamedTurnsDto {
+    match range {
+        Some((min, max)) if min == max => NamedTurnsDto { name, turns: Some(min), turns_max: None },
+        Some((min, max)) => NamedTurnsDto { name, turns: Some(min), turns_max: Some(max) },
+        None => NamedTurnsDto { name, turns: None, turns_max: None },
+    }
 }
 
 // ── Tracker mode: rendering a `BattleView` from the belief alone ─────────────
@@ -546,15 +581,7 @@ fn side_view_from_belief(
         side_conditions: conditions
             .iter()
             .zip(condition_turns.iter())
-            .map(|(c, t)| {
-                named_turns(
-                    side_condition_name(c),
-                    match t {
-                        Unknown::Known(n) => Some(*n),
-                        _ => None,
-                    },
-                )
-            })
+            .map(|(c, t)| named_turns_ranged(side_condition_name(c), turn_range(t)))
             .collect(),
         slot_conditions: slot_conditions
             .iter()
@@ -564,36 +591,24 @@ fn side_view_from_belief(
 }
 
 fn field_view_from_belief(belief: &UnknownBattleState) -> FieldView {
-    let turns_of = |t: &Option<Unknown<u8>>| match t {
-        Some(Unknown::Known(n)) => Some(*n),
-        _ => None,
-    };
     FieldView {
         weather: belief.weather.as_ref().map(|w| {
-            named_turns(
+            named_turns_ranged(
                 humanize_identifier(format!("{:?}", w)),
-                turns_of(&belief.weather_turns),
+                belief.weather_turns.as_ref().and_then(turn_range),
             )
         }),
         terrain: belief.terrain.as_ref().map(|t| {
-            named_turns(
+            named_turns_ranged(
                 humanize_identifier(format!("{:?}", t)),
-                turns_of(&belief.terrain_turns),
+                belief.terrain_turns.as_ref().and_then(turn_range),
             )
         }),
         pseudo_weathers: belief
             .pseudo_weathers
             .iter()
             .zip(belief.pseudo_weather_turns.iter())
-            .map(|(pw, t)| {
-                named_turns(
-                    humanize_identifier(format!("{:?}", pw)),
-                    match t {
-                        Unknown::Known(n) => Some(*n),
-                        _ => None,
-                    },
-                )
-            })
+            .map(|(pw, t)| named_turns_ranged(humanize_identifier(format!("{:?}", pw)), turn_range(t)))
             .collect(),
     }
 }
@@ -871,7 +886,17 @@ pub fn battle_view(
                 perspective,
                 legal_items,
             ));
-            view.field = Some(field_view(battle));
+            // Field-level durations (weather/terrain/side conditions) must be
+            // masked exactly like per-mon data is: under any fog-of-war mode,
+            // read them through the belief (as a sound RANGE — see
+            // `field_view_from_belief`/`turn_range`), not straight off ground
+            // truth. `belief_battle_state` returns `None` specifically for
+            // Perfect Information (or a not-yet-Battle-phase belief), where
+            // showing ground truth is correct rather than a leak.
+            view.field = Some(match belief_battle_state(belief) {
+                Some(fog) => field_view_from_belief(fog),
+                None => field_view(battle),
+            });
             view.self_switch = battle
                 .self_switch_pending
                 .map(|(slot, _)| field_slot_dto(slot));
@@ -906,7 +931,12 @@ pub fn battle_view(
                 perspective,
                 legal_items,
             ));
-            view.field = Some(field_view(final_state));
+            // See the matching comment in the `BattleState` arm above — same
+            // belief-vs-ground-truth dispatch applies at game over.
+            view.field = Some(match belief_battle_state(belief) {
+                Some(fog) => field_view_from_belief(fog),
+                None => field_view(final_state),
+            });
             // Mirror the BattleState arm: the belief is still tracked (session.rs
             // never clears belief_p1/belief_p2 at game over), so the Predicates tab's
             // final deductions should stay visible instead of vanishing the instant
@@ -1423,6 +1453,122 @@ mod tests {
             possible_back_species,
             vec!["Charizard"],
             "P1's possibleBack under P2's perspective must list P1's own bench (Charizard), not P2's roster"
+        );
+    }
+
+    #[test]
+    fn turn_range_computes_min_max_from_unknown_u8() {
+        assert_eq!(turn_range(&Unknown::Known(5)), Some((5, 5)));
+        assert_eq!(turn_range(&Unknown::Possibly(vec![5, 8])), Some((5, 8)));
+        assert_eq!(turn_range(&Unknown::Possibly(vec![8, 5])), Some((5, 8)));
+        assert_eq!(turn_range(&Unknown::Not(vec![5])), None);
+    }
+
+    #[test]
+    fn named_turns_ranged_omits_max_only_when_collapsed() {
+        let exact = named_turns_ranged("Sandstorm".to_string(), Some((5, 5)));
+        assert_eq!(exact.turns, Some(5));
+        assert_eq!(exact.turns_max, None);
+
+        let ranged = named_turns_ranged("Sandstorm".to_string(), Some((5, 8)));
+        assert_eq!(ranged.turns, Some(5));
+        assert_eq!(ranged.turns_max, Some(8));
+
+        let unknown = named_turns_ranged("Sandstorm".to_string(), None);
+        assert_eq!(unknown.turns, None);
+        assert_eq!(unknown.turns_max, None);
+    }
+
+    /// Regression: `battle_view`'s field output (weather/terrain/side-condition
+    /// durations) must be masked through the belief exactly like per-mon data
+    /// is. Before this fix, `field_view(battle)` (ground truth) was called
+    /// UNCONDITIONALLY regardless of `perspective`/information mode, leaking
+    /// the exact remaining weather-turn count to a player who should only be
+    /// able to bound it — here, Sand Stream's base-5 duration vs. the 5-8
+    /// range a Closed Team Sheet viewer is stuck with until the setter's
+    /// item (an extension rock or not) is revealed.
+    #[test]
+    fn battle_view_masks_weather_turns_as_a_range_not_exact_ground_truth() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        // Sitrus Berry isn't an extension rock, so the real duration is
+        // exactly the base 5 — but P1 (Closed Team Sheet) can't see that.
+        let team_p2_sandstream = "Tyranitar @ Sitrus Berry\nAbility: Sand Stream\nLevel: 50\nEVs: 252 HP / 4 Atk / 252 SpD\nCareful Nature\n- Rock Slide\n- Crunch\n- Earthquake\n- Protect\n";
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1,
+            team_p2_sandstream,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        let UnknownMatchState::TeamPreview(tp_belief_p1) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                Player::P1, &preview.p1_mons, &preview.p2_mons, &pokemon_dex, 1, 1, 50, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let battle_belief_p1 = UnknownMatchState::Battle(tp_belief_p1.into_battle_state(
+            Player::P1,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
+        ));
+
+        let (next_state, events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview),
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            true,
+            16,
+            Some(Player::P1),
+        );
+        let ground_truth_weather_turns = match &next_state {
+            MatchState::BattleState(b) => b.weather_turns,
+            _ => panic!("expected BattleState"),
+        };
+        assert_eq!(ground_truth_weather_turns, Some(5));
+
+        let events = events.expect("observer set — events must be Some");
+        let inference_config = poke_rust::information::inference::InferenceConfig {
+            use_stat_points: true,
+            force_max_ivs: true,
+            ..Default::default()
+        };
+        let battle_belief_p1 = poke_rust::information::inference::apply_information(
+            battle_belief_p1,
+            &events,
+            false,
+            &pokemon_dex,
+            &move_dex,
+            &std::collections::HashMap::new(),
+            &inference_config,
+        );
+
+        let view = battle_view(&next_state, 1, 1, Some(&battle_belief_p1), Player::P1, None);
+        let field = view.field.expect("battle phase always has a field view");
+        let weather = field.weather.expect("Sand Stream should have set weather");
+        assert_eq!(weather.turns, Some(5), "lower bound should still be the base duration");
+        assert_eq!(
+            weather.turns_max,
+            Some(8),
+            "P1 hasn't seen P2's item — the belief can't rule out an extension rock, so the upper \
+             bound must show 8, not collapse to ground truth's exact 5 (the leak this test guards against)"
         );
     }
 

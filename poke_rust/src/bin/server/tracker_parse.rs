@@ -22,7 +22,13 @@
 //!   replacement) leads together — a session starts fully benched on both
 //!   sides (see `tracker.rs`'s module doc), symmetric with how every other
 //!   mid-battle switch already works. Distinct from `switch`, which replaces
-//!   one slot at a time.
+//!   one slot at a time. Each side's `leads` line parses to its own
+//!   `SimultaneousSwitch` event, but `fold_leads_and_entry_abilities` (called
+//!   once per turn, before synthesis/inference) merges a turn's leading
+//!   `p leads`/`o leads` pair into ONE combined event and folds any
+//!   immediately-following entry-ability reveal (`p1 sandstream`,
+//!   `o1 unnerve`, …) into that event's `reactions` — see its doc comment for
+//!   why this matters beyond tidiness (cross-mon ability-absence reasoning).
 //! - **HP direction from the belief.** `[xx]%`/`[xx]hp` tokens don't say
 //!   whether they're damage or healing — that's inferred by comparing against
 //!   the slot's currently-believed HP. Equal-to-current is emitted as `SetHp`
@@ -30,7 +36,7 @@
 //! - Guaranteed-effect synthesis (Intimidate's `-1 atk`, Swords Dance's
 //!   `+2 atk`, weather from Drizzle, …) lives in `tracker_effects.rs` and is
 //!   applied as a post-processing pass over the events this module builds —
-//!   see `crate::tracker_effects::augment_with_guaranteed_effects`.
+//!   see `crate::tracker_effects::augment_turn`.
 
 use std::collections::HashMap;
 
@@ -80,6 +86,81 @@ pub fn parse_tracker_text(
         out.push(parse_line(&tokens, line_no, belief, move_dex, pokemon_dex)?);
     }
     Ok(out)
+}
+
+/// Fold one turn's raw parsed events into their final nested shape before
+/// synthesis/inference sees them: every `SimultaneousSwitch` event in the
+/// turn's leading contiguous run (i.e. the `leads` line(s) at the very start
+/// of the turn — `p leads ...`/`o leads ...`, in either order) is merged into
+/// a SINGLE combined event covering every entering mon on both sides, and any
+/// bare `AbilityRevealed` line immediately following that run, addressed to
+/// one of the just-entered slots, is moved from its own top-level line into
+/// the combined event's `reactions` instead of staying an unrelated sibling.
+///
+/// This matters for more than just tidiness: `EventKind::SimultaneousSwitch`'s
+/// doc comment says ability activations "are nested in this event's
+/// `reactions`... exactly as the simulator processes them", and
+/// `pass1_ability_absence_inference` (`information/inference.rs`) reads
+/// exactly that field to reason across every mon that entered together (e.g.
+/// "no weather change appeared, and this is the only entering mon that COULD
+/// have a weather setter, so it doesn't have one"). Before this fold, `p
+/// leads ...`/`o leads ...` produced two independent `SimultaneousSwitch`
+/// events (one per side) with empty `reactions`, so that cross-mon reasoning
+/// only ever saw half the field; and a following `p1 sandstream` line stayed
+/// a disconnected sibling event instead of the nested reveal the engine
+/// expects, silently discarding the entry-ability bookkeeping the design doc
+/// describes.
+///
+/// The fold stops (and leaves everything after it untouched) at the first
+/// event that isn't itself a `SimultaneousSwitch` or a qualifying
+/// `AbilityRevealed` — a move, an ordinary `switch`, etc. — so an unrelated,
+/// later same-turn ability reveal for one of the leads' slots (from a
+/// completely different trigger) is never mistakenly folded in as an entry
+/// effect.
+pub fn fold_leads_and_entry_abilities(events: Vec<InformationEvent>) -> Vec<InformationEvent> {
+    let mut result: Vec<InformationEvent> = Vec::with_capacity(events.len());
+    let mut merged_switches: Vec<SwitchState> = Vec::new();
+    let mut still_entered: std::collections::HashSet<FieldSlot> = std::collections::HashSet::new();
+    let mut combined_reactions: Vec<InformationEvent> = Vec::new();
+    let mut combined_index: Option<usize> = None;
+    let mut in_leads_block = false;
+
+    for ev in events {
+        match ev.kind {
+            EventKind::SimultaneousSwitch { switches } if combined_index.is_none() || in_leads_block => {
+                still_entered.extend(switches.iter().map(|sw| sw.slot));
+                merged_switches.extend(switches);
+                if combined_index.is_none() {
+                    combined_index = Some(result.len());
+                    // Placeholder — filled in once the whole leading run is known.
+                    result.push(InformationEvent {
+                        kind: EventKind::SimultaneousSwitch { switches: Vec::new() },
+                        reactions: Vec::new(),
+                    });
+                }
+                in_leads_block = true;
+            }
+            EventKind::AbilityRevealed { slot, ability } if in_leads_block && still_entered.contains(&slot) => {
+                combined_reactions.push(InformationEvent {
+                    kind: EventKind::AbilityRevealed { slot, ability },
+                    reactions: ev.reactions,
+                });
+            }
+            _ => {
+                in_leads_block = false;
+                result.push(ev);
+            }
+        }
+    }
+
+    if let Some(i) = combined_index {
+        result[i] = InformationEvent {
+            kind: EventKind::SimultaneousSwitch { switches: merged_switches },
+            reactions: combined_reactions,
+        };
+    }
+
+    result
 }
 
 // ── Identifier normalization ────────────────────────────────────────────────
@@ -363,6 +444,17 @@ fn volatile_from_word(word: &str) -> Option<VolatileStatus> {
         "gastroacid" => Some(VolatileStatus::GastroAcid),
         "sparklingaria" => Some(VolatileStatus::SparklingAria),
         "glaiverush" => Some(VolatileStatus::GlaiveRush),
+        "charge" | "charged" => Some(VolatileStatus::Charge),
+        "defensecurl" | "defensecurled" => Some(VolatileStatus::DefenseCurl),
+        "helpinghand" => Some(VolatileStatus::HelpingHand),
+        "powertrick" => Some(VolatileStatus::PowerTrick),
+        "forestscurse" => Some(VolatileStatus::ForestsCurse),
+        // Bide, Sky Drop, Spotlight, Trick-or-Treat, Nightmare, and Power Shift
+        // are all `isNonstandard: "Past"`/`"Unobtainable"` in the current move
+        // dex — not legal in Pokémon Champions, so a real tracker session can
+        // never actually need these words; intentionally left unmapped rather
+        // than building grammar for content that can't occur (see CLAUDE.md's
+        // "implement newest-generation behaviour" rule).
         _ => None,
     }
 }
@@ -693,7 +785,18 @@ fn parse_line(
     }
 
     // ── failspec (no move context) ──────────────────────────────────────
-    if let Some(reason) = cant_reason_from_word(&action_n) {
+    // Bare TWO-token lines only (`[slot] [reason]`, matching
+    // `cant_reason_from_word`'s own documented convention). Several
+    // cant-reason words are ALSO real move names (Taunt, Disable, Encore,
+    // Confusion, Attract, Throat Chop, Torment, Focus Punch, Gravity, Heal
+    // Block) — a longer line (target/effect tokens follow) means the word is
+    // being used AS that move, not as a cant-reason; falling through to the
+    // move dispatch below preserves those extra tokens instead of silently
+    // discarding them (the bug this guard fixes: `p1 taunt o1` used to parse
+    // as `Cant{Taunt}`, dropping the `o1` target and the move usage entirely).
+    if tokens.len() == 2
+        && let Some(reason) = cant_reason_from_word(&action_n)
+    {
         return Ok(TrackerLine::Event(InformationEvent {
             kind: EventKind::Cant { slot, reason },
             reactions: Vec::new(),
@@ -1148,6 +1251,37 @@ mod tests {
         }
     }
 
+    /// Regression: several `cant_reason_from_word` words (Taunt, Disable,
+    /// Encore, Confusion, Attract, Throat Chop, Torment, Focus Punch,
+    /// Gravity, Heal Block) are ALSO real move names. A bare two-token line
+    /// (`p1 taunt`) must still parse as the cant-reason (unchanged); a longer
+    /// line with a target token (`p1 taunt o1`) must parse as the MOVE being
+    /// used, not silently drop the target and misreport a "couldn't act".
+    #[test]
+    fn move_name_cant_reason_collision_disambiguated_by_line_length() {
+        let belief = test_belief();
+
+        let bare = parse_tracker_text("p1 taunt", &belief, move_dex(), pokemon_dex()).unwrap();
+        assert!(matches!(
+            &bare[0],
+            TrackerLine::Event(InformationEvent {
+                kind: EventKind::Cant { reason: CantReason::Taunt, .. },
+                ..
+            })
+        ));
+
+        let with_target =
+            parse_tracker_text("p1 taunt o1", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = &with_target[0] else {
+            panic!("expected an event line")
+        };
+        let EventKind::MoveUsed { move_used, targets, .. } = &ev.kind else {
+            panic!("expected MoveUsed, got {:?}", ev.kind)
+        };
+        assert_eq!(*move_used, PokemonMove::Taunt);
+        assert_eq!(targets, &[o1()]);
+    }
+
     #[test]
     fn switch_and_ability_and_item_lines() {
         let belief = test_belief();
@@ -1229,6 +1363,150 @@ mod tests {
             }
         );
         assert!(matches!(switches[1].hp, PokemonHP::Percent(100)));
+    }
+
+    #[test]
+    fn fold_leads_and_entry_abilities_merges_both_sides_and_nests_entry_abilities() {
+        // The bug report's exact requested syntax: both sides' leads plus
+        // their entry abilities, four consecutive lines with no other event
+        // in between.
+        let belief = test_belief();
+        let lines = parse_tracker_text(
+            "p leads tyranitar lucario\no leads aerodactyl charizard\np1 sandstream\no1 unnerve",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        let events: Vec<InformationEvent> = lines
+            .into_iter()
+            .map(|l| match l {
+                TrackerLine::Event(ev) => ev,
+                TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
+            })
+            .collect();
+
+        let folded = fold_leads_and_entry_abilities(events);
+        assert_eq!(
+            folded.len(),
+            1,
+            "leads (both sides) + their entry abilities should collapse into one event"
+        );
+        let EventKind::SimultaneousSwitch { switches } = &folded[0].kind else {
+            panic!("expected SimultaneousSwitch, got {:?}", folded[0].kind)
+        };
+        assert_eq!(switches.len(), 4);
+        assert_eq!(switches[0].species, Species::Tyranitar);
+        assert_eq!(switches[0].slot, p1());
+        assert_eq!(switches[1].species, Species::Lucario);
+        assert_eq!(
+            switches[1].slot,
+            FieldSlot { player: Player::P1, slot_index: 1 }
+        );
+        assert_eq!(switches[2].species, Species::Aerodactyl);
+        assert_eq!(switches[2].slot, o1());
+        assert_eq!(switches[3].species, Species::Charizard);
+
+        let reactions = &folded[0].reactions;
+        assert_eq!(reactions.len(), 2, "both entry-ability lines should nest as reactions");
+        assert!(matches!(
+            &reactions[0].kind,
+            EventKind::AbilityRevealed { slot, ability: Ability::SandStream } if *slot == p1()
+        ));
+        assert!(matches!(
+            &reactions[1].kind,
+            EventKind::AbilityRevealed { slot, ability: Ability::Unnerve } if *slot == o1()
+        ));
+    }
+
+    #[test]
+    fn fold_leaves_unrelated_later_ability_reveal_untouched() {
+        // `o1` DID enter via `o leads garchomp` (so it's a `still_entered`
+        // slot), but its ability reveal appears AFTER a move has already
+        // happened this same turn — that breaks contiguity with the leads
+        // block, so it's unrelated to the entry effect and must stay its own
+        // top-level event, not get swept into the leads event's reactions.
+        let belief = test_belief();
+        let lines = parse_tracker_text(
+            "p leads pikachu\no leads garchomp\np1 thunderbolt o1\no1 flashfire",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        let events: Vec<InformationEvent> = lines
+            .into_iter()
+            .map(|l| match l {
+                TrackerLine::Event(ev) => ev,
+                TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
+            })
+            .collect();
+
+        let folded = fold_leads_and_entry_abilities(events);
+        assert_eq!(folded.len(), 3, "the move and the later ability reveal stay top-level");
+        assert!(matches!(folded[0].kind, EventKind::SimultaneousSwitch { .. }));
+        assert!(matches!(folded[1].kind, EventKind::MoveUsed { .. }));
+        assert!(matches!(
+            folded[2].kind,
+            EventKind::AbilityRevealed { ability: Ability::FlashFire, .. }
+        ));
+        assert!(folded[0].reactions.is_empty(), "leads merged from both sides, but no ability lines to fold");
+    }
+
+    #[test]
+    fn folded_leads_with_entry_ability_apply_to_inference_without_contradiction() {
+        // A completely fresh, fully-benched belief — mirrors how
+        // `create_tracker` actually seeds a real session (see `tracker.rs`'s
+        // module doc: "a session begins fully benched on both sides"),
+        // exercising the fold's output through the full
+        // fold -> augment -> apply_information pipeline end to end.
+        let mut belief = test_belief();
+        belief.p1_active_mons = Vec::new();
+        belief.p2_active_mons = Vec::new();
+
+        let lines = parse_tracker_text(
+            "p leads tyranitar\no leads gyarados\np1 sandstream\nendofturn",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+
+        let mut turn_events = Vec::new();
+        for line in lines {
+            match line {
+                TrackerLine::Event(ev) => turn_events.push(ev),
+                TrackerLine::EndOfTurn => turn_events.push(leaf(EventKind::EndOfTurn)),
+            }
+        }
+
+        let folded = fold_leads_and_entry_abilities(turn_events);
+        // The combined leads event, plus the trailing EndOfTurn marker.
+        assert_eq!(folded.len(), 2);
+
+        let augmented: Vec<InformationEvent> = folded
+            .into_iter()
+            .map(|e| augment_with_guaranteed_effects(e, &belief, move_dex(), pokemon_dex()))
+            .collect();
+
+        let config = InferenceConfig::default();
+        let result = apply_information(
+            UnknownMatchState::Battle(belief),
+            &augmented,
+            false,
+            pokemon_dex(),
+            move_dex(),
+            ability_dex(),
+            &config,
+        );
+        let UnknownMatchState::Battle(next) = result else {
+            panic!("expected Battle variant")
+        };
+        assert_eq!(next.weather, Some(Weather::Sandstorm));
+        assert!(matches!(
+            &next.p1_active_mons[0].possible_abilities,
+            poke_rust::information::unknowns::Unknown::Known(a) if *a == Ability::SandStream
+        ));
     }
 
     // ── mega: optional species / suffix shorthand ────────────────────────────
@@ -1317,6 +1595,81 @@ mod tests {
                 stages,
             } if target == p1() && stages > 0
         )));
+    }
+
+    /// Regression for the "volatiles should use default time amounts, AND be
+    /// decremented on endofturn" gap: Syrup Bomb's `syrupbomb` volatile (a
+    /// real 3-turn volatile with no item-based extension, per `volatile_timer`
+    /// in `inference.rs`) must seed at exactly 3 turns when applied and count
+    /// down 3 -> 2 -> 1 -> removed across three EndOfTurns, matching the real
+    /// duration exactly (a real observer can count this precisely — no
+    /// ambiguity to range over, unlike weather). Deliberately NOT Taunt/
+    /// Disable/Encore/ThroatChop — those words collide with
+    /// `cant_reason_from_word` (checked before move dispatch in `parse_line`),
+    /// a separate, pre-existing grammar ambiguity outside this fix's scope.
+    #[test]
+    fn syrup_bomb_volatile_seeds_and_decrements_across_end_of_turns() {
+        let belief = test_belief();
+        let lines =
+            parse_tracker_text("p1 syrupbomb o1\nendofturn", &belief, move_dex(), pokemon_dex())
+                .unwrap();
+        let mut events = Vec::new();
+        for line in lines {
+            match line {
+                TrackerLine::Event(ev) => {
+                    events.push(augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex()))
+                }
+                TrackerLine::EndOfTurn => events.push(leaf(EventKind::EndOfTurn)),
+            }
+        }
+        let config = InferenceConfig::default();
+        let mut state = apply_information(
+            UnknownMatchState::Battle(belief),
+            &events,
+            false,
+            pokemon_dex(),
+            move_dex(),
+            ability_dex(),
+            &config,
+        );
+
+        let syrup_bomb_turns = |state: &UnknownMatchState| -> Option<u16> {
+            let UnknownMatchState::Battle(b) = state else {
+                panic!("expected Battle variant")
+            };
+            b.p2_active_mons[0].volatiles.iter().find_map(|v| match v {
+                poke_rust::state::pokemon::VolatileStatusState::TurnStatus(
+                    poke_rust::state::dex_data::VolatileStatus::SyrupBomb,
+                    turns,
+                ) => Some(*turns),
+                _ => None,
+            })
+        };
+
+        // Syrup Bomb seeds at 3, but the SAME turn's own `endofturn` (already
+        // included above, matching how a real turn resolves) immediately
+        // decrements it once — 3 -> 2 — exactly mirroring the concrete
+        // simulator's own `syrup_bomb_drops_speed_each_turn_for_3_turns` test
+        // (seed 3, three total EOT decrements to reach removal).
+        assert_eq!(
+            syrup_bomb_turns(&state),
+            Some(2),
+            "Syrup Bomb's volatile should have decremented once by its own use-turn's endofturn"
+        );
+
+        // Two more bare EndOfTurns: 2 -> 1 -> removed (three EOTs total since seeding).
+        for expected in [Some(1), None] {
+            state = apply_information(
+                state,
+                &[leaf(EventKind::EndOfTurn)],
+                false,
+                pokemon_dex(),
+                move_dex(),
+                ability_dex(),
+                &config,
+            );
+            assert_eq!(syrup_bomb_turns(&state), expected);
+        }
     }
 
     // ── full pipeline: parse -> augment -> apply_information, no panic ──────

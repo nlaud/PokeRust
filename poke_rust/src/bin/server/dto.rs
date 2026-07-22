@@ -50,12 +50,23 @@ pub struct VolatileDto {
     pub turns: Option<u16>,
 }
 
+/// A field/side effect's name plus how long it has left. Under fog-of-war,
+/// the exact remaining count is frequently not knowable (e.g. weather's base
+/// 5 turns vs. 8 with an extension rock the setter's item hasn't revealed) —
+/// `turns` is always the lower bound (or the exact value once collapsed) and
+/// `turns_max` is the upper bound, present ONLY when it differs from `turns`.
+/// A real observer never gets to see more precision than this, so the
+/// belief-driven mapping (`mapping::field_view_from_belief` et al.) must
+/// never report a narrower range than the fog-of-war candidate set actually
+/// allows — see `mapping::turn_range`.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedTurnsDto {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turns: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns_max: Option<u8>,
 }
 
 #[derive(Serialize, Clone)]
