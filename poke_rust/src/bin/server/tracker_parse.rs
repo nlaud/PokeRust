@@ -768,6 +768,29 @@ fn parse_line(
         }));
     }
 
+    // Explicit no-action marker for an empty/fainted slot. The simulator has
+    // no dedicated Pass information event, so use the generic Cant reason:
+    // inference treats it as an action-slot commitment with no extra claim.
+    if action_n == "pass" {
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::Cant {
+                slot,
+                reason: CantReason::Other,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+
+    // Standalone HP observation for residual/end-of-turn changes that have no
+    // enclosing move line: `p1 hp 88hp` / `o1 hp 72%`.
+    if action_n == "hp" {
+        let hp_tok = tokens
+            .get(2)
+            .and_then(|token| parse_hp_token(token))
+            .ok_or_else(|| err(line_no, "hp requires a value such as 88hp or 72%"))?;
+        return Ok(TrackerLine::Event(hp_event(belief, slot, hp_tok)));
+    }
+
     // ── item verbs: `p1 loses leftovers`, `p1 gains choicescarf`, bare `p1 leftovers` ──
     if let Some(verb) = item_verb_from_word(&action_n) {
         let item_tok = tokens
@@ -1054,6 +1077,8 @@ mod tests {
     use poke_rust::information::unknowns::UnknownMatchState;
     use poke_rust::state::dex_data::{parse_ability_dex, parse_move_dex, parse_pokemon_dex};
     use std::sync::OnceLock;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     static MOVE_DEX: OnceLock<HashMap<PokemonMove, MoveData>> = OnceLock::new();
@@ -1937,5 +1962,94 @@ mod tests {
         let belief = test_belief();
         let next = run_turn("p1 iciclespear o1 70% o1 40%\nendofturn", belief);
         assert!(matches!(next.p2_active_mons[0].hp, PokemonHP::Percent(40)));
+    }
+
+    fn randomized_case(input: &str, rng: &mut StdRng) -> String {
+        input
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphabetic() && rng.gen_bool(0.5) {
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch.to_ascii_lowercase()
+                }
+            })
+            .collect()
+    }
+
+    /// Property-style grammar sweep. Each seed cycles through every major
+    /// line family while randomizing case, aliases, values, and qualifiers;
+    /// failures report the exact seed and generated text for replay.
+    #[test]
+    fn randomized_tracker_grammar_parses_supported_surface_forms() {
+        let iterations = std::env::var("POKERUST_TRACKER_GRAMMAR_FUZZ_ITERS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(512);
+        let seed_start = std::env::var("POKERUST_TRACKER_GRAMMAR_FUZZ_SEED_START")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let belief = test_belief();
+
+        for seed in seed_start..seed_start.saturating_add(iterations) {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let family = seed % 10;
+            let (text, check): (String, fn(&TrackerLine) -> bool) = match family {
+                0 => {
+                    let hp = rng.gen_range(1..100);
+                    (
+                        format!("p1 Thunder-Bolt o1 {hp}% o1 {}", if rng.gen_bool(0.5) { "def-1" } else { "-1def" }),
+                        |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::MoveUsed { move_used: PokemonMove::Thunderbolt, .. }, .. })),
+                    )
+                }
+                1 => (
+                    format!("o1 {} garchomp 73%", ["switch", "switchin", "sendout"][rng.gen_range(0..3)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Switch(_), .. })),
+                ),
+                2 => (
+                    "p leads pikachu charizard".to_string(),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::SimultaneousSwitch { switches }, .. }) if switches.len() == 2),
+                ),
+                3 => (
+                    format!("weather {}", ["rain", "sun", "sand", "snow", "clear"][rng.gen_range(0..5)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::WeatherChanged { .. }, .. })),
+                ),
+                4 => (
+                    format!("terrain {}", ["electric", "grassy", "misty", "psychic", "none"][rng.gen_range(0..5)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::TerrainChanged { .. }, .. })),
+                ),
+                5 => (
+                    format!("p1 {} electric", ["tera", "terastallize", "terastallized"][rng.gen_range(0..3)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Terastallization { .. }, .. })),
+                ),
+                6 => (
+                    format!("o1 {} sitrus", ["loses", "consumes", "ate", "gains"][rng.gen_range(0..4)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::ItemLost { .. } | EventKind::ItemGained { .. }, .. })),
+                ),
+                7 => (
+                    format!("p1 hp {}hp", rng.gen_range(0..151)),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::DamageDealt { .. } | EventKind::Healed { .. } | EventKind::SetHp { .. }, .. })),
+                ),
+                8 => (
+                    format!("o1 {}", ["flinch", "fullpara", "sleep", "taunt", "encore", "pass"][rng.gen_range(0..6)]),
+                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Cant { .. }, .. })),
+                ),
+                _ => (
+                    ["endofturn", "eot"][rng.gen_range(0..2)].to_string(),
+                    |line| matches!(line, TrackerLine::EndOfTurn),
+                ),
+            };
+            let text = randomized_case(&text, &mut rng);
+            let parsed = parse_tracker_text(&text, &belief, move_dex(), pokemon_dex())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "grammar fuzz seed={seed} family={family} failed at line {}: {}\n{text}",
+                        error.line, error.message
+                    )
+                });
+            assert_eq!(parsed.len(), 1, "grammar fuzz seed={seed}: {text}");
+            assert!(check(&parsed[0]), "grammar fuzz seed={seed}: {text}\n{:#?}", parsed[0]);
+        }
     }
 }

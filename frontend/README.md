@@ -87,6 +87,205 @@ scope and known simplifications (e.g. every targeted move needs an explicit
 target slot; guaranteed effects cover a starter set of abilities/moves, not
 the full dex yet).
 
+### Tracker text grammar
+
+Tracker input is line-oriented. A submission contains one or more complete
+turns, and every turn ends with `endofturn` (or `eot`). Blank lines and lines
+whose first non-whitespace character is `#` are ignored. Errors report the
+1-based input line; the server applies the whole submission to a scratch belief
+and commits nothing if any line or turn fails.
+
+Names and keywords are case-insensitive and ignore punctuation. For example,
+`SwordsDance`, `swords-dance`, and `swords_dance` are equivalent. Whitespace
+still separates tokens, so multiword names must be joined (`rockyhelmet`, not
+`rocky helmet`; `mr-mime`, not `mr mime`). A complete normalized dex name works
+for any species, move, ability, or item; the aliases below are conveniences.
+
+```text
+submission  := turn+
+turn        := (event-line | blank-line | comment-line)* ("endofturn" | "eot")
+slot        := ("p" | "o") [positive-integer]
+hpspec      := <unsigned-integer>("%" | "hp")
+boostspec   := <stat><signed-integer> | <signed-integer><stat>
+```
+
+`p` is the tracker owner's side and `o` is the opponent. Slot numbers are
+1-based from left to right; an omitted number means slot 1. Thus `p`, `p1`,
+`o`, and `o1` are valid, while doubles also uses `p2` and `o2`.
+
+Every occupied active slot on both sides must have an action in each ordinary
+turn: a move, switch, cant reason, `mustrecharge`, or explicit `pass`. A slot
+does not need another action if it was knocked out before acting or the battle
+ended. A replacement-only turn requires switches only for slots whose fainted
+occupants have healthy reserves; an already fainted slot with no reserve can
+also be omitted.
+
+#### Event lines
+
+| Form | Meaning |
+|---|---|
+| `[p\|o] leads <species>...` | Send out an entire side, left to right. Use `p leads ...`, not separate lead lines; any digit on `p1`/`o1` is ignored. Opening ability reveals should immediately follow the lead lines. |
+| `[slot] switch <species> [hpspec]` | Switch one slot. `switchin` and `sendout` are aliases. HP defaults to the known value for your roster and 100% for a newly seen opponent. |
+| `[slot] mega [species-or-suffix]` | Mega Evolve. `megaevolve` and `megaevolution` are aliases. The form may be omitted only if the active species is known and has exactly one Mega; a suffix such as `y` disambiguates Charizard. |
+| `[slot] tera <type>` | Terastallize into a type. `terastallize` and `terastallized` are aliases. |
+| `[slot] <move> [target-or-effect]...` | Record a move and its observed results; see “Move lines” below. |
+| `[slot] <ability>` | Reveal an ability, such as `o1 intimidate`. |
+| `[slot] <item>` | Reveal a held item without losing it, such as `o1 leftovers`. |
+| `[slot] <item-verb> <item>` | Record an item being lost, consumed, or gained; see the item verbs below. |
+| `[slot] hp <hpspec>` | Record HP outside a move line, usually residual damage or healing. |
+| `[slot] <cant-reason>` | Record why the slot could not act. This form must contain exactly two tokens. |
+| `[slot] mustrecharge` | Record the move-created must-recharge state. This is distinct from the `recharge` cant reason on the following turn. |
+| `[slot] pass` | Explicitly record no action, including a skipped action after the battle has already ended. |
+| `weather <weather>` | Set or clear the weather. |
+| `terrain <terrain>` | Set or clear the terrain. |
+
+The two sides' leading `leads` lines at the start of a turn are combined into
+one simultaneous switch event. Ability lines for those entrants that
+immediately follow are nested into that event, preserving entry-ability and
+ability-absence inference.
+
+#### Move lines
+
+A move line starts with its user and move. Every targeted move must name each
+target explicitly, even in singles:
+
+```text
+p1 thunderbolt o1 45% par
+p1 rockslide o1 62% o2 miss
+o1 tackle p1 88hp p1 helmet o1 91%
+```
+
+Reading left to right, a slot token changes the current attachment point. Each
+following effect belongs to the most recently named slot until another slot is
+seen. Naming a non-user slot also adds it to the move's target list. Repeating a
+slot is allowed, which is how multi-hit HP readings are represented.
+
+| Effect token | Accepted forms |
+|---|---|
+| Critical hit | `crit` |
+| Miss | `miss`, `missed` |
+| Immunity | `immune` |
+| Protection/block | `block`, `blocked` |
+| Whole-move failure | `fail`, `failed` |
+| HP after the effect | `45%` for masked percent HP, or `97hp` for exact HP |
+| Stat change | `atk+1`, `+1atk`, `spe-2`, `-2spe`, and the stat aliases below |
+| Major status inflicted | Any status word below |
+| Volatile started | Any volatile word below |
+| Ability revealed | Any complete normalized ability name |
+| Item revealed | Any complete normalized item name or item alias |
+| Item changed | An item verb followed by an item, e.g. `ate sitrus` |
+
+An HP token is classified by comparing it with that slot's believed HP at the
+start of the submitted batch: lower is damage, higher is healing, and unchanged
+is a direct HP set. If the old and new representations differ (exact HP versus
+percent) or no old reading exists, it is treated as damage. Own-side readings
+should normally use exact `hp`; opponent readings should normally use `%`. If
+HP direction in a later turn depends on an earlier turn's new value, submit the
+turns separately so the second parse sees the updated belief.
+
+`miss`, `immune`, or `blocked` suppresses guaranteed target effects for that
+target. `fail` suppresses guaranteed effects for the entire move. Chance-based
+effects must be typed when observed: for example, include `par` when
+Thunderbolt actually paralyzes, but omit it otherwise.
+
+#### Accepted words and aliases
+
+- Stats: `atk`/`attack`; `def`/`defense`/`defence`;
+  `spa`/`spatk`/`spattack`/`specialattack`;
+  `spd`/`spdef`/`spdefense`/`specialdefense`; `spe`/`speed`;
+  `acc`/`accuracy`; `eva`/`evasion`/`evasiveness`.
+
+- Major statuses: burn (`brn`, `burn`, `burned`); poison (`psn`, `poison`,
+  `poisoned`); toxic poison (`tox`, `badpoison`, `badlypoisoned`, `toxic`);
+  paralysis (`par`, `para`, `paralyzed`, `paralysis`, `paralysed`); sleep
+  (`slp`, `sleep`, `asleep`); freeze (`frz`, `frozen`, `freeze`).
+
+- Weather: rain (`rain`, `raindance`, `drizzle`); heavy rain (`heavyrain`,
+  `primordialsea`); sandstorm (`sand`, `sandstorm`); snow (`snow`, `hail`);
+  sun (`sun`, `sunnyday`, `sunny`, `drought`); extreme sun (`extremesun`,
+  `desolateland`, `harshsunlight`); strong winds (`strongwinds`,
+  `deltastream`). Use `none` or `clear` to remove weather.
+
+- Terrain: Electric, Grassy, Misty, and Psychic accept either the short name
+  (`electric`) or full name (`electricterrain`). Use `none` or `clear` to
+  remove terrain.
+
+- Item verbs: lost (`loses`, `lost`, `knockedoff`); consumed (`consumes`,
+  `consumed`, `ate`, `eats`, `used`); gained (`gains`, `gained`, `tricked`,
+  `switcheroo`, `recycles`).
+
+- Item aliases: `sitrus`, `lum`, `chesto`, `lefties`/`levs`, `helmet`, `lo`,
+  `scarf`, `specs`, `band`, `boots`, `wp`, `av`, and `sash` expand to Sitrus
+  Berry, Lum Berry, Chesto Berry, Leftovers, Rocky Helmet, Life Orb, the three
+  Choice items, Heavy-Duty Boots, Weakness Policy, Assault Vest, and Focus
+  Sash respectively.
+
+- Cant reasons: `flinch`/`flinched`; `fullpara`/`fullyparalyzed`/
+  `fullparalysis`/`fullyparalysed`; `sleep`/`asleep`/`slp`;
+  `frozen`/`frz`/`freeze`; `recharge`/`mustrecharge`/`recharging`;
+  `taunt`/`taunted`; `disable`/`disabled`; `confusion`/`confused`;
+  `imprison`/`imprisoned`; `attract`/`infatuated`/`infatuation`;
+  `bound`/`trapped`; `throatchop`/`throatchopped`; `torment`/`tormented`;
+  `focuspunch`; `gravity`; `healblock`; `encore`/`encored`; `skydrop`; and
+  `beakblast`.
+
+- Volatiles: `confusion`/`confused`, `leechseed`/`seeded`,
+  `taunt`/`taunted`, `flashfire`, `focusenergy`, `aquaring`,
+  `attract`/`infatuated`, `curse`/`cursed`, `torment`/`tormented`, `yawn`,
+  `saltcure`, `tarshot`, `minimize`/`minimized`, `ingrain`, `magnetrise`,
+  `protect`/`protected`, `endure`/`enduring`, `kingsshield`, `banefulbunker`,
+  `spikyshield`, `silktrap`, `obstruct`, `burningbulwark`, `destinybond`,
+  `grudge`, `embargo`, `healblock`, `imprison`, `electrify`, `powder`,
+  `syrupbomb`, `telekinesis`, `smackdown`, `uproar`, `roost`, `rage`,
+  `ragepowder`, `followme`, `magiccoat`, `snatch`, `laserfocus`,
+  `miracleeye`, `foresight`, `octolock`, `noretreat`, `gastroacid`,
+  `sparklingaria`, `glaiverush`, `charge`/`charged`,
+  `defensecurl`/`defensecurled`, `helpinghand`, `powertrick`, and
+  `forestscurse`.
+
+#### Effects filled in automatically
+
+Users type observations, while the server adds consequences guaranteed by
+those observations:
+
+- A revealed supported entry ability adds its deterministic reaction:
+  Intimidate, weather/terrain setters, Intrepid Sword, Dauntless Shield,
+  unambiguous Download, and unambiguous Trace. The ordinary ability reveal
+  itself must still be typed. Mega Evolution automatically reveals its Mega
+  form's fixed ability and applies the same reactions.
+- A move adds its always-on self boost and all structured 100%-chance move-dex
+  effects, including guaranteed boosts, status, weather, terrain, and side
+  conditions. Random secondaries are never guessed.
+- Any recorded HP value of zero adds the corresponding faint event.
+
+Recoil, drain, reactive item/ability effects, and other observed consequences
+that are not guaranteed by the structured move data must be written explicitly.
+
+#### Phase-1 limits
+
+The grammar currently represents starts of payload-free volatiles only. It
+cannot directly express payload-bearing volatiles such as Disable/Locked Move/
+Choice Lock with their move, or Substitute with its HP. Slot-condition payloads
+such as Wish, Future Sight, and Doom Desire are not synthesized. There are also
+no general-purpose forms yet for curing statuses, ending volatiles or side
+conditions, form changes, Transform, or Illusion ending. Unrecognized input is
+rejected rather than guessed.
+
+Tracker fuzz coverage lives in the server binary tests. The default sweep runs
+deterministic full battles through simulator events -> tracker text -> parser ->
+the production submission pipeline. Seeds are replayable and scalable:
+
+```sh
+cd poke_rust
+cargo test --bin server randomized_tracker_text_round_trips_do_not_contradict
+POKERUST_TRACKER_FUZZ_ITERS=1000 cargo test --release --bin server randomized_tracker_text_round_trips_do_not_contradict -- --nocapture
+POKERUST_TRACKER_FUZZ_SEED_START=42 POKERUST_TRACKER_FUZZ_ITERS=1 POKERUST_TRACKER_FUZZ_REPLAY=1 cargo test --release --bin server randomized_tracker_text_round_trips_do_not_contradict -- --nocapture
+```
+
+The stronger truth-subset oracle is opt-in, matching the inference fuzz suite
+while its shared inference-engine over-narrowing families remain open:
+`cargo test --release --bin server -- --ignored randomized_tracker_text_beliefs_stay_sound_subset`.
+
 ## Notes
 
 - **Hotseat model**: the server never holds half a turn. The frontend collects

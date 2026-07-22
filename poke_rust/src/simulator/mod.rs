@@ -17,9 +17,7 @@ use crate::state::dex_data::{
 };
 use crate::state::pokemon::{PokemonState, parse_team_sheet_str};
 use colored::Colorize;
-use rand::{Rng, RngCore};
-#[cfg(test)]
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::collections::HashMap;
 pub mod helpers;
@@ -34,10 +32,8 @@ thread_local! {
 
 /// Restores the previous thread-local sampled-trajectory RNG when dropped, even
 /// when a test unwinds through a simulator panic.
-#[cfg(test)]
 pub(crate) struct SampleRngGuard(Option<StdRng>);
 
-#[cfg(test)]
 impl Drop for SampleRngGuard {
     fn drop(&mut self) {
         SAMPLE_RNG_OVERRIDE.with(|slot| {
@@ -48,7 +44,6 @@ impl Drop for SampleRngGuard {
 
 /// Make all simulator-internal random choices on this thread deterministic
 /// until the returned guard is dropped.
-#[cfg(test)]
 pub(crate) fn scoped_sample_rng(seed: u64) -> SampleRngGuard {
     let previous =
         SAMPLE_RNG_OVERRIDE.with(|slot| slot.borrow_mut().replace(StdRng::seed_from_u64(seed)));
@@ -11074,6 +11069,36 @@ pub fn sample_turn(
         None => ev,
     };
     (st, ev, p)
+}
+
+/// Deterministic counterpart to [`sample_turn_raw`] for reproducible external
+/// fuzz and integration tests. Every random choice made while resolving this
+/// turn is drawn from `seed`; production callers should use [`sample_turn`] or
+/// [`sample_turn_raw`] instead.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn sample_turn_raw_seeded(
+    seed: u64,
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    consider_crit: bool,
+    damage_rolls: u8,
+    observer: Option<Player>,
+) -> (MatchState, Option<Vec<InformationEvent>>, f64) {
+    let _guard = scoped_sample_rng(seed);
+    sample_turn_raw(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        consider_crit,
+        damage_rolls,
+        observer,
+    )
 }
 
 /// Like [`sample_turn`], but returns the **raw** (unmasked) event stream instead of

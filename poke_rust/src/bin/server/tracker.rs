@@ -48,6 +48,7 @@ use poke_rust::state::battle::{FieldSlot, Player};
 use crate::dto::*;
 use crate::mapping;
 use crate::routes::AppState;
+use crate::session::Dexes;
 use crate::tracker_effects::augment_turn;
 use crate::tracker_parse::{ParseError, TrackerLine, fold_leads_and_entry_abilities, parse_tracker_text};
 
@@ -58,6 +59,13 @@ pub struct TrackerSession {
     pub inference_config: InferenceConfig,
     pub log: Vec<TurnLogEntry>,
     pub turn_count: u16,
+}
+
+#[derive(Debug)]
+pub(crate) enum SubmitTrackerError {
+    Parse(ParseError),
+    Unprocessable(String),
+    Internal(String),
 }
 
 fn lock(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, TrackerSession>> {
@@ -323,10 +331,32 @@ fn validate_turn_completeness(
     belief: &UnknownBattleState,
     active_per_side: u8,
 ) -> Result<(), String> {
+    let has_regular_action = events.iter().any(|event| {
+        matches!(event.kind, EventKind::MoveUsed { .. } | EventKind::MustRecharge { .. })
+            || matches!(
+                event.kind,
+                EventKind::Cant { ref reason, .. } if *reason != poke_rust::information::information::CantReason::Other
+            )
+    });
+    let replacement_batch = !has_regular_action
+        && [Player::P1, Player::P2].into_iter().any(|player| {
+            (0..active_per_side).any(|slot_index| {
+                slot_needs_replacement(belief, FieldSlot { player, slot_index })
+            })
+        });
+    let battle_ended = [Player::P1, Player::P2]
+        .into_iter()
+        .any(|player| side_was_eliminated(events, belief, player, active_per_side));
+
     for player in [Player::P1, Player::P2] {
         for slot_index in 0..active_per_side {
             let slot = FieldSlot { player, slot_index };
-            if slot_acted(events, slot) || slot_can_be_skipped(belief, slot) {
+            if slot_acted(events, slot)
+                || slot_was_zeroed(events, slot)
+                || slot_can_be_skipped(belief, slot)
+                || (replacement_batch && !slot_needs_replacement(belief, slot))
+                || battle_ended
+            {
                 continue;
             }
             return Err(format!(
@@ -336,6 +366,72 @@ fn validate_turn_completeness(
         }
     }
     Ok(())
+}
+
+fn side_was_eliminated(
+    events: &[InformationEvent],
+    belief: &UnknownBattleState,
+    player: Player,
+    active_per_side: u8,
+) -> bool {
+    let active = match player {
+        Player::P1 => &belief.p1_active_mons,
+        Player::P2 => &belief.p2_active_mons,
+    };
+    let all_active_fainted = (0..active_per_side).all(|slot_index| {
+        let slot = FieldSlot { player, slot_index };
+        active
+            .get(slot_index as usize)
+            .is_some_and(|mon| mon.fainted)
+            || slot_was_zeroed(events, slot)
+    });
+    if !all_active_fainted {
+        return false;
+    }
+    let (known_back, possible_back) = match player {
+        Player::P1 => (&belief.p1_known_back_mons, &belief.p1_possible_back_mons),
+        Player::P2 => (&belief.p2_known_back_mons, &belief.p2_possible_back_mons),
+    };
+    !known_back.iter().any(|mon| !mon.fainted) && !possible_back.iter().any(|mon| !mon.fainted)
+}
+
+fn slot_was_zeroed(events: &[InformationEvent], slot: FieldSlot) -> bool {
+    events.iter().any(|event| {
+        let zeroed = match &event.kind {
+            EventKind::DamageDealt { target, new_hp, .. }
+            | EventKind::Healed { target, new_hp, .. }
+            | EventKind::SetHp { target, new_hp, .. } => {
+                *target == slot
+                    && matches!(
+                        new_hp,
+                        poke_rust::information::unknowns::PokemonHP::Number(0)
+                            | poke_rust::information::unknowns::PokemonHP::Percent(0)
+                    )
+            }
+            EventKind::Faint { slot: fainted } => *fainted == slot,
+            _ => false,
+        };
+        zeroed || slot_was_zeroed(&event.reactions, slot)
+    })
+}
+
+fn slot_needs_replacement(belief: &UnknownBattleState, slot: FieldSlot) -> bool {
+    let active = match slot.player {
+        Player::P1 => &belief.p1_active_mons,
+        Player::P2 => &belief.p2_active_mons,
+    };
+    match active.get(slot.slot_index as usize) {
+        None => true,
+        Some(mon) if !mon.fainted => false,
+        Some(_) => {
+            let (known_back, possible_back) = match slot.player {
+                Player::P1 => (&belief.p1_known_back_mons, &belief.p1_possible_back_mons),
+                Player::P2 => (&belief.p2_known_back_mons, &belief.p2_possible_back_mons),
+            };
+            known_back.iter().any(|mon| !mon.fainted)
+                || possible_back.iter().any(|mon| !mon.fainted)
+        }
+    }
 }
 
 /// Does `slot` have a top-level event this turn establishing it acted?
@@ -383,20 +479,37 @@ pub async fn submit_tracker_events(
         return not_found();
     };
 
+    match apply_tracker_text(session, &req.text, &app.dexes) {
+        Ok(response) => Json(response).into_response(),
+        Err(SubmitTrackerError::Parse(error)) => parse_error_response(error),
+        Err(SubmitTrackerError::Unprocessable(message)) => unprocessable(message),
+        Err(SubmitTrackerError::Internal(message)) => internal_error(message),
+    }
+}
+
+/// Apply a tracker-text request through the exact production pipeline. Work is
+/// performed on local clones and committed only after every submitted turn
+/// succeeds, preserving the endpoint's all-or-nothing contract.
+pub(crate) fn apply_tracker_text(
+    session: &mut TrackerSession,
+    text: &str,
+    dexes: &Dexes,
+) -> Result<TrackerEventsResponse, SubmitTrackerError> {
+
     // Parse against the CURRENTLY COMMITTED belief (HP-direction classification
     // reads it) — a parse error must never mutate anything.
     let lines = match parse_tracker_text(
-        &req.text,
+        text,
         &session.belief,
-        &app.dexes.move_dex,
-        &app.dexes.pokemon_dex,
+        &dexes.move_dex,
+        &dexes.pokemon_dex,
     ) {
         Ok(l) => l,
-        Err(e) => return parse_error_response(e),
+        Err(e) => return Err(SubmitTrackerError::Parse(e)),
     };
     let turns = match split_into_turns(lines) {
         Ok(t) => t,
-        Err(message) => return unprocessable(message),
+        Err(message) => return Err(SubmitTrackerError::Unprocessable(message)),
     };
 
     let mut working = session.belief.clone();
@@ -414,10 +527,10 @@ pub async fn submit_tracker_events(
         // rejected the same way a contradiction is — before any mutation.
         if let Err(message) = validate_turn_completeness(&events, &working, session.active_per_side)
         {
-            return unprocessable(format!(
+            return Err(SubmitTrackerError::Unprocessable(format!(
                 "turn {}: {message}",
                 turn_count + log_delta.len() as u16 + 1
-            ));
+            )));
         }
 
         // Guaranteed-effect synthesis reads `working` as it stands right before
@@ -425,28 +538,32 @@ pub async fn submit_tracker_events(
         // across the turn's own events as it goes — see `augment_turn`'s doc
         // comment in `tracker_effects`.
         let events: Vec<InformationEvent> =
-            augment_turn(events, &working, &app.dexes.move_dex, &app.dexes.pokemon_dex);
+            augment_turn(events, &working, &dexes.move_dex, &dexes.pokemon_dex);
 
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             apply_information(
                 UnknownMatchState::Battle(working.clone()),
                 &events,
                 false,
-                &app.dexes.pokemon_dex,
-                &app.dexes.move_dex,
-                &app.dexes.ability_dex,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &dexes.ability_dex,
                 &session.inference_config,
             )
         }));
         match caught {
             Ok(UnknownMatchState::Battle(next)) => working = next,
-            Ok(_) => return internal_error("belief left the Battle phase mid-turn"),
+            Ok(_) => {
+                return Err(SubmitTrackerError::Internal(
+                    "belief left the Battle phase mid-turn".to_string(),
+                ));
+            }
             Err(payload) => {
-                return unprocessable(format!(
+                return Err(SubmitTrackerError::Unprocessable(format!(
                     "turn {}: {}",
                     turn_count + log_delta.len() as u16 + 1,
                     panic_message(payload)
-                ));
+                )));
             }
         }
         turn_count += 1;
@@ -466,11 +583,10 @@ pub async fn submit_tracker_events(
         session.inference_config.legal_items.as_ref(),
     );
 
-    Json(TrackerEventsResponse {
+    Ok(TrackerEventsResponse {
         state: view,
         log_delta,
     })
-    .into_response()
 }
 
 #[cfg(test)]
@@ -486,6 +602,35 @@ mod tests {
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     fn pokemon_dex() -> &'static HashMap<Species, PokemonData> {
         POKEMON_DEX.get_or_init(|| poke_rust::state::dex_data::parse_pokemon_dex("../pokemon_info/showdownDex.txt"))
+    }
+
+    static DEXES: OnceLock<Dexes> = OnceLock::new();
+    fn dexes() -> &'static Dexes {
+        DEXES.get_or_init(|| Dexes {
+            pokemon_dex: poke_rust::state::dex_data::parse_pokemon_dex(
+                "../pokemon_info/showdownDex.txt",
+            ),
+            move_dex: poke_rust::state::dex_data::parse_move_dex(
+                "../pokemon_info/showdownMoves.txt",
+            ),
+            ability_dex: poke_rust::state::dex_data::parse_ability_dex(
+                "../pokemon_info/showdownAbilities.txt",
+            ),
+            learnset_dex: poke_rust::state::dex_data::parse_learnset_dex(
+                "../pokemon_info/showdownLearnsets.txt",
+            ),
+        })
+    }
+
+    fn tracker_session_1v1() -> TrackerSession {
+        TrackerSession {
+            belief: belief_1v1(),
+            active_per_side: 1,
+            brought_per_side: 1,
+            inference_config: InferenceConfig::default(),
+            log: Vec::new(),
+            turn_count: 0,
+        }
     }
 
     fn make_active(species: Species, fainted: bool) -> UnknownPokemonState {
@@ -685,5 +830,99 @@ mod tests {
         let err = validate_turn_completeness(&events, &belief, 1).unwrap_err();
         assert!(err.contains("P2"), "{err}");
     }
-}
 
+    #[test]
+    fn replacement_only_batch_does_not_require_healthy_slots_to_act() {
+        let mut belief = belief_1v1();
+        belief.p1_active_mons[0].fainted = true;
+        belief
+            .p1_known_back_mons
+            .push(make_active(Species::Charizard, false));
+        let events = vec![leaf(EventKind::Switch(SwitchState {
+            slot: p1(),
+            species: Species::Charizard,
+            level: 50,
+            hp: PokemonHP::Number(153),
+            status: None,
+            tera_type: None,
+            disguise_species: None,
+            max_hp: 153,
+        }))];
+        assert!(validate_turn_completeness(&events, &belief, 1).is_ok());
+    }
+
+    #[test]
+    fn slot_knocked_out_before_its_action_does_not_need_a_separate_action_event() {
+        let belief = belief_1v1();
+        let events = vec![InformationEvent {
+            kind: EventKind::MoveUsed {
+                user: o1(),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1()],
+            },
+            reactions: vec![leaf(EventKind::DamageDealt {
+                target: p1(),
+                new_hp: PokemonHP::Number(0),
+                max_hp: 100,
+            })],
+        }];
+        assert!(validate_turn_completeness(&events, &belief, 1).is_ok());
+    }
+
+    #[test]
+    fn apply_tracker_text_commits_multiple_complete_turns() {
+        let mut session = tracker_session_1v1();
+        let response = apply_tracker_text(
+            &mut session,
+            "p1 protect\no1 protect\nendofturn\np1 protect\no1 protect\nendofturn",
+            dexes(),
+        )
+        .expect("two complete turns should commit");
+
+        assert_eq!(session.turn_count, 2);
+        assert_eq!(session.log.len(), 2);
+        assert_eq!(response.log_delta.len(), 2);
+        assert_eq!(response.log_delta[0].label, "Turn 1");
+        assert_eq!(response.log_delta[1].label, "Turn 2");
+    }
+
+    #[test]
+    fn apply_tracker_text_rolls_back_all_turns_when_a_later_turn_is_incomplete() {
+        let mut session = tracker_session_1v1();
+        let belief_before = format!("{:?}", session.belief);
+        let result = apply_tracker_text(
+            &mut session,
+            "p1 protect\no1 protect\nendofturn\np1 protect\nendofturn",
+            dexes(),
+        );
+
+        assert!(matches!(result, Err(SubmitTrackerError::Unprocessable(_))));
+        assert_eq!(session.turn_count, 0);
+        assert!(session.log.is_empty());
+        assert_eq!(format!("{:?}", session.belief), belief_before);
+    }
+
+    #[test]
+    fn randomized_invalid_later_lines_report_their_line_and_never_commit() {
+        let iterations = std::env::var("POKERUST_TRACKER_INVALID_FUZZ_ITERS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(128);
+        for seed in 0..iterations {
+            let mut session = tracker_session_1v1();
+            let belief_before = format!("{:?}", session.belief);
+            let text = format!(
+                "p1 protect\no1 protect\nendofturn\n# seed {seed}\np1 definitely_not_a_tracker_token_{seed}\no1 protect\nendofturn"
+            );
+            let result = apply_tracker_text(&mut session, &text, dexes());
+            match result {
+                Err(SubmitTrackerError::Parse(error)) => assert_eq!(error.line, 5, "seed={seed}"),
+                Err(other) => panic!("seed={seed}: expected a parse failure, got {other:?}"),
+                Ok(_) => panic!("seed={seed}: invalid tracker text unexpectedly committed"),
+            }
+            assert_eq!(session.turn_count, 0, "seed={seed}");
+            assert!(session.log.is_empty(), "seed={seed}");
+            assert_eq!(format!("{:?}", session.belief), belief_before, "seed={seed}");
+        }
+    }
+}
