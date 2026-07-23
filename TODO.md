@@ -1,15 +1,9 @@
 # TODO: Always remove items from here when they are completed :)
 
 ### Fixes
-- If a known mon starts weather, then the turns of weather should be fixed
-- the autofill should match whatever casing the user has used in the line so far, defaulting to PascalCase if no two word things have shown up. It should only autofill to the casings that the grammar supports (not rock slide instead rock_slide or rock-slide etc)
-- you should not be able to up arrow into the previous turn, also have a line number indicator at the beginning of the text bar
-- autocorrect should not show up if the current word is a valid word
-- Mega evolution seems to be broken: I'm getting Line 5: mega requires a species — this slot's species isn't known yet? or also I get that y is not a known species. But there's no zoroark its just tyranitar raichu team vs charizard aerodactyl team.
-- There is some really strange behavior with slots not knowing their pokemon?? "P2 slot 2 took damage (now 0%)" should be aerodactyl took damage. When sending out it should be made clear the order of the slots.
-- I thought we discussed this but there should be a new grammar for leads, so it would be leads p tyranitar lycanroc o charizard aerodactyl
-- Make the autofill suggestions show diverse options some how, like instead of alphabetical have it be randomized alphabetical but stable somehow. I want if something is there it should stay if it is still an option, but I want to show a variety of different options not just always p, p1, p2, o, o1, o2.
-- Clicking enter on an empty text box should just delete that event, same thing for backspace on an empty event
+- Already a valid token checking for not displaying suggestions does not work for like hp percents and stuff like that
+- Shift escape should not restart the turn, it should reset you to editing the end of the last turn.
+- Also the behavior for submitting an event that is not the last event should be changed so it adds a new event after the one you were editing
 
 ### New features
 

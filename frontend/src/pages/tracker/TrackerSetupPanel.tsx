@@ -40,9 +40,10 @@ const OPPONENT_PLACEHOLDER: Record<TrackerInfoMode, string> = {
  * (ruleset + information mode pickers, reused `Select`/`favoritesFirst`), but
  * in place of a second team select: a text box for the opponent (a teamsheet
  * or comma-separated species — the server normalizes the latter). There's no
- * lead picker here — leads for BOTH sides are conveyed by a `p leads …`/
- * `o leads …` tracker-text event once the session starts (see the server's
- * `tracker.rs` module doc: a session begins fully benched on both sides).
+ * lead picker here — leads for BOTH sides are conveyed by a
+ * `leads p … o …` tracker-text event once the session starts (see the
+ * server's `tracker.rs` module doc: a session begins fully benched on both
+ * sides).
  */
 export default function TrackerSetupPanel() {
   const [teams] = useState(loadTeams)

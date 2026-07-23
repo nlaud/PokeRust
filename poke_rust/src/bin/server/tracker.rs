@@ -12,9 +12,9 @@
 //! already seeds a battle-mode belief's own side, and the opponent's side
 //! narrows exactly like an ordinary fog-of-war belief always has. Neither side
 //! starts with anyone active — a session begins fully benched on both sides,
-//! and the first `p leads …`/`o leads …` tracker-text event (see
-//! `tracker_parse.rs`) sends out that side's actual leads, symmetrically for
-//! the viewer and the opponent.
+//! and the first `leads p … o …` tracker-text event (see `tracker_parse.rs`)
+//! sends out both sides' actual leads together, symmetrically for the viewer
+//! and the opponent.
 //! `apply_information` already knows how to fold events into a belief with no
 //! separate ground truth backing it — that's exactly what a battle-mode belief
 //! already is; `mapping::battle_view_from_belief` renders a `BattleView`
@@ -248,8 +248,8 @@ pub async fn create_tracker(
     };
 
     // Nobody is sent out yet on EITHER side — leads are conveyed by the first
-    // `p leads …`/`o leads …` tracker-text event, not chosen up front (see
-    // this module's doc comment). `into_battle_state` already gives the
+    // `leads p … o …` tracker-text event, not chosen up front (see this
+    // module's doc comment). `into_battle_state` already gives the
     // opponent's whole roster to `possible_back` unconditionally when
     // `viewer == P1`; passing every one of the viewer's own indices as
     // "back" (none "active") does the identical thing for their own side —
@@ -569,11 +569,12 @@ fn apply_turns_from(
     let mut log: Vec<TurnLogEntry> = Vec::new();
     let mut turn_count = turn_offset;
     for events in turns {
-        // Merge a leading `p leads`/`o leads` pair into one combined event and
-        // fold immediately-following entry-ability reveals into its
-        // `reactions` — see `fold_leads_and_entry_abilities`'s doc comment.
-        // Must run before completeness validation / synthesis so both see the
-        // final nested shape.
+        // A combined `leads p … o …` line already parses to one event; this
+        // also merges the (still-accepted) two-separate-lines form and folds
+        // immediately-following entry-ability reveals into its `reactions` —
+        // see `fold_leads_and_entry_abilities`'s doc comment. Must run before
+        // completeness validation / synthesis so both see the final nested
+        // shape.
         let events = fold_leads_and_entry_abilities(events);
 
         // An incomplete turn (some active slot recorded nothing at all) is

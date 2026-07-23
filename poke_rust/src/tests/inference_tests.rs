@@ -1410,6 +1410,103 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S63 — leads/entry-ability weather never fixed a duration ───────
+
+/// A `leads`-style `SimultaneousSwitch` whose one entering mon's revealed entry
+/// ability sets weather — `WeatherChanged` nested inside an `AbilityRevealed`
+/// reaction, exactly the shape tracker mode's `guaranteed_ability_reactions`/
+/// `ability_revealed_node` synthesize under any switch/mega entry — must
+/// attribute a setter so the weather-rock CNF pair can resolve the duration
+/// from the setter's already-KNOWN item. Before this fix, only a lone `Switch`
+/// set `ctx.switch_slot` (`BattleContext`'s field docs); a `SimultaneousSwitch`
+/// left it `None` for its nested entry-ability reactions, so `weather_turns`
+/// stayed `Possibly([5, 8])` forever even when the setter and its item (or
+/// lack of one) were both fully known — the "known mon starts weather, but the
+/// tracker never shows a fixed duration" bug.
+#[test]
+fn test_s63_leads_entry_ability_weather_fixes_duration_with_known_item() {
+    let mut p1_mon = unknown_mon_species(Species::Tyranitar);
+    p1_mon.item = Unknown::Known(Item::None); // no Smooth Rock -> base 5 turns.
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let leads = event_with(
+        EventKind::SimultaneousSwitch {
+            switches: vec![SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p1(0),
+                species: Species::Tyranitar,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            }],
+        },
+        vec![event_with(
+            EventKind::AbilityRevealed {
+                slot: p1(0),
+                ability: Ability::SandStream,
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Sandstorm),
+            })],
+        )],
+    );
+
+    let result = apply(state, vec![leads]);
+    assert_eq!(result.weather, Some(Weather::Sandstorm));
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Known(5)),
+        "a known setter holding a known (non-rock) item must fix the base 5-turn \
+         duration, got {:?}",
+        result.weather_turns
+    );
+}
+
+/// Companion: the same `leads` + entry-ability shape, but the setter holds
+/// Smooth Rock — the duration must fix to the extended 8 turns instead.
+#[test]
+fn test_s63_leads_entry_ability_weather_fixes_duration_with_smooth_rock() {
+    let mut p1_mon = unknown_mon_species(Species::Tyranitar);
+    p1_mon.item = Unknown::Known(Item::SmoothRock);
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let leads = event_with(
+        EventKind::SimultaneousSwitch {
+            switches: vec![SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p1(0),
+                species: Species::Tyranitar,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            }],
+        },
+        vec![event_with(
+            EventKind::AbilityRevealed {
+                slot: p1(0),
+                ability: Ability::SandStream,
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Sandstorm),
+            })],
+        )],
+    );
+
+    let result = apply(state, vec![leads]);
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Known(8)),
+        "a known setter holding the extension rock must fix the 8-turn duration, got {:?}",
+        result.weather_turns
+    );
+}
+
 // ── Regression: S26 — Transform overlay and switch-out revert ───────────────────
 
 /// An opponent Ditto uses Transform (a `Transformed` reaction nested under the

@@ -17,18 +17,21 @@
 //! - **Explicit targets required.** Every targeted move must name its
 //!   target slot(s) explicitly (matches every example in the design doc); no
 //!   singles auto-target inference.
-//! - **Leads are an event, not a pre-game pick.** `[p|o] leads <species>...`
-//!   sends out a whole side's opening (or simultaneous post-faint
-//!   replacement) leads together — a session starts fully benched on both
-//!   sides (see `tracker.rs`'s module doc), symmetric with how every other
-//!   mid-battle switch already works. Distinct from `switch`, which replaces
-//!   one slot at a time. Each side's `leads` line parses to its own
-//!   `SimultaneousSwitch` event, but `fold_leads_and_entry_abilities` (called
-//!   once per turn, before synthesis/inference) merges a turn's leading
-//!   `p leads`/`o leads` pair into ONE combined event and folds any
-//!   immediately-following entry-ability reveal (`p1 sandstream`,
-//!   `o1 unnerve`, …) into that event's `reactions` — see its doc comment for
-//!   why this matters beyond tidiness (cross-mon ability-absence reasoning).
+//! - **Leads are an event, not a pre-game pick.**
+//!   `leads [p|o] <species>... [p|o] <species>...` sends out one or both
+//!   sides' opening (or simultaneous post-faint replacement) leads together
+//!   — a session starts fully benched on both sides (see `tracker.rs`'s
+//!   module doc), symmetric with how every other mid-battle switch already
+//!   works. Distinct from `switch`, which replaces one slot at a time. A
+//!   single `leads` line covering both sides parses directly to ONE
+//!   `SimultaneousSwitch` event; if a submission instead spells the two
+//!   sides out as separate consecutive `leads` lines,
+//!   `fold_leads_and_entry_abilities` (called once per turn, before
+//!   synthesis/inference) still merges that leading run into ONE combined
+//!   event and folds any immediately-following entry-ability reveal
+//!   (`p1 sandstream`, `o1 unnerve`, …) into that event's `reactions` — see
+//!   its doc comment for why this matters beyond tidiness (cross-mon
+//!   ability-absence reasoning).
 //! - **HP direction from the belief.** `[xx]%`/`[xx]hp` tokens don't say
 //!   whether they're damage or healing — that's inferred by comparing against
 //!   the slot's currently-believed HP. Equal-to-current is emitted as `SetHp`
@@ -99,9 +102,43 @@ fn hp_readings_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, Po
         .collect()
 }
 
+/// Every active slot whose species is currently `Known` in `belief`, seeding
+/// the running `slot_species` scratch `parse_tracker_text` threads through a
+/// submission — see that function's doc comment for why a running scratch is
+/// needed at all (same-turn `leads`/`switch` lines aren't reflected in
+/// `belief` itself, which is read-only for the whole submission).
+fn slot_species_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, Species> {
+    let mut out = HashMap::new();
+    for (player, mons) in [
+        (Player::P1, &belief.p1_active_mons),
+        (Player::P2, &belief.p2_active_mons),
+    ] {
+        for (index, mon) in mons.iter().enumerate() {
+            if let poke_rust::information::unknowns::Unknown::Known(species) = &mon.possible_species {
+                out.insert(
+                    FieldSlot {
+                        player,
+                        slot_index: index as u8,
+                    },
+                    species.clone(),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Parse every line of `text` into `TrackerLine`s. Blank lines and lines
 /// starting with `#` are ignored. `belief` is read (never mutated) to resolve
-/// HP-direction (damage vs. heal vs. unchanged) for `hpspec` tokens.
+/// HP-direction (damage vs. heal vs. unchanged) for `hpspec` tokens **and**
+/// which species currently occupies a slot for `mega`'s auto-fill/suffix
+/// resolution (`active_species_at`) — but `belief` itself is frozen for the
+/// whole submission, so a `leads`/`switch` line earlier in the SAME
+/// submission (typically the same turn) wouldn't otherwise be visible to a
+/// later `mega` line addressing the mon it just sent out. `slot_species`
+/// fixes that: seeded from `belief`, then updated in place by `leads` and
+/// `switch` as they parse, exactly like `hp_readings` already threads the
+/// latest HP reading forward.
 pub fn parse_tracker_text(
     text: &str,
     belief: &UnknownBattleState,
@@ -114,6 +151,7 @@ pub fn parse_tracker_text(
     // readings, and later turns in the same batch compare against the event
     // immediately before them rather than the pre-submission belief forever.
     let mut hp_readings = hp_readings_from_belief(belief);
+    let mut slot_species = slot_species_from_belief(belief);
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
         let line = raw_line.trim();
@@ -128,6 +166,7 @@ pub fn parse_tracker_text(
             move_dex,
             pokemon_dex,
             &mut hp_readings,
+            &mut slot_species,
         )?);
     }
     Ok(out)
@@ -136,7 +175,9 @@ pub fn parse_tracker_text(
 /// Fold one turn's raw parsed events into their final nested shape before
 /// synthesis/inference sees them: every `SimultaneousSwitch` event in the
 /// turn's leading contiguous run (i.e. the `leads` line(s) at the very start
-/// of the turn — `p leads ...`/`o leads ...`, in either order) is merged into
+/// of the turn — normally just one combined `leads p ... o ...` line, but a
+/// submission that instead spells the two sides out as separate consecutive
+/// `leads p ...` / `leads o ...` lines is folded the same way) is merged into
 /// a SINGLE combined event covering every entering mon on both sides, and any
 /// bare `AbilityRevealed` line immediately following that run, addressed to
 /// one of the just-entered slots, is moved from its own top-level line into
@@ -148,13 +189,13 @@ pub fn parse_tracker_text(
 /// `pass1_ability_absence_inference` (`information/inference.rs`) reads
 /// exactly that field to reason across every mon that entered together (e.g.
 /// "no weather change appeared, and this is the only entering mon that COULD
-/// have a weather setter, so it doesn't have one"). Before this fold, `p
-/// leads ...`/`o leads ...` produced two independent `SimultaneousSwitch`
-/// events (one per side) with empty `reactions`, so that cross-mon reasoning
-/// only ever saw half the field; and a following `p1 sandstream` line stayed
-/// a disconnected sibling event instead of the nested reveal the engine
-/// expects, silently discarding the entry-ability bookkeeping the design doc
-/// describes.
+/// have a weather setter, so it doesn't have one"). Two separate `leads`
+/// lines (one per side) would otherwise produce two independent
+/// `SimultaneousSwitch` events with empty `reactions`, so that cross-mon
+/// reasoning would only ever see half the field; and a following
+/// `p1 sandstream` line would stay a disconnected sibling event instead of
+/// the nested reveal the engine expects, silently discarding the
+/// entry-ability bookkeeping the design doc describes.
 ///
 /// The fold stops (and leaves everything after it untouched) at the first
 /// event that isn't itself a `SimultaneousSwitch` or a qualifying
@@ -250,6 +291,18 @@ fn parse_slot(tok: &str) -> Option<FieldSlot> {
         rest.parse::<u8>().ok()?.checked_sub(1)?
     };
     Some(FieldSlot { player, slot_index })
+}
+
+/// Whole-side marker for the `leads` line — same accepted words as the
+/// `side` keyword (`p`/`p1`/`player`, `o`/`o1`/`opponent`); a bare `p`/`o`
+/// only ever means "this whole side" here, never a specific slot digit,
+/// since `leads` addresses every one of a side's slots at once.
+fn leads_side_marker(tok: &str) -> Option<Player> {
+    match norm(tok).as_str() {
+        "p" | "p1" | "player" => Some(Player::P1),
+        "o" | "o1" | "opponent" => Some(Player::P2),
+        _ => None,
+    }
 }
 
 pub(crate) fn opposing_active_slots(
@@ -723,6 +776,10 @@ fn parse_line(
     // Used by the `mega` line to enumerate a species' possible mega forms.
     pokemon_dex: &HashMap<Species, PokemonData>,
     hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
+    // Running slot->species scratch, updated by `leads`/`switch` as they
+    // parse — see `parse_tracker_text`'s doc comment. Read by `mega`'s
+    // auto-fill/suffix resolution so a same-turn `leads` is visible to it.
+    slot_species: &mut HashMap<FieldSlot, Species>,
 ) -> Result<TrackerLine, ParseError> {
     if norm(tokens[0]) == "endofturn" || norm(tokens[0]) == "eot" {
         return Ok(TrackerLine::EndOfTurn);
@@ -784,6 +841,61 @@ fn parse_line(
                 reactions: Vec::new(),
             }));
         }
+        // ── leads ────────────────────────────────────────────────────────
+        // `leads [p|o] <species>...` — one side's battle-start (or
+        // simultaneous post-faint replacement) leads, sent out together;
+        // repeat the side marker to cover both sides on one line:
+        // `leads p tyranitar lycanroc o charizard aerodactyl`. Species are
+        // assigned left-to-right to that side's slots 0, 1, ... starting
+        // from whichever side marker most recently appeared. Emits ONE
+        // `SimultaneousSwitch` covering every named mon (both sides if both
+        // appear); `fold_leads_and_entry_abilities` still folds a
+        // following entry-ability reveal (`p1 sandstream`) into it.
+        "leads" => {
+            let rest = &tokens[1..];
+            if rest.is_empty() {
+                return Err(err(
+                    line_no,
+                    "leads requires a side ('p' or 'o') and at least one species",
+                ));
+            }
+            let mut switches: Vec<SwitchState> = Vec::new();
+            let mut current_side: Option<Player> = None;
+            let mut next_slot_index: u8 = 0;
+            for tok in rest {
+                if let Some(side) = leads_side_marker(tok) {
+                    current_side = Some(side);
+                    next_slot_index = 0;
+                    continue;
+                }
+                let Some(player) = current_side else {
+                    return Err(err(
+                        line_no,
+                        format!("leads requires a side ('p' or 'o') before species — got '{tok}'"),
+                    ));
+                };
+                let species = Species::from_str(tok);
+                if matches!(species, Species::Unknown(_)) {
+                    return Err(err(line_no, format!("unrecognized species '{tok}'")));
+                }
+                let lead_slot = FieldSlot {
+                    player,
+                    slot_index: next_slot_index,
+                };
+                let switch = build_switch_state(belief, lead_slot, species.clone());
+                hp_readings.insert(lead_slot, switch.hp.clone());
+                slot_species.insert(lead_slot, species);
+                switches.push(switch);
+                next_slot_index += 1;
+            }
+            if switches.is_empty() {
+                return Err(err(line_no, "leads requires at least one species"));
+            }
+            return Ok(TrackerLine::Event(InformationEvent {
+                kind: EventKind::SimultaneousSwitch { switches },
+                reactions: Vec::new(),
+            }));
+        }
         "side" => {
             let side_tok = tokens
                 .get(1)
@@ -832,7 +944,8 @@ fn parse_line(
     // ── switch ───────────────────────────────────────────────────────────
     // A single mid-battle replacement for one slot. For a whole side's
     // opening (or post-faint replacement) leads sent out together, use
-    // `leads` instead — see its handler below.
+    // `leads` instead — see its handler above, in the standalone-keyword
+    // dispatch (its first token is the keyword `leads`, not a slot).
     if action_n == "switch" || action_n == "switchin" || action_n == "sendout" {
         let species_tok = tokens
             .get(2)
@@ -844,7 +957,7 @@ fn parse_line(
                 format!("unrecognized species '{species_tok}'"),
             ));
         }
-        let mut switch = build_switch_state(belief, slot, species);
+        let mut switch = build_switch_state(belief, slot, species.clone());
         // Optional HP and major-status observations may follow in either order.
         // This matters for a previously-damaged/statused Pokémon returning from
         // the bench; `leads` are always fresh and need neither payload.
@@ -864,39 +977,9 @@ fn parse_line(
             }
         }
         hp_readings.insert(slot, switch.hp.clone());
+        slot_species.insert(slot, species);
         return Ok(TrackerLine::Event(InformationEvent {
             kind: EventKind::Switch(switch),
-            reactions: Vec::new(),
-        }));
-    }
-
-    // ── leads ────────────────────────────────────────────────────────────
-    // `[p|o] leads <species>...` — a whole side's battle-start (or
-    // simultaneous post-faint replacement) leads, sent out together. The slot
-    // digit on the address token (if any) is ignored — `leads` always
-    // addresses the WHOLE side, left-to-right (slot 0 = leftmost), not one
-    // slot; write `p leads charizard sylveon`, not `p1 leads …`/`p2 leads …`.
-    if action_n == "leads" {
-        let species_toks = &tokens[2..];
-        if species_toks.is_empty() {
-            return Err(err(line_no, "leads requires at least one species"));
-        }
-        let mut switches = Vec::with_capacity(species_toks.len());
-        for (i, tok) in species_toks.iter().enumerate() {
-            let species = Species::from_str(tok);
-            if matches!(species, Species::Unknown(_)) {
-                return Err(err(line_no, format!("unrecognized species '{tok}'")));
-            }
-            let lead_slot = FieldSlot {
-                player: slot.player,
-                slot_index: i as u8,
-            };
-            let switch = build_switch_state(belief, lead_slot, species);
-            hp_readings.insert(lead_slot, switch.hp.clone());
-            switches.push(switch);
-        }
-        return Ok(TrackerLine::Event(InformationEvent {
-            kind: EventKind::SimultaneousSwitch { switches },
             reactions: Vec::new(),
         }));
     }
@@ -910,7 +993,7 @@ fn parse_line(
     if action_n == "mega" || action_n == "megaevolve" || action_n == "megaevolution" {
         let into = match tokens.get(2) {
             None => {
-                let species = active_species_at(belief, slot).ok_or_else(|| {
+                let species = active_species_at(belief, slot_species, slot).ok_or_else(|| {
                     err(
                         line_no,
                         "mega requires a species — this slot's species isn't known yet",
@@ -940,7 +1023,7 @@ fn parse_line(
                 if !matches!(candidate, Species::Unknown(_)) {
                     candidate
                 } else {
-                    let species = active_species_at(belief, slot).ok_or_else(|| {
+                    let species = active_species_at(belief, slot_species, slot).ok_or_else(|| {
                         err(line_no, format!("unrecognized species '{species_tok}'"))
                     })?;
                     let forms = poke_rust::state::pokemon::mega_forms_of(&species, pokemon_dex);
@@ -1272,11 +1355,22 @@ fn full_hp_for(slot: FieldSlot, max_hp: u16) -> PokemonHP {
     }
 }
 
-/// The species currently occupying `slot`, when it's already `Known` in the
-/// belief (an opponent's active is only `Known` once revealed by an earlier
-/// switch/reveal; the viewer's own side is always `Known`). Used by the
-/// `mega` line to look up which mega forms are even possible.
-fn active_species_at(belief: &UnknownBattleState, slot: FieldSlot) -> Option<Species> {
+/// The species currently occupying `slot`, when it's already known — either
+/// because an earlier line THIS SAME SUBMISSION already sent it there
+/// (`slot_species`, checked first — see `parse_tracker_text`'s doc comment
+/// for why the frozen `belief` alone isn't enough) or because it was already
+/// `Known` in the belief carried over from a prior turn (an opponent's
+/// active is only `Known` once revealed by an earlier switch/reveal; the
+/// viewer's own side is always `Known`). Used by the `mega` line to look up
+/// which mega forms are even possible.
+fn active_species_at(
+    belief: &UnknownBattleState,
+    slot_species: &HashMap<FieldSlot, Species>,
+    slot: FieldSlot,
+) -> Option<Species> {
+    if let Some(species) = slot_species.get(&slot) {
+        return Some(species.clone());
+    }
     let mons = match slot.player {
         Player::P1 => &belief.p1_active_mons,
         Player::P2 => &belief.p2_active_mons,
@@ -1967,11 +2061,11 @@ mod tests {
     fn leads_line_sends_out_a_whole_side_together() {
         let belief = test_belief();
 
-        // `p leads pikachu` — the viewer's own side; pulls the real exact HP
+        // `leads p pikachu` — the viewer's own side; pulls the real exact HP
         // already recorded in the belief (100, per `test_belief`), not a
         // fresh-100%-percent guess.
         let lines =
-            parse_tracker_text("p leads pikachu", &belief, move_dex(), pokemon_dex()).unwrap();
+            parse_tracker_text("leads p pikachu", &belief, move_dex(), pokemon_dex()).unwrap();
         let TrackerLine::Event(ev) = &lines[0] else {
             panic!()
         };
@@ -1983,10 +2077,10 @@ mod tests {
         assert_eq!(switches[0].species, Species::Pikachu);
         assert!(matches!(switches[0].hp, PokemonHP::Number(100)));
 
-        // `o leads ...` — two species assigned left-to-right to slots 0/1 on
+        // `leads o ...` — two species assigned left-to-right to slots 0/1 on
         // the opponent's side, each a fresh 100% send-out.
         let lines = parse_tracker_text(
-            "o leads garchomp dragapult",
+            "leads o garchomp dragapult",
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -2019,13 +2113,58 @@ mod tests {
     }
 
     #[test]
-    fn fold_leads_and_entry_abilities_merges_both_sides_and_nests_entry_abilities() {
-        // The bug report's exact requested syntax: both sides' leads plus
-        // their entry abilities, four consecutive lines with no other event
-        // in between.
+    fn leads_line_combines_both_sides_in_one_line() {
+        // The primary new-grammar shape: `leads p <sp>... o <sp>...` on a
+        // single line, both sides interleaved via side markers, producing
+        // ONE SimultaneousSwitch (no fold needed — the dispatch itself
+        // combines both sides).
         let belief = test_belief();
         let lines = parse_tracker_text(
-            "p leads tyranitar lucario\no leads aerodactyl charizard\np1 sandstream\no1 unnerve",
+            "leads p tyranitar raichu o charizard aerodactyl",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        let TrackerLine::Event(ev) = &lines[0] else {
+            panic!()
+        };
+        let EventKind::SimultaneousSwitch { switches } = &ev.kind else {
+            panic!("expected SimultaneousSwitch, got {:?}", ev.kind)
+        };
+        assert_eq!(switches.len(), 4);
+        assert_eq!(switches[0].species, Species::Tyranitar);
+        assert_eq!(switches[0].slot, p1());
+        assert_eq!(switches[1].species, Species::Raichu);
+        assert_eq!(
+            switches[1].slot,
+            FieldSlot {
+                player: Player::P1,
+                slot_index: 1
+            }
+        );
+        assert_eq!(switches[2].species, Species::Charizard);
+        assert_eq!(switches[2].slot, o1());
+        assert_eq!(switches[3].species, Species::Aerodactyl);
+        assert_eq!(
+            switches[3].slot,
+            FieldSlot {
+                player: Player::P2,
+                slot_index: 1
+            }
+        );
+    }
+
+    #[test]
+    fn fold_leads_and_entry_abilities_merges_both_sides_and_nests_entry_abilities() {
+        // Two SEPARATE `leads` lines (one per side) still fold into one
+        // combined event, same as a single combined `leads p ... o ...`
+        // line would — plus their entry abilities, four consecutive lines
+        // with no other event in between.
+        let belief = test_belief();
+        let lines = parse_tracker_text(
+            "leads p tyranitar lucario\nleads o aerodactyl charizard\np1 sandstream\no1 unnerve",
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -2081,14 +2220,14 @@ mod tests {
 
     #[test]
     fn fold_leaves_unrelated_later_ability_reveal_untouched() {
-        // `o1` DID enter via `o leads garchomp` (so it's a `still_entered`
+        // `o1` DID enter via `leads o garchomp` (so it's a `still_entered`
         // slot), but its ability reveal appears AFTER a move has already
         // happened this same turn — that breaks contiguity with the leads
         // block, so it's unrelated to the entry effect and must stay its own
         // top-level event, not get swept into the leads event's reactions.
         let belief = test_belief();
         let lines = parse_tracker_text(
-            "p leads pikachu\no leads garchomp\np1 thunderbolt o1\no1 flashfire",
+            "leads p pikachu\nleads o garchomp\np1 thunderbolt o1\no1 flashfire",
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -2138,7 +2277,7 @@ mod tests {
         belief.p2_active_mons = Vec::new();
 
         let lines = parse_tracker_text(
-            "p leads tyranitar\no leads gyarados\np1 sandstream\nendofturn",
+            "leads p tyranitar\nleads o gyarados\np1 sandstream\nendofturn",
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -2233,6 +2372,45 @@ mod tests {
         assert!(matches!(
             &ev.kind,
             EventKind::MegaEvolution { into, .. } if *into == Species::CharizardMegaX
+        ));
+    }
+
+    #[test]
+    fn mega_resolves_after_same_turn_leads() {
+        // Regression: before `slot_species` threading, `mega` read only the
+        // frozen pre-submission `belief` — empty-benched for a session that
+        // hasn't processed a turn yet (see `tracker.rs`'s module doc) — so a
+        // same-turn `leads` line earlier in the SAME submission (which does
+        // make the species known) was invisible to a later `mega` line,
+        // and `active_species_at` returned `None` for both the auto-fill
+        // form (`p1 mega`) and the suffix-shorthand form (`o1 mega y`),
+        // exactly the bug report's repro: Tyranitar/Raichu vs.
+        // Charizard/Aerodactyl, no Zoroark involved.
+        let mut belief = test_belief_with(Species::Tyranitar, Species::Garchomp);
+        belief.p1_active_mons = Vec::new();
+        belief.p2_active_mons = Vec::new();
+
+        let lines = parse_tracker_text(
+            "leads p tyranitar raichu o charizard aerodactyl\np1 mega\no1 mega y",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 3);
+        let TrackerLine::Event(p1_mega) = &lines[1] else {
+            panic!()
+        };
+        assert!(matches!(
+            &p1_mega.kind,
+            EventKind::MegaEvolution { into, .. } if *into == Species::TyranitarMega
+        ));
+        let TrackerLine::Event(o1_mega) = &lines[2] else {
+            panic!()
+        };
+        assert!(matches!(
+            &o1_mega.kind,
+            EventKind::MegaEvolution { into, .. } if *into == Species::CharizardMegaY
         ));
     }
 
@@ -2697,7 +2875,7 @@ mod tests {
                     },
                 ),
                 2 => (
-                    "p leads pikachu charizard".to_string(),
+                    "leads p pikachu charizard".to_string(),
                     |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::SimultaneousSwitch { switches }, .. }) if switches.len() == 2),
                 ),
                 3 => (

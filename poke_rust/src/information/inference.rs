@@ -2096,9 +2096,19 @@ struct BattleContext<'a> {
     config: &'a InferenceConfig,
     /// The nearest enclosing `MoveUsed`, for nested-reaction analysis.
     move_context: Option<MoveContext>,
-    /// The nearest enclosing single-mon `Switch`, set while processing that event's
-    /// reactions.  Used by `WeatherChanged` / `TerrainChanged` handlers to attribute
-    /// ability-triggered field effects (Drizzle, Drought, etc.) to the switching mon.
+    /// The mon whose entry/reveal is currently being processed — set while
+    /// walking a `Switch`'s reactions (the switching mon) and, more
+    /// generally, while walking any `AbilityRevealed`'s own reactions (that
+    /// ability's owner). The latter covers `SimultaneousSwitch` (`leads`)
+    /// and `MegaEvolution` entries too: both synthesize their entry
+    /// ability's guaranteed effects as an `AbilityRevealed` node nested
+    /// under the entry event (`tracker_effects.rs`'s
+    /// `allow_entry_ability_effect` gating), so a `WeatherChanged`/
+    /// `TerrainChanged` reaction nested one level deeper is always
+    /// unambiguously that specific ability's doing — see the
+    /// `EventKind::AbilityRevealed` case below. Used by `WeatherChanged` /
+    /// `TerrainChanged` handlers to attribute ability-triggered field
+    /// effects (Drizzle, Drought, etc.) to the mon that caused them.
     switch_slot: Option<FieldSlot>,
     /// Per-turn record of damaging hits: (attacker_slot, target_slot, move_used).
     /// One entry per distinct (attacker, target) pair that produced a DamageDealt to a
@@ -2336,6 +2346,20 @@ fn process_battle_event(
     if let EventKind::SimultaneousSwitch { switches } = &event.kind {
         ctx.switched_slots_this_turn
             .extend(switches.iter().map(|sw| sw.slot));
+    }
+    // An ability reveal nested under a `SimultaneousSwitch` (`leads`) or
+    // `MegaEvolution` entry — not just a lone `Switch`, which the block
+    // above already covers — is exactly as unambiguous an attribution: it's
+    // that ability's own owner, full stop. Without this, `leads`'s combined
+    // multi-mon switch left `ctx.switch_slot` at `None` for its nested
+    // entry-ability reactions (the single-`Switch` case above never
+    // matched), so a `leads`-triggered Sand Stream/Drizzle/etc. never
+    // attributed a setter and its `weather_turns` stayed `Possibly([5, 8])`
+    // forever instead of collapsing to a fixed value once the setter's rock
+    // item (or lack of one) became known — exactly the tracker-mode
+    // "known mon starts weather, but the duration never fixes" bug.
+    if let EventKind::AbilityRevealed { slot, .. } = &event.kind {
+        ctx.switch_slot = Some(*slot);
     }
 
     pass1_apply_event(state, event, ctx);
@@ -3094,10 +3118,14 @@ fn pass1_apply_event(
                 // Move-triggered weather (Rain Dance, Sunny Day, …) — setter is move user.
                 mon_idx_for_active_slot(state, &mctx.user_slot)
             } else if let Some(sw_slot) = &ctx.switch_slot {
-                // Ability-triggered weather on single-mon switch-in (Drizzle, Drought, …).
+                // Ability-triggered weather on entry (Drizzle, Drought, Sand Stream, …) —
+                // covers a lone `Switch`, a `SimultaneousSwitch` (`leads`), and
+                // `MegaEvolution`, since all three set `ctx.switch_slot` to the
+                // specific ability-reveal's owner while its reactions are walked
+                // (see `BattleContext::switch_slot`'s doc comment).
                 mon_idx_for_active_slot(state, sw_slot)
             } else {
-                None // SimultaneousSwitch or other; setter unknown.
+                None // No enclosing move/entry context; setter unknown.
             };
             // Turn-count CNF pair: tie the setter's extension rock to the duration so
             // BCP propagates in BOTH directions (an item reveal collapses the timer;
@@ -5498,6 +5526,25 @@ fn emit_extension_item_if_collapsed(
 /// chip, heal, etc.) are handled by the event walk visiting `EndOfTurn::reactions`;
 /// this function handles the invisible internal state.
 fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
+    // The team-preview → first-turn transition (a tracker session's `leads` turn,
+    // or battle mode's own team-preview-to-battle step) mirrors the real engine's
+    // `is_battle_start_setup` pass (`simulator::helpers::end_turn`'s doc comment
+    // and its `!turn_started && !turn_ended` check): `turn_number` starts at 0
+    // (`into_battle_state`) and this is its very first increment. The real engine
+    // explicitly skips `decrement_effect_timers`/residual application for that
+    // pass — no sandstorm chip, no weather/terrain/volatile tick — because
+    // nothing has actually happened yet; only `turn_number` itself and the
+    // per-mon per-turn-flag reset (Phase 5) run unconditionally. Before this
+    // guard, this function decremented weather/terrain/side-condition timers and
+    // predicate turn-counts on THIS pass regardless, so a `leads`-triggered
+    // Sand Stream/Drizzle/etc. (see `BattleContext::switch_slot`'s doc comment)
+    // started the belief's duration one turn short of the real engine's —
+    // invisible before a turn-count timer was ever pinned to an exact value via
+    // a Possibly-collapse CNF pair, since a `Possibly` set merely being one off
+    // was never checked directly against ground truth (only the CNF predicate
+    // literals are — see `subset_check.rs`'s `Statement::WeatherTurns` arm).
+    let is_battle_start_setup = state.turn_number == 0;
+
     // ── Decrement field timers and detect Possibly→Known collapses (I-A) ─────
     //
     // SOUNDNESS: at the very end-of-turn where a Possibly([1, 4]) timer collapses to
@@ -5507,7 +5554,7 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
     // before revealing the extension item we must check the reactions: if the effect
     // ends this turn, the base track was true and the correct inference is the
     // OPPOSITE — exclude the extension item on the setter (natural expiry).
-
+    if !is_battle_start_setup {
     // Weather.  Three-way resolution at the collapse turn:
     //   - ended (WeatherChanged{None} in this EOT's reactions): natural expiry at the
     //     base duration → the setter has NO extension rock (exclude);
@@ -5663,8 +5710,12 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
             )
         })
     });
+    } // !is_battle_start_setup
 
     // ── Advance turn counter ──────────────────────────────────────────────────
+    // Runs unconditionally, battle-start-setup included — mirrors the real
+    // engine's own unconditional `state.turn_number = state.turn_number
+    // .saturating_add(1);` in `end_turn` (outside its `is_battle_start_setup` gate).
     state.turn_number = state.turn_number.saturating_add(1);
 
     // ── Clear per-turn flags (mirrors end_turn Phase 5, helpers.rs:6623-6673) ─

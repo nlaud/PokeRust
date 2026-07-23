@@ -1,9 +1,15 @@
 // EventNode → battle-log lines. Events carry slot references, not names, and
 // the Pokémon in a slot changes over the battle — so the log is rendered as a
 // single chronological walk that maintains a slot→species map, updated by the
-// switch events as they pass.
+// switch events as they pass. That map starts EMPTY on every call, so any
+// event referencing a slot whose occupant was introduced before this walk
+// began (a prior turn's switch that isn't part of THIS render, most notably
+// the in-progress preview turn rendered in isolation — see
+// `TrackerLogSidebar.tsx`) falls back to the bare "P2 slot 2" form. `renderLog`
+// takes the current `BattleView` so callers can seed the resolver with every
+// active slot's already-known species before the walk starts, closing that gap.
 
-import type { EventNode, FieldSlot, ObservedHp, PlayerId, TurnLogEntry } from '../api/types'
+import type { BattleView, EventNode, FieldSlot, ObservedHp, PlayerId, TurnLogEntry } from '../api/types'
 
 export type Tone = 'default' | 'muted' | 'success' | 'danger' | 'primary' | 'warning'
 
@@ -55,8 +61,39 @@ class NameResolver {
   }
 }
 
-function renderEvent(event: EventNode, depth: number, resolver: NameResolver, out: LogLine[]) {
+/** Pre-populate a resolver from the field's current occupants — every active
+ * slot's species the belief already knows, indexed by its slot position
+ * (`SideView.active[i]` <-> `FieldSlot { slotIndex: i }`). Skips the literal
+ * "Unknown" placeholder `describe_unknown` renders for a still-fogged
+ * opponent slot (see `information/describe.rs`) so an unresolved slot keeps
+ * the more honest "P2 slot 2" fallback rather than a nonsensical "P2's
+ * Unknown"; a narrowed-but-not-exact guess like "Charizard or Aerodactyl" is
+ * still seeded, since that's more informative than the bare slot fallback. */
+function seedResolverFromView(resolver: NameResolver, view: BattleView | null | undefined) {
+  if (!view) return
+  const sides: [PlayerId, typeof view.p1][] = [
+    ['p1', view.p1],
+    ['p2', view.p2],
+  ]
+  for (const [player, side] of sides) {
+    if (!side) continue
+    side.active.forEach((mon, slotIndex) => {
+      if (mon.species && mon.species !== 'Unknown') {
+        resolver.learn({ player, slotIndex }, mon.species)
+      }
+    })
+  }
+}
+
+function renderEvent(
+  event: EventNode,
+  depth: number,
+  resolver: NameResolver,
+  out: LogLine[],
+  showSlotOrder: boolean,
+) {
   const line = (text: string, tone: Tone = 'default') => out.push({ depth, text, tone })
+  const slotSuffix = (slotIndex: number) => (showSlotOrder ? ` — slot ${slotIndex + 1}` : '')
 
   switch (event.type) {
     case 'moveUsed':
@@ -65,13 +102,13 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
     case 'switch':
       resolver.learn(event.switch.slot, event.switch.species)
       line(
-        `${playerLabel(event.switch.slot.player)} sent out ${event.switch.species} (${hpText(event.switch.hp)})`,
+        `${playerLabel(event.switch.slot.player)} sent out ${event.switch.species} (${hpText(event.switch.hp)})${slotSuffix(event.switch.slot.slotIndex)}`,
       )
       break
     case 'simultaneousSwitch':
       for (const sw of event.switches) {
         resolver.learn(sw.slot, sw.species)
-        line(`${playerLabel(sw.slot.player)} sent out ${sw.species} (${hpText(sw.hp)})`)
+        line(`${playerLabel(sw.slot.player)} sent out ${sw.species} (${hpText(sw.hp)})${slotSuffix(sw.slot.slotIndex)}`)
       }
       break
     case 'endOfTurn':
@@ -262,22 +299,32 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
   // endOfTurn children render at the same visual depth as their header line.
   const childDepth = event.type === 'endOfTurn' && event.reactions.length === 0 ? depth : depth + 1
   for (const reaction of event.reactions) {
-    renderEvent(reaction, childDepth, resolver, out)
+    renderEvent(reaction, childDepth, resolver, out, showSlotOrder)
   }
 }
 
-/** Render the full battle log in one chronological pass.
+/** Render the full battle log in one chronological pass. `seedView`, when
+ * given, is the CURRENT `BattleView` — used to (a) pre-seed the slot→species
+ * resolver with every already-known active mon, so a render that doesn't
+ * start from turn 1 (most notably the in-progress preview turn, rendered in
+ * isolation from the committed log — see `TrackerLogSidebar.tsx`) doesn't fall
+ * back to "P2 slot 2" for a mon introduced before this call began, and (b)
+ * decide whether send-out lines are worth annotating with their slot position
+ * at all (`activePerSide > 1` — singles has only one slot per side, so
+ * "slot 1" on every switch would be pure noise there).
  *
  * Consecutive entries with the same label (e.g. a U-turn self-switch that
  * arrives as a separate server round-trip at the same turn number) are
  * coalesced into a single RenderedTurn so the sidebar only draws one divider. */
-export function renderLog(entries: TurnLogEntry[]): RenderedTurn[] {
+export function renderLog(entries: TurnLogEntry[], seedView?: BattleView | null): RenderedTurn[] {
   const resolver = new NameResolver()
+  seedResolverFromView(resolver, seedView)
+  const showSlotOrder = (seedView?.activePerSide ?? 1) > 1
   const out: RenderedTurn[] = []
   for (const entry of entries) {
     const lines: LogLine[] = []
     for (const event of entry.events) {
-      renderEvent(event, 0, resolver, lines)
+      renderEvent(event, 0, resolver, lines, showSlotOrder)
     }
     const prev = out[out.length - 1]
     if (prev && prev.label === entry.label) {

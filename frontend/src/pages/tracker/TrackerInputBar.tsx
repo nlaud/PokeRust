@@ -1,32 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTracker } from '../../store/trackerStore'
-import { completionsAt, contentLinesOf, norm } from '../../lib/trackerGrammar'
+import { completionsAt, norm } from '../../lib/trackerGrammar'
 
 /** Cap on the rising suggestion list — the glass panel above the bar grows to
  * fit however many render, so this bounds how tall it can get. */
 const MAX_SUGGESTIONS = 6
 
-/** One addressable line in the flat, terminal-style navigation history:
- * either an already-committed turn's content line (editing it rebuilds
- * through `editCommitted`) or a line in the current, still-uncommitted draft
- * turn (editing it is purely local until the turn is ended). */
-type HistoryEntry =
-  | { kind: 'committed'; turnIndex: number; lineIndex: number; text: string }
-  | { kind: 'draft'; lineIndex: number; text: string }
-
-function buildHistory(committedTurns: string[], draftLines: string[]): HistoryEntry[] {
-  const out: HistoryEntry[] = []
-  committedTurns.forEach((turnText, turnIndex) => {
-    contentLinesOf(turnText).forEach((text, lineIndex) => {
-      out.push({ kind: 'committed', turnIndex, lineIndex, text })
-    })
-  })
-  draftLines.forEach((text, lineIndex) => out.push({ kind: 'draft', lineIndex, text }))
-  return out
+/** One addressable line in the flat, terminal-style navigation history — only
+ * this turn's still-uncommitted draft lines. ArrowUp/Down deliberately never
+ * crosses into an already-committed turn (a prior turn's belief has already
+ * been sent to the server and folded into inference; walking into it here
+ * would silently let an in-progress edit look like it's still live). */
+interface HistoryEntry {
+  lineIndex: number
+  text: string
 }
 
-function flatCommittedCount(committedTurns: string[]): number {
-  return committedTurns.reduce((n, t) => n + contentLinesOf(t).length, 0)
+function buildHistory(draftLines: string[]): HistoryEntry[] {
+  return draftLines.map((text, lineIndex) => ({ lineIndex, text }))
 }
 
 /** Split `before` (the text up to the caret) into completed tokens and the
@@ -64,33 +55,26 @@ function applyTopSuggestion(
  * The floating, glassy, single-line tracker input — replaces the plain
  * textarea `TrackerScreen.tsx` used to render directly. Minecraft-chat-style
  * word completion (ranked suggestion list rising above the bar, ghost text
- * for the top candidate, Tab to accept), terminal-style history navigation
- * (ArrowUp/Down over every line ever typed — both this session's committed
- * turns AND the in-progress draft — Alt+Left/Right to jump by word), and the
- * two-tier commit model: `Enter` saves the current line locally (or, when
- * positioned on an already-committed line, immediately rebuilds through it —
- * see `editCommitted`'s doc comment) and jumps to a fresh event; `Shift+Enter`
- * additionally ends the turn, appending `endofturn` and rebuilding the whole
- * script so inference recomputes for real; `Escape` discards the current
- * line's unsaved edits without jumping anywhere new-content-wise;
- * `Shift+Escape` discards the whole in-progress draft (never sent to the
- * server, so purely local) and reopens the last committed line for editing.
+ * for the top candidate, Tab to accept — both suppressed once the current
+ * word already IS a complete valid token, so a finished word doesn't keep
+ * dangling a redundant/autocorrected suggestion), terminal-style history
+ * navigation scoped to the CURRENT turn's draft lines only (ArrowUp/Down never
+ * crosses into an already-committed turn; Alt+Left/Right jumps by word), a
+ * line-number gutter tracking the current draft line (matching the server's
+ * own `Line N` error numbering), and the two-tier commit model: `Enter` saves
+ * the current line locally and jumps to a fresh event — or, on an emptied
+ * existing line, deletes that event instead and steps back to the previous
+ * one; `Shift+Enter` additionally ends the turn, appending `endofturn` and
+ * rebuilding the whole script so inference recomputes for real; `Backspace`
+ * on an already-empty existing line deletes it the same way Enter does;
+ * `Escape` discards the current line's unsaved edits without jumping anywhere
+ * new-content-wise; `Shift+Escape` discards the WHOLE in-progress draft (every
+ * line saved via `Enter` this turn, never sent to the server, so purely
+ * local) and starts the turn over from a fresh, empty line.
  */
 export default function TrackerInputBar() {
-  const {
-    view,
-    completions,
-    committedTurns,
-    previewEvents,
-    error,
-    errorLine,
-    busy,
-    previewDraft,
-    clearPreview,
-    endTurn,
-    editCommitted,
-    clearError,
-  } = useTracker()
+  const { view, completions, previewEvents, error, errorLine, busy, previewDraft, clearPreview, endTurn, clearError } =
+    useTracker()
 
   const [draftLines, setDraftLines] = useState<string[]>([])
   const [text, setText] = useState('')
@@ -107,7 +91,7 @@ export default function TrackerInputBar() {
     if (!busy) inputRef.current?.focus()
   }, [busy])
 
-  const history = useMemo(() => buildHistory(committedTurns, draftLines), [committedTurns, draftLines])
+  const history = useMemo(() => buildHistory(draftLines), [draftLines])
   const currentEntry = historyIndex < history.length ? history[historyIndex] : null
 
   const { tokens, partial } = tokensAndPartial(text.slice(0, caretPos))
@@ -117,14 +101,24 @@ export default function TrackerInputBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [text, caretPos, completions],
   )
+  // The current word is already a complete, valid token once it exactly
+  // matches (case/punctuation-insensitively) one of its own candidates —
+  // nothing left to autocomplete OR autocorrect, so suppress both the ghost
+  // and the suggestion panel entirely rather than keep dangling a redundant
+  // (or, worse, an unwanted autocorrect-away-from-what-was-just-typed) option.
+  const partialIsComplete = partial !== '' && suggestions.some((s) => norm(s) === norm(partial))
   const ghost =
-    atEndOfInput && suggestions.length > 0 && partial !== '' && norm(suggestions[0]).startsWith(norm(partial))
+    !partialIsComplete &&
+    atEndOfInput &&
+    suggestions.length > 0 &&
+    partial !== '' &&
+    norm(suggestions[0]).startsWith(norm(partial))
       ? suggestions[0].slice(partial.length)
       : ''
 
   /** Load `newText` into the buffer with the caret at its end — every
-   * navigation/reset action (ArrowUp/Down, jump-to-append, Shift+Escape's
-   * reopen) wants exactly this. */
+   * navigation/reset action (ArrowUp/Down, jump-to-append, delete-and-land-on-
+   * the-previous-line) wants exactly this. */
   function loadBuffer(newText: string) {
     setText(newText)
     setCaretPos(newText.length)
@@ -132,17 +126,26 @@ export default function TrackerInputBar() {
   }
 
   function jumpToAppend(nextDraftLines: string[]) {
-    setHistoryIndex(flatCommittedCount(committedTurns) + nextDraftLines.length)
+    setHistoryIndex(nextDraftLines.length)
     loadBuffer('')
   }
 
-  async function jumpToAppendAfterRebuild() {
-    // The store's `set()` inside `endTurn`/`editCommitted` has already run by
-    // the time the awaited promise resolves, so the freshest `committedTurns`
-    // is available synchronously here — no need to wait for a re-render.
-    const fresh = useTracker.getState().committedTurns
-    setHistoryIndex(flatCommittedCount(fresh) + draftLines.length)
-    loadBuffer('')
+  /** Delete the draft line at `lineIndex` and land the buffer on whatever's
+   * now at the previous position (or a fresh append slot if that was the
+   * only line) — shared by Enter-on-empty and Backspace-on-empty (F6:
+   * "clicking enter on an empty text box should just delete that event, same
+   * thing for backspace on an empty event"). */
+  function deleteDraftLine(lineIndex: number) {
+    const next = draftLines.filter((_, i) => i !== lineIndex)
+    setDraftLines(next)
+    void previewDraft(next)
+    if (next.length === 0) {
+      jumpToAppend(next)
+      return
+    }
+    const prevIndex = Math.max(0, lineIndex - 1)
+    setHistoryIndex(prevIndex)
+    loadBuffer(next[prevIndex])
   }
 
   function moveCaretByWord(direction: -1 | 1) {
@@ -159,7 +162,7 @@ export default function TrackerInputBar() {
   }
 
   function acceptTopSuggestion() {
-    if (suggestions.length === 0) return
+    if (suggestions.length === 0 || partialIsComplete) return
     const { text: next, caret } = applyTopSuggestion(text, caretPos, suggestions[0])
     setText(next)
     setCaretPos(caret)
@@ -169,15 +172,14 @@ export default function TrackerInputBar() {
   async function handleEnter() {
     const trimmed = text.trim()
     if (trimmed === '') {
+      if (currentEntry) {
+        deleteDraftLine(currentEntry.lineIndex)
+        return
+      }
       jumpToAppend(draftLines)
       return
     }
-    if (currentEntry?.kind === 'committed') {
-      const ok = await editCommitted(currentEntry.turnIndex, currentEntry.lineIndex, trimmed)
-      if (ok) await jumpToAppendAfterRebuild()
-      return
-    }
-    if (currentEntry?.kind === 'draft') {
+    if (currentEntry) {
       const next = [...draftLines]
       next[currentEntry.lineIndex] = trimmed
       setDraftLines(next)
@@ -198,16 +200,14 @@ export default function TrackerInputBar() {
   }
 
   async function handleShiftEnter() {
-    if (currentEntry?.kind === 'committed') {
-      const trimmed = text.trim()
-      if (trimmed === '') return
-      const ok = await editCommitted(currentEntry.turnIndex, currentEntry.lineIndex, trimmed)
-      if (ok) await jumpToAppendAfterRebuild()
-      return
-    }
-    let finalDraft = draftLines
     const trimmed = text.trim()
-    if (currentEntry?.kind === 'draft' && trimmed !== '') {
+    let finalDraft = draftLines
+    if (currentEntry && trimmed === '') {
+      // Emptying an existing line and ending the turn: drop that event
+      // (mirrors Enter's delete-on-empty — F6) rather than silently keeping
+      // its old text.
+      finalDraft = draftLines.filter((_, i) => i !== currentEntry.lineIndex)
+    } else if (currentEntry && trimmed !== '') {
       finalDraft = [...draftLines]
       finalDraft[currentEntry.lineIndex] = trimmed
     } else if (trimmed !== '') {
@@ -217,25 +217,20 @@ export default function TrackerInputBar() {
     const ok = await endTurn(finalDraft)
     if (ok) {
       setDraftLines([])
-      const fresh = useTracker.getState().committedTurns
-      setHistoryIndex(flatCommittedCount(fresh))
-      loadBuffer('')
+      jumpToAppend([])
     }
   }
 
   function handleShiftEscape() {
+    // Discards every still-uncommitted draft line (not just the current
+    // buffer) and starts completely fresh. There is no longer a separate
+    // "already on the server" layer to fall back to re-opening — a draft
+    // line only ever lives locally until `Shift+Enter` sends the whole turn
+    // — so unlike `Escape` (which only abandons the current line's unsaved
+    // edit), this is the "start this turn over" action.
     clearPreview()
     setDraftLines([])
-    const flatCount = flatCommittedCount(committedTurns)
-    if (flatCount === 0) {
-      setHistoryIndex(0)
-      loadBuffer('')
-      return
-    }
-    // The committed prefix of `history` is unaffected by clearing draftLines,
-    // so it's still safe to read from the pre-update array here.
-    setHistoryIndex(flatCount - 1)
-    loadBuffer(history[flatCount - 1]?.text ?? '')
+    jumpToAppend([])
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -243,6 +238,14 @@ export default function TrackerInputBar() {
     if (e.key === 'Tab') {
       e.preventDefault()
       acceptTopSuggestion()
+      return
+    }
+    if (e.key === 'Backspace' && text === '' && currentEntry) {
+      // Backspace on an already-empty EXISTING line deletes that event (F6),
+      // mirroring Enter-on-empty; on the fresh append slot there's nothing to
+      // delete, so fall through to the native (no-op) behavior.
+      e.preventDefault()
+      deleteDraftLine(currentEntry.lineIndex)
       return
     }
     if (e.key === 'ArrowUp' && !e.shiftKey) {
@@ -291,7 +294,7 @@ export default function TrackerInputBar() {
   return (
     <div className="glass-soft absolute inset-x-0 bottom-3 z-20 mx-auto w-full max-w-3xl rounded-card px-1 py-1 shadow-lg">
       <div>
-        {suggestions.length > 0 && (
+        {suggestions.length > 0 && !partialIsComplete && (
           // Its own glass-soft layer (same treatment as the outer bar, no
           // gap below) so the blur/tint visually continues upward over every
           // option, sitting directly against the input with nothing between
@@ -312,43 +315,54 @@ export default function TrackerInputBar() {
           </div>
         )}
 
-        <div className="relative rounded-card border border-subtle bg-card">
-          {/* Ghost-text overlay: identical font/padding to the real input on
-              top, or the ghost drifts out of alignment with the caret. The
-              input itself must stay bg-transparent — an opaque input
-              background paints over this layer entirely. */}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-2.5 font-mono text-lg"
+        <div className="relative flex items-center rounded-card border border-subtle bg-card">
+          {/* Line-number gutter: the current draft line, 1-based — matches the
+              server's own `Line N` error numbering (F3/"line number
+              indicator"). */}
+          <span
+            data-testid="tracker-line-number"
+            className="select-none pl-2.5 pr-1 font-mono text-sm text-ink-muted"
           >
-            <span className="invisible">{text}</span>
-            <span className="text-ink-muted" data-testid="tracker-ghost">
-              {ghost}
-            </span>
+            {historyIndex + 1}
+          </span>
+          <div className="relative min-w-0 flex-1">
+            {/* Ghost-text overlay: identical font/padding to the real input on
+                top, or the ghost drifts out of alignment with the caret. The
+                input itself must stay bg-transparent — an opaque input
+                background paints over this layer entirely. */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-2.5 font-mono text-lg"
+            >
+              <span className="invisible">{text}</span>
+              <span className="text-ink-muted" data-testid="tracker-ghost">
+                {ghost}
+              </span>
+            </div>
+            <input
+              ref={inputRef}
+              data-testid="tracker-input"
+              value={text}
+              disabled={busy}
+              onChange={(e) => {
+                setText(e.target.value)
+                setCaretPos(e.target.selectionStart ?? e.target.value.length)
+              }}
+              onKeyDown={handleKeyDown}
+              onSelect={(e) => setCaretPos(e.currentTarget.selectionStart ?? 0)}
+              onClick={(e) => setCaretPos(e.currentTarget.selectionStart ?? 0)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="Input Event"
+              className="relative w-full bg-transparent px-2.5 py-1.5 font-mono text-lg text-ink outline-none disabled:opacity-60"
+            />
           </div>
-          <input
-            ref={inputRef}
-            data-testid="tracker-input"
-            value={text}
-            disabled={busy}
-            onChange={(e) => {
-              setText(e.target.value)
-              setCaretPos(e.target.selectionStart ?? e.target.value.length)
-            }}
-            onKeyDown={handleKeyDown}
-            onSelect={(e) => setCaretPos(e.currentTarget.selectionStart ?? 0)}
-            onClick={(e) => setCaretPos(e.currentTarget.selectionStart ?? 0)}
-            spellCheck={false}
-            autoComplete="off"
-            placeholder="Input Event"
-            className="relative w-full bg-transparent px-2.5 py-1.5 font-mono text-lg text-ink outline-none disabled:opacity-60"
-          />
         </div>
       </div>
 
       <div className="flex items-center justify-between px-3 pb-1 pt-1">
         <span className="text-[11px] text-ink-muted">
-          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: reopen last
+          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: restart turn
         </span>
         {previewEvents.length > 0 && (
           <span className="text-[11px] text-ink-muted">

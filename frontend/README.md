@@ -181,7 +181,7 @@ also be omitted.
 
 | Form | Meaning |
 |---|---|
-| `[p\|o] leads <species>...` | Send out an entire side, left to right. Use `p leads ...`, not separate lead lines; any digit on `p1`/`o1` is ignored. Opening ability reveals should immediately follow the lead lines. |
+| `leads [p\|o] <species>... [p\|o] <species>...` | Send out one or both sides, left to right, on a single line: `leads p tyranitar raichu o charizard aerodactyl`. Any digit on `p1`/`o1` is ignored — a side marker always means "this whole side". Opening ability reveals should immediately follow the leads line. |
 | `[slot] switch <species> [hpspec]` | Switch one slot. `switchin` and `sendout` are aliases. HP defaults to the known value for your roster and 100% for a newly seen opponent. |
 | `[slot] mega [species-or-suffix]` | Mega Evolve. `megaevolve` and `megaevolution` are aliases. The form may be omitted only if the active species is known and has exactly one Mega; a suffix such as `y` disambiguates Charizard. |
 | `[slot] tera <type>` | Terastallize into a type. `terastallize` and `terastallized` are aliases. |
@@ -196,10 +196,11 @@ also be omitted.
 | `weather <weather>` | Set or clear the weather. |
 | `terrain <terrain>` | Set or clear the terrain. |
 
-The two sides' leading `leads` lines at the start of a turn are combined into
-one simultaneous switch event. Ability lines for those entrants that
-immediately follow are nested into that event, preserving entry-ability and
-ability-absence inference.
+A single `leads` line covering both sides parses directly to one simultaneous
+switch event; a turn that instead spells the two sides out as separate
+consecutive `leads p ...` / `leads o ...` lines is merged into the same shape.
+Ability lines for those entrants that immediately follow are nested into that
+event, preserving entry-ability and ability-absence inference.
 
 #### Move lines
 

@@ -18,15 +18,26 @@ const TONE_CLASSES: Record<Tone, string> = {
 export default function TrackerLogSidebar() {
   const log = useTracker((s) => s.log)
   const previewEvents = useTracker((s) => s.previewEvents)
-  const turns = useMemo(() => renderLog(log), [log])
+  const view = useTracker((s) => s.view)
+  // `view` seeds each render's slot->species resolver with the field's
+  // current occupants (see `renderLog`'s doc comment) — the committed walk is
+  // normally self-sufficient (every slot's occupant is introduced by its own
+  // switch event before anything else can reference that slot), but the
+  // in-progress preview below renders in ISOLATION from the committed log, so
+  // without this seed a slot introduced in an earlier committed turn reads as
+  // the bare "P2 slot 2" fallback the moment the user types a move against it.
+  const turns = useMemo(() => renderLog(log, view), [log, view])
   // The in-progress turn's events render through the SAME `renderLog` engine
   // as a committed turn — wrapped in a one-entry `TurnLogEntry[]` so it's an
   // "event rose" like every other log block, just labeled and toned
   // differently to read as not-yet-final (see `TrackerPreviewResponse`'s doc
   // comment: this is a Pass-1-only structural preview, never persisted).
   const pendingTurn = useMemo(
-    () => (previewEvents.length > 0 ? renderLog([{ label: 'In progress', events: previewEvents }])[0] : null),
-    [previewEvents],
+    () =>
+      previewEvents.length > 0
+        ? renderLog([{ label: 'In progress', events: previewEvents }], view)[0]
+        : null,
+    [previewEvents, view],
   )
   const scrollRef = useRef<HTMLDivElement>(null)
 

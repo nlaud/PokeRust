@@ -217,10 +217,13 @@ fn render_top_level_event(
             Ok(Some(out.join("\n")))
         }
         EventKind::SimultaneousSwitch { switches } => {
-            // Rendered as separate per-side `leads` lines (mirroring how a
-            // user types them) — `fold_leads_and_entry_abilities` re-merges
-            // them on the parse side. Entry-ability reveals nested as
-            // reactions are rendered as their own follow-up lines; their
+            // Rendered as ONE combined `leads p ... o ...` line covering
+            // every side that qualifies (mirroring the grammar a user
+            // types — see `tracker_parse.rs`'s `"leads"` dispatch arm).
+            // `fold_leads_and_entry_abilities` also accepts two separate
+            // per-side `leads` lines, but a single combined line is the
+            // canonical round-trip rendering. Entry-ability reveals nested
+            // as reactions are rendered as their own follow-up lines; their
             // guaranteed cascades are re-synthesized by `augment_turn`, same
             // diffing discipline as everywhere else.
             let mut out = Vec::new();
@@ -240,6 +243,8 @@ fn render_top_level_event(
                     pokemon_dex,
                 );
             }
+            let mut leads_fragments: Vec<String> = Vec::new();
+            let mut fallback_switch_lines: Vec<String> = Vec::new();
             for player in [Player::P1, Player::P2] {
                 let mut side: Vec<&SwitchState> = switches
                     .iter()
@@ -265,18 +270,22 @@ fn render_top_level_event(
                         .map(|sw| species_word(&sw.species))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    out.push(format!("{} leads {}", side_word(player), species_list));
+                    leads_fragments.push(format!("{} {}", side_word(player), species_list));
                 } else {
                     // A simultaneous post-faint replacement may fill only a
                     // subset of doubles slots. `leads` cannot preserve those
                     // indices, so emit ordinary slot-addressed switches.
-                    out.extend(
+                    fallback_switch_lines.extend(
                         side.iter()
                             .map(|sw| switch_line(sw))
                             .collect::<Result<Vec<_>, _>>()?,
                     );
                 }
             }
+            if !leads_fragments.is_empty() {
+                out.push(format!("leads {}", leads_fragments.join(" ")));
+            }
+            out.extend(fallback_switch_lines);
             for r in &explicit_reactions {
                 out.push(render_standalone_event(r, &after_switch)?);
                 for child in

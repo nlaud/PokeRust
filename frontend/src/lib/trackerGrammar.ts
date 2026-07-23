@@ -37,6 +37,80 @@ export interface CompletionPools {
 
 export const EMPTY_POOLS: CompletionPools = { species: [], moves: [], abilities: [], items: [] }
 
+// ── Casing detection ─────────────────────────────────────────────────────────
+// Pool completions (species/moves/abilities/items) arrive as human labels
+// with spaces ("Rock Slide") — but the input tokenizes on whitespace, so a
+// multi-word name only ever round-trips as ONE token in a whitespace-free
+// casing: `RockSlide` (Pascal), `rock_slide` (snake), `rock-slide` (kebab), or
+// `rockSlide` (camel) — exactly the casings `tracker_parse.rs::norm` (and this
+// module's `norm` above) treat as equivalent. A literal space, by contrast,
+// breaks a multi-word name into two separate tokens on submit, so it is
+// deliberately NOT one of the casings offered here.
+
+export type CasingStyle = 'pascal' | 'snake' | 'kebab' | 'camel'
+
+/** Classify the casing of one already-typed, whitespace-free token. Returns
+ * `null` when the token carries no signal (no underscore/hyphen and no
+ * internal capital — e.g. a single short word, or an all-lowercase
+ * concatenation), so the caller can keep looking at earlier tokens instead of
+ * locking onto an ambiguous guess. */
+function detectCasing(raw: string): CasingStyle | null {
+  if (raw.includes('_')) return 'snake'
+  if (raw.includes('-')) return 'kebab'
+  if (/[A-Z]/.test(raw.slice(1))) return /^[A-Z]/.test(raw) ? 'pascal' : 'camel'
+  return null
+}
+
+/** Which casing to render multi-word completions in: whatever convention the
+ * user has already used for an earlier multi-word name on this SAME line
+ * (scanned most-recent-first), or PascalCase — the grammar's own convention
+ * (see `TYPE_WORDS`) — if no multi-word token has appeared yet. Only a token
+ * that actually corresponds to a multi-word pool entry can set the style; a
+ * naturally-single-word token (`tackle`, `p1`) carries no casing signal. */
+export function styleFromTokens(tokens: string[], pools: CompletionPools): CasingStyle {
+  const multiWordLabels = [...pools.species, ...pools.moves, ...pools.abilities, ...pools.items].filter((label) =>
+    /\s/.test(label),
+  )
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const raw = tokens[i]
+    const n = norm(raw)
+    if (multiWordLabels.some((label) => norm(label) === n)) {
+      const style = detectCasing(raw)
+      if (style) return style
+    }
+  }
+  return 'pascal'
+}
+
+/** Render a human-readable, space-separated pool label in one of the
+ * grammar's supported whitespace-free casings. Harmless (and still matches
+ * the requested style) on an already-single-word label too. */
+export function recase(label: string, style: CasingStyle): string {
+  const words = label.split(/\s+/).filter((w) => w.length > 0)
+  if (words.length === 0) return label
+  switch (style) {
+    case 'snake':
+      return words.map((w) => w.toLowerCase()).join('_')
+    case 'kebab':
+      return words.map((w) => w.toLowerCase()).join('-')
+    case 'camel':
+      return words
+        .map((w, i) => (i === 0 ? w.toLowerCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()))
+        .join('')
+    case 'pascal':
+      return words.map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase()).join('')
+  }
+}
+
+function recasePools(pools: CompletionPools, style: CasingStyle): CompletionPools {
+  return {
+    species: pools.species.map((s) => recase(s, style)),
+    moves: pools.moves.map((s) => recase(s, style)),
+    abilities: pools.abilities.map((s) => recase(s, style)),
+    items: pools.items.map((s) => recase(s, style)),
+  }
+}
+
 // ── Fixed keyword tables, mirroring tracker_parse.rs ────────────────────────
 // Each concept lists every word the Rust parser accepts; `canonical` is the
 // single word this module SUGGESTS for that concept (kept short/memorable so
@@ -187,7 +261,6 @@ const MOVE_EFFECT_WORDS: WordGroup[] = [
 
 const SLOT_VERB_WORDS: WordGroup[] = [
   group('switch', 'switchin', 'sendout'),
-  group('leads'),
   group('mega', 'megaevolve', 'megaevolution'),
   group('tera', 'terastallize', 'terastallized'),
   group('mustrecharge'),
@@ -206,6 +279,13 @@ const TYPE_WORDS: WordGroup[] = [
 const SLOT_WORDS: WordGroup[] = [group('p'), group('p1'), group('p2'), group('o'), group('o1'), group('o2')]
 const END_OF_TURN_WORDS: WordGroup[] = [group('endofturn', 'eot')]
 const FIELD_LINE_WORDS: WordGroup[] = [group('weather'), group('terrain')]
+// `leads` is now its own line-start keyword (`leads p <sp>... o <sp>...`),
+// mirroring `tracker_parse.rs`'s standalone-keyword dispatch — not a
+// slot-addressed verb anymore (see `SLOT_VERB_WORDS`, which no longer lists
+// it). `LEADS_SIDE_WORDS` are the bare markers accepted after `leads`; digits
+// (`p1`/`p2`) don't apply there — a marker always means "this whole side".
+const LEADS_LINE_WORDS: WordGroup[] = [group('leads')]
+const LEADS_SIDE_WORDS: WordGroup[] = [group('p'), group('o')]
 
 function canonicalsOf(groups: WordGroup[]): string[] {
   return groups.map((g) => g.canonical)
@@ -228,18 +308,43 @@ function levenshtein(a: string, b: string): number {
   return dp[b.length]
 }
 
-/** Rank `candidates` against `partial`: exact prefix matches first (in list
- * order), then — only if NO candidate has `partial` as a prefix — every
- * candidate ranked by edit distance to `partial`, closest first. This is the
- * "autocorrect spelling to the closest possibility" behavior: a typo like
- * `thunderblot` still surfaces `Thunderbolt` as the top (Tab-fillable)
+/** Small deterministic string hash (FNV-1a) — gives the "nothing typed yet" /
+ * "several prefix matches" suggestion lists a STABLE but non-alphabetical,
+ * non-insertion order: every candidate's position is a pure function of its
+ * own text, so (a) the same word always lands in the same relative slot
+ * regardless of what else is in the pool — nothing "jumps" as the set narrows
+ * while typing — and (b) line-start doesn't always show the same handful of
+ * words first (`p`, `p1`, `p2`, ... in list order) just because they happen
+ * to be declared first. */
+function stableHash(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+function byStableHash(candidates: string[]): string[] {
+  return [...candidates].sort((a, b) => stableHash(norm(a)) - stableHash(norm(b)))
+}
+
+/** Rank `candidates` against `partial`: exact prefix matches first (stable-hash
+ * order, not list order — see `stableHash`'s doc comment), then — only if NO
+ * candidate has `partial` as a prefix — every candidate ranked by edit
+ * distance to `partial`, closest first (ties broken by the same stable hash).
+ * This is the "autocorrect spelling to the closest possibility" behavior: a
+ * typo like `thunderblot` still surfaces `Thunderbolt` as the top (Tab-fillable)
  * suggestion instead of an empty list. */
 function rank(candidates: string[], partial: string): string[] {
   const p = norm(partial)
-  if (p === '') return candidates
+  if (p === '') return byStableHash(candidates)
   const prefixMatches = candidates.filter((c) => norm(c).startsWith(p))
-  if (prefixMatches.length > 0) return prefixMatches
-  return [...candidates].sort((a, b) => levenshtein(norm(a), p) - levenshtein(norm(b), p))
+  if (prefixMatches.length > 0) return byStableHash(prefixMatches)
+  return [...candidates].sort((a, b) => {
+    const d = levenshtein(norm(a), p) - levenshtein(norm(b), p)
+    return d !== 0 ? d : stableHash(norm(a)) - stableHash(norm(b))
+  })
 }
 
 // ── Script (de)serialization ─────────────────────────────────────────────────
@@ -293,7 +398,7 @@ export type LinePosition =
   | { kind: 'weatherWord' }
   | { kind: 'terrainWord' }
   | { kind: 'switchSpecies' }
-  | { kind: 'leadsSpecies' }
+  | { kind: 'leadsSideOrSpecies' }
   | { kind: 'megaSpeciesOrDone' }
   | { kind: 'teraType' }
   | { kind: 'itemVerbItem' }
@@ -313,6 +418,10 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   if (first === 'weather') return cursorIndex === 1 ? { kind: 'weatherWord' } : { kind: 'done' }
   if (first === 'terrain') return cursorIndex === 1 ? { kind: 'terrainWord' } : { kind: 'done' }
   if (first === 'endofturn' || first === 'eot') return { kind: 'done' }
+  // `leads [p|o] <species>... [p|o] <species>...` — every position after the
+  // keyword can be either a new side marker or another species of the
+  // current side (see `tracker_parse.rs`'s `"leads"` dispatch arm).
+  if (first === 'leads') return { kind: 'leadsSideOrSpecies' }
 
   if (cursorIndex === 1) return { kind: 'action' }
 
@@ -320,7 +429,6 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   if (action === 'switch' || action === 'switchin' || action === 'sendout') {
     return cursorIndex === 2 ? { kind: 'switchSpecies' } : { kind: 'done' }
   }
-  if (action === 'leads') return { kind: 'leadsSpecies' }
   if (action === 'mega' || action === 'megaevolve' || action === 'megaevolution') {
     return cursorIndex === 2 ? { kind: 'megaSpeciesOrDone' } : { kind: 'done' }
   }
@@ -349,11 +457,18 @@ export function completionsAt(
   partial: string,
   pools: CompletionPools,
 ): string[] {
+  const style = styleFromTokens(tokens, pools)
+  const recased = recasePools(pools, style)
   const position = classifyPosition(tokens, cursorIndex)
   switch (position.kind) {
     case 'lineStart':
       return rank(
-        [...canonicalsOf(SLOT_WORDS), ...canonicalsOf(END_OF_TURN_WORDS), ...canonicalsOf(FIELD_LINE_WORDS)],
+        [
+          ...canonicalsOf(SLOT_WORDS),
+          ...canonicalsOf(END_OF_TURN_WORDS),
+          ...canonicalsOf(FIELD_LINE_WORDS),
+          ...canonicalsOf(LEADS_LINE_WORDS),
+        ],
         partial,
       )
     case 'action':
@@ -362,9 +477,9 @@ export function completionsAt(
           ...canonicalsOf(SLOT_VERB_WORDS),
           ...canonicalsOf(ITEM_VERB_WORDS),
           ...canonicalsOf(CANT_REASON_WORDS),
-          ...pools.moves,
-          ...pools.abilities,
-          ...pools.items,
+          ...recased.moves,
+          ...recased.abilities,
+          ...recased.items,
         ],
         partial,
       )
@@ -373,13 +488,14 @@ export function completionsAt(
     case 'terrainWord':
       return rank(canonicalsOf(TERRAIN_WORDS), partial)
     case 'switchSpecies':
-    case 'leadsSpecies':
     case 'megaSpeciesOrDone':
-      return rank(pools.species, partial)
+      return rank(recased.species, partial)
+    case 'leadsSideOrSpecies':
+      return rank([...canonicalsOf(LEADS_SIDE_WORDS), ...recased.species], partial)
     case 'teraType':
       return rank(canonicalsOf(TYPE_WORDS), partial)
     case 'itemVerbItem':
-      return rank(pools.items, partial)
+      return rank(recased.items, partial)
     case 'moveBody':
       return rank(
         [
@@ -389,8 +505,8 @@ export function completionsAt(
           ...canonicalsOf(STATUS_WORDS),
           ...canonicalsOf(VOLATILE_WORDS),
           ...canonicalsOf(ITEM_VERB_WORDS),
-          ...pools.abilities,
-          ...pools.items,
+          ...recased.abilities,
+          ...recased.items,
         ],
         partial,
       )
