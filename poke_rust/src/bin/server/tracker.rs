@@ -39,11 +39,13 @@ use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
 use poke_rust::data::item::Item;
-use poke_rust::information::inference::{InferenceConfig, apply_information};
+use poke_rust::data::species::Species;
+use poke_rust::information::inference::{InferenceConfig, apply_information, apply_structural_preview};
 use poke_rust::information::information::{EventKind, InformationEvent};
 use poke_rust::information::unknowns::{InformationMode, UnknownBattleState, UnknownMatchState};
 use poke_rust::simulator;
 use poke_rust::state::battle::{FieldSlot, Player};
+use poke_rust::user::{humanize_identifier, move_name};
 
 use crate::dto::*;
 use crate::mapping;
@@ -54,11 +56,31 @@ use crate::tracker_parse::{ParseError, TrackerLine, fold_leads_and_entry_abiliti
 
 pub struct TrackerSession {
     pub belief: UnknownBattleState,
+    /// Snapshot of `belief` taken in `create_tracker`, before any tracker-text
+    /// event has been applied — nobody active on either side yet (see this
+    /// module's doc comment). The rebuild path (`rebuild_tracker_history`)
+    /// re-applies `script` on top of THIS, never `belief`, since `belief` is
+    /// the already-mutated cumulative state a rebuild needs to discard and
+    /// recompute from scratch.
+    pub initial_belief: UnknownBattleState,
+    /// Raw tracker-text of each `/events` submission (or the single full
+    /// script from the last `/history` rebuild), concatenated with a blank
+    /// line between entries to reproduce the exact input to `PUT /history`.
+    /// Exists so `GET /tracker/{id}` can hand the editor back its authored
+    /// text after a page reload — `log`/`belief` alone can't be reversed into
+    /// tracker syntax (see `apply_turns_from`'s doc comment).
+    pub script: Vec<String>,
     pub active_per_side: u8,
     pub brought_per_side: u8,
     pub inference_config: InferenceConfig,
     pub log: Vec<TurnLogEntry>,
     pub turn_count: u16,
+    /// Every species on either roster, as parsed from the teamsheets at
+    /// `create_tracker` time — independent of fog-of-war, since the tracker
+    /// completions endpoint (`get_tracker_completions`) needs the ground-truth
+    /// match roster, not a belief that may still be narrowing the opponent's
+    /// species. Deduplicated; order not significant.
+    pub roster_species: Vec<Species>,
 }
 
 #[derive(Debug)]
@@ -236,13 +258,23 @@ pub async fn create_tracker(
     let battle_belief =
         team_preview_belief.into_battle_state(Player::P1, &[], &all_p1_indices, &[], &[]);
 
+    let mut roster_species: Vec<Species> = Vec::new();
+    for mon in preview.p1_mons.iter().chain(preview.p2_mons.iter()) {
+        if !roster_species.contains(&mon.species) {
+            roster_species.push(mon.species.clone());
+        }
+    }
+
     let session = TrackerSession {
+        initial_belief: battle_belief.clone(),
         belief: battle_belief,
+        script: Vec::new(),
         active_per_side: req.active_per_side,
         brought_per_side: req.brought_per_side,
         inference_config,
         log: Vec::new(),
         turn_count: 0,
+        roster_species,
     };
     let view = mapping::battle_view_from_belief(
         &session.belief,
@@ -274,6 +306,7 @@ pub async fn get_tracker(State(app): State<AppState>, Path(id): Path<String>) ->
     Json(GetTrackerResponse {
         state: view,
         log: session.log.clone(),
+        script: session.script.join("\n"),
     })
     .into_response()
 }
@@ -487,23 +520,43 @@ pub async fn submit_tracker_events(
     }
 }
 
-/// Apply a tracker-text request through the exact production pipeline. Work is
-/// performed on local clones and committed only after every submitted turn
-/// succeeds, preserving the endpoint's all-or-nothing contract.
-pub(crate) fn apply_tracker_text(
-    session: &mut TrackerSession,
+/// The result of successfully applying a batch of complete turns starting
+/// from some base belief — see `apply_turns_from`.
+struct AppliedTurns {
+    belief: UnknownBattleState,
+    log: Vec<TurnLogEntry>,
+}
+
+/// Parses `text` (one or more complete, `endofturn`-terminated turns) and
+/// applies them in order starting from `base`, all-or-nothing: `base` itself
+/// is never mutated, and any failure — parse, turn-completeness, or an
+/// inference-engine panic caught via `catch_unwind` — discards everything
+/// applied so far in this call, returning the base belief's caller untouched.
+/// This is the exact production pipeline both tracker-mutating endpoints
+/// share:
+/// - `submit_tracker_events` (`POST /events`) calls this with `base =
+///   &session.belief` and `turn_offset = session.turn_count`, then EXTENDS the
+///   session (append semantics — existing turns are untouched).
+/// - `rebuild_tracker_history` (`PUT /history`) calls this with `base =
+///   &session.initial_belief` and `turn_offset = 0`, then REPLACES the session
+///   wholesale — the only way to make an edit to an already-committed turn
+///   take effect, since a committed belief cannot be reverse-applied (there is
+///   no `EventNode → InformationEvent` inverse — see `TrackerSession::script`'s
+///   doc comment).
+///
+/// `turn_offset` only affects `TurnLogEntry` labels ("Turn N") and the turn
+/// number reported in an error message; it does not affect what's valid.
+fn apply_turns_from(
+    base: &UnknownBattleState,
     text: &str,
     dexes: &Dexes,
-) -> Result<TrackerEventsResponse, SubmitTrackerError> {
-
-    // Parse against the CURRENTLY COMMITTED belief (HP-direction classification
-    // reads it) — a parse error must never mutate anything.
-    let lines = match parse_tracker_text(
-        text,
-        &session.belief,
-        &dexes.move_dex,
-        &dexes.pokemon_dex,
-    ) {
+    config: &InferenceConfig,
+    active_per_side: u8,
+    turn_offset: u16,
+) -> Result<AppliedTurns, SubmitTrackerError> {
+    // Parse against `base` (HP-direction classification reads it) — a parse
+    // error must never mutate anything.
+    let lines = match parse_tracker_text(text, base, &dexes.move_dex, &dexes.pokemon_dex) {
         Ok(l) => l,
         Err(e) => return Err(SubmitTrackerError::Parse(e)),
     };
@@ -512,9 +565,9 @@ pub(crate) fn apply_tracker_text(
         Err(message) => return Err(SubmitTrackerError::Unprocessable(message)),
     };
 
-    let mut working = session.belief.clone();
-    let mut log_delta: Vec<TurnLogEntry> = Vec::new();
-    let mut turn_count = session.turn_count;
+    let mut working = base.clone();
+    let mut log: Vec<TurnLogEntry> = Vec::new();
+    let mut turn_count = turn_offset;
     for events in turns {
         // Merge a leading `p leads`/`o leads` pair into one combined event and
         // fold immediately-following entry-ability reveals into its
@@ -525,11 +578,10 @@ pub(crate) fn apply_tracker_text(
 
         // An incomplete turn (some active slot recorded nothing at all) is
         // rejected the same way a contradiction is — before any mutation.
-        if let Err(message) = validate_turn_completeness(&events, &working, session.active_per_side)
-        {
+        if let Err(message) = validate_turn_completeness(&events, &working, active_per_side) {
             return Err(SubmitTrackerError::Unprocessable(format!(
                 "turn {}: {message}",
-                turn_count + log_delta.len() as u16 + 1
+                turn_count + 1
             )));
         }
 
@@ -548,7 +600,7 @@ pub(crate) fn apply_tracker_text(
                 &dexes.pokemon_dex,
                 &dexes.move_dex,
                 &dexes.ability_dex,
-                &session.inference_config,
+                config,
             )
         }));
         match caught {
@@ -561,21 +613,42 @@ pub(crate) fn apply_tracker_text(
             Err(payload) => {
                 return Err(SubmitTrackerError::Unprocessable(format!(
                     "turn {}: {}",
-                    turn_count + log_delta.len() as u16 + 1,
+                    turn_count + 1,
                     panic_message(payload)
                 )));
             }
         }
         turn_count += 1;
-        log_delta.push(TurnLogEntry {
+        log.push(TurnLogEntry {
             label: format!("Turn {turn_count}"),
             events: events.iter().map(mapping::event_node).collect(),
         });
     }
 
-    session.belief = working;
-    session.turn_count = turn_count;
-    session.log.extend(log_delta.iter().cloned());
+    Ok(AppliedTurns { belief: working, log })
+}
+
+/// Apply a tracker-text request through the exact production pipeline. Work is
+/// performed on local clones and committed only after every submitted turn
+/// succeeds, preserving the endpoint's all-or-nothing contract.
+pub(crate) fn apply_tracker_text(
+    session: &mut TrackerSession,
+    text: &str,
+    dexes: &Dexes,
+) -> Result<TrackerEventsResponse, SubmitTrackerError> {
+    let applied = apply_turns_from(
+        &session.belief,
+        text,
+        dexes,
+        &session.inference_config,
+        session.active_per_side,
+        session.turn_count,
+    )?;
+
+    session.belief = applied.belief;
+    session.turn_count += applied.log.len() as u16;
+    session.log.extend(applied.log.iter().cloned());
+    session.script.push(text.to_string());
     let view = mapping::battle_view_from_belief(
         &session.belief,
         session.active_per_side,
@@ -585,8 +658,172 @@ pub(crate) fn apply_tracker_text(
 
     Ok(TrackerEventsResponse {
         state: view,
-        log_delta,
+        log_delta: applied.log,
     })
+}
+
+/// `POST /api/tracker/{id}/preview` — per-event structural feedback for the
+/// in-progress (possibly incomplete) turn the user is currently typing.
+/// Unlike `submit_tracker_events`, this NEVER mutates the session: it clones
+/// the committed belief, runs the same parse/fold/augment steps, then applies
+/// only `apply_structural_preview`'s Pass-1 subset (see its doc comment for
+/// why that's the only pass sound on a partial turn) and returns a disposable
+/// provisional view. `text` need not be a complete turn and need not end with
+/// `endofturn` — turn-completeness is deliberately NOT checked here.
+pub async fn preview_tracker_events(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<TrackerPreviewRequest>,
+) -> Response {
+    let sessions = lock(&app);
+    let Some(session) = sessions.get(&id) else {
+        return not_found();
+    };
+
+    let lines = match parse_tracker_text(
+        &req.text,
+        &session.belief,
+        &app.dexes.move_dex,
+        &app.dexes.pokemon_dex,
+    ) {
+        Ok(l) => l,
+        Err(e) => return parse_error_response(e),
+    };
+    let events: Vec<InformationEvent> = lines
+        .into_iter()
+        .filter_map(|line| match line {
+            TrackerLine::Event(ev) => Some(ev),
+            TrackerLine::EndOfTurn => None,
+        })
+        .collect();
+    let events = fold_leads_and_entry_abilities(events);
+
+    let mut working = session.belief.clone();
+    let events: Vec<InformationEvent> =
+        augment_turn(events, &working, &app.dexes.move_dex, &app.dexes.pokemon_dex);
+    apply_structural_preview(
+        &mut working,
+        &events,
+        &app.dexes.pokemon_dex,
+        &app.dexes.move_dex,
+        &app.dexes.ability_dex,
+        &session.inference_config,
+    );
+
+    let view = mapping::battle_view_from_belief(
+        &working,
+        session.active_per_side,
+        session.brought_per_side,
+        session.inference_config.legal_items.as_ref(),
+    );
+    Json(TrackerPreviewResponse {
+        state: view,
+        events: events.iter().map(mapping::event_node).collect(),
+    })
+    .into_response()
+}
+
+/// `PUT /api/tracker/{id}/history` — rebuild the whole session from
+/// `session.initial_belief` using a corrected/edited FULL script (every turn,
+/// not just new ones). This is how editing a past event or removing a
+/// committed turn takes effect: the frontend owns the authored script (see
+/// `TrackerSession::script`'s doc comment) and always resubmits it in full
+/// here rather than trying to patch a single turn in place, since parsing and
+/// validation are both belief-dependent and must replay in order from
+/// scratch. All-or-nothing exactly like `POST /events` — on any failure the
+/// session is untouched. An empty (or all-whitespace) script is accepted as
+/// "reset to zero committed turns" rather than the usual "no complete turn
+/// submitted" parse error, so popping the very first turn back into the draft
+/// and never recommitting it is a valid end state.
+pub async fn rebuild_tracker_history(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<TrackerEventsRequest>,
+) -> Response {
+    let mut sessions = lock(&app);
+    let Some(session) = sessions.get_mut(&id) else {
+        return not_found();
+    };
+
+    let applied = if req.text.trim().is_empty() {
+        AppliedTurns { belief: session.initial_belief.clone(), log: Vec::new() }
+    } else {
+        match apply_turns_from(
+            &session.initial_belief,
+            &req.text,
+            &app.dexes,
+            &session.inference_config,
+            session.active_per_side,
+            0,
+        ) {
+            Ok(applied) => applied,
+            Err(SubmitTrackerError::Parse(error)) => return parse_error_response(error),
+            Err(SubmitTrackerError::Unprocessable(message)) => return unprocessable(message),
+            Err(SubmitTrackerError::Internal(message)) => return internal_error(message),
+        }
+    };
+
+    session.belief = applied.belief;
+    session.turn_count = applied.log.len() as u16;
+    session.log = applied.log;
+    session.script = if req.text.trim().is_empty() { Vec::new() } else { vec![req.text] };
+
+    let view = mapping::battle_view_from_belief(
+        &session.belief,
+        session.active_per_side,
+        session.brought_per_side,
+        session.inference_config.legal_items.as_ref(),
+    );
+    Json(GetTrackerResponse {
+        state: view,
+        log: session.log.clone(),
+        script: session.script.join("\n"),
+    })
+    .into_response()
+}
+
+/// `GET /api/tracker/{id}/completions` — name pools for the tracker input
+/// bar's autocomplete, scoped to this specific match rather than the entire
+/// dex (see `TrackerCompletionsDto`'s doc comment for why: a full move/ability
+/// dex dump would suggest moves no Pokemon in this battle could ever use).
+/// Held items are deliberately NOT returned here — they aren't
+/// species-constrained, and the frontend already has the full item catalog
+/// (`frontend/src/lib/items.ts`).
+pub async fn get_tracker_completions(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+    let sessions = lock(&app);
+    let Some(session) = sessions.get(&id) else {
+        return not_found();
+    };
+
+    let mut moves: Vec<String> = Vec::new();
+    let mut abilities: Vec<String> = Vec::new();
+    for species in &session.roster_species {
+        if let Some(learnable) = app.dexes.learnset_dex.get(species) {
+            for mv in learnable {
+                let name = move_name(mv);
+                if !moves.contains(&name) {
+                    moves.push(name);
+                }
+            }
+        }
+        if let Some(data) = app.dexes.pokemon_dex.get(species) {
+            for ability in &data.abilities {
+                let name = humanize_identifier(format!("{ability:?}"));
+                if !abilities.contains(&name) {
+                    abilities.push(name);
+                }
+            }
+        }
+    }
+    let species: Vec<String> = session
+        .roster_species
+        .iter()
+        .map(|s| humanize_identifier(format!("{s:?}")))
+        .collect();
+    moves.sort();
+    abilities.sort();
+
+    Json(TrackerCompletionsDto { species, moves, abilities }).into_response()
 }
 
 #[cfg(test)]
@@ -625,11 +862,14 @@ mod tests {
     fn tracker_session_1v1() -> TrackerSession {
         TrackerSession {
             belief: belief_1v1(),
+            initial_belief: belief_1v1(),
+            script: Vec::new(),
             active_per_side: 1,
             brought_per_side: 1,
             inference_config: InferenceConfig::default(),
             log: Vec::new(),
             turn_count: 0,
+            roster_species: vec![Species::Pikachu, Species::Garchomp],
         }
     }
 
@@ -924,5 +1164,115 @@ mod tests {
             assert!(session.log.is_empty(), "seed={seed}");
             assert_eq!(format!("{:?}", session.belief), belief_before, "seed={seed}");
         }
+    }
+
+    /// `PUT /history`'s whole reason for existing is that it must reproduce
+    /// exactly what the append path (`POST /events`) would have produced, had
+    /// the same text been submitted turn-by-turn from a fresh session — that's
+    /// what makes "edit a past event, resubmit the full corrected script" sound
+    /// rather than just a different (and possibly diverging) code path.
+    #[test]
+    fn rebuild_from_initial_belief_reproduces_the_equivalent_append_sequence() {
+        let text = "p1 protect\no1 protect\nendofturn\np1 thunderbolt o1 62%\no1 protect\nendofturn";
+
+        let mut appended = tracker_session_1v1();
+        apply_tracker_text(&mut appended, text, dexes()).expect("append path should succeed");
+
+        let rebuilt = apply_turns_from(
+            &tracker_session_1v1().initial_belief,
+            text,
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        )
+        .expect("rebuild path should succeed");
+
+        assert_eq!(format!("{:?}", appended.belief), format!("{:?}", rebuilt.belief));
+        assert_eq!(appended.log.len(), rebuilt.log.len());
+        assert_eq!(appended.turn_count, rebuilt.log.len() as u16);
+    }
+
+    /// `apply_turns_from` itself still rejects an empty/all-whitespace script
+    /// the same way it always rejected "no endofturn line at all" — this pins
+    /// that behavior so the empty-script special case added to
+    /// `rebuild_tracker_history` (reset to `initial_belief` with zero turns,
+    /// exercised over real HTTP in the Playwright suite) is visibly a
+    /// deliberate carve-out at the call site, not something that crept into
+    /// the shared turn-application core.
+    #[test]
+    fn apply_turns_from_rejects_an_empty_script_as_no_complete_turn() {
+        let belief = belief_1v1();
+        let result = apply_turns_from(&belief, "   \n", dexes(), &InferenceConfig::default(), 1, 0);
+        assert!(matches!(result, Err(SubmitTrackerError::Unprocessable(_))));
+    }
+
+    /// Soundness guard for `apply_structural_preview`: the facts it establishes
+    /// from a PARTIAL turn (here, only P1's move — P2 hasn't acted yet and
+    /// there's no `endofturn`) must already agree with what the full six-pass
+    /// pipeline confirms once the very same turn is completed for real. If a
+    /// future change made the Pass-1-only preview diverge from ground truth
+    /// (rather than just being a strict under-approximation of it), this would
+    /// mean the live input bar shows the user a fact the eventual commit then
+    /// contradicts — exactly the failure mode `apply_structural_preview`'s doc
+    /// comment promises can't happen.
+    #[test]
+    fn structural_preview_of_a_partial_turn_matches_the_eventual_full_turn_end_belief() {
+        let move_used = InformationEvent {
+            kind: EventKind::MoveUsed {
+                user: p1(),
+                move_used: PokemonMove::Thunderbolt,
+                targets: vec![o1()],
+            },
+            reactions: vec![leaf(EventKind::DamageDealt {
+                target: o1(),
+                new_hp: PokemonHP::Percent(50),
+                max_hp: 100,
+            })],
+        };
+
+        // Only P1 has acted so far — exactly what a live `/preview` call sees
+        // mid-turn, before P2's action or `endofturn` have been typed.
+        let mut preview_belief = belief_1v1();
+        apply_structural_preview(
+            &mut preview_belief,
+            std::slice::from_ref(&move_used),
+            pokemon_dex(),
+            &dexes().move_dex,
+            &dexes().ability_dex,
+            &InferenceConfig::default(),
+        );
+
+        // The same turn, completed for real through the full pipeline.
+        let complete_events = vec![
+            move_used.clone(),
+            leaf(EventKind::Cant { slot: o1(), reason: CantReason::Other }),
+            leaf(EventKind::EndOfTurn),
+        ];
+        let full_belief = match apply_information(
+            UnknownMatchState::Battle(belief_1v1()),
+            &complete_events,
+            false,
+            pokemon_dex(),
+            &dexes().move_dex,
+            &dexes().ability_dex,
+            &InferenceConfig::default(),
+        ) {
+            UnknownMatchState::Battle(b) => b,
+            other => panic!("expected Battle, got {other:?}"),
+        };
+
+        assert_eq!(preview_belief.p2_active_mons[0].hp, full_belief.p2_active_mons[0].hp);
+        assert!(
+            preview_belief.p1_active_mons[0]
+                .known_moves
+                .contains(&Some(PokemonMove::Thunderbolt)),
+            "the preview should already have revealed the move Pass 1 applies directly"
+        );
+        assert_eq!(
+            preview_belief.p1_active_mons[0].known_moves,
+            full_belief.p1_active_mons[0].known_moves,
+            "a fact Pass 1 confirms from a partial turn must never be contradicted by the full turn"
+        );
     }
 }

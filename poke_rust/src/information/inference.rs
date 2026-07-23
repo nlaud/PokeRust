@@ -1783,6 +1783,7 @@ fn apply_information_battle(
         form_changed_slots_this_turn: Vec::new(),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
+        structural_only: false,
     };
     for event in events {
         process_battle_event(state, event, &mut ctx);
@@ -1832,6 +1833,55 @@ fn apply_information_battle(
     bcp::run_bcp(state, config.allow_repeat_items, dex, config);
     restore_final_stat_marginal_envelopes(state);
     restore_doubles_build_soundness_envelope(state, &seed_state, dex, config);
+}
+
+/// Pass-1-only structural preview, for tracker mode's per-event live feedback
+/// (see `frontend`'s tracker input bar design). Applies only the confirmed,
+/// monotonic facts of `events` — species/move reveals, HP, status, volatiles,
+/// boosts, item/ability reveals — via the same `pass1_apply_event` dispatch
+/// `apply_information_battle` uses, but skips Pass 2 (item/contact/immunity
+/// absence), Pass 3 (damage→stat-bounds), Pass 4 (speed ordering), Pass 5
+/// (EV/IV/nature back-solve), and Pass 6 (BCP) entirely — those all reason
+/// about *absence* or *ordering* across a whole turn ("no ability fired, so
+/// item X is excluded"; "this mon acted before that one"), which is unsound
+/// to conclude from a still-in-progress turn a user hasn't finished typing.
+///
+/// This is exactly why it's safe to call on a **partial** turn (no trailing
+/// `EndOfTurn`, some active slots not yet accounted for) where
+/// `apply_information`/`apply_information_battle` is not: Pass 1 never
+/// excludes a possibility, it only narrows towards values a directly-observed
+/// event confirms. The result is therefore always a sound *subset* of what a
+/// full `apply_information_battle` call would eventually produce once the
+/// same events are replayed as part of a genuinely complete, `endofturn`-
+/// terminated turn — never call this for anything but a disposable preview
+/// clone of a belief, since it does not reflect the tightened bounds a real
+/// commit will apply.
+pub fn apply_structural_preview(
+    state: &mut UnknownBattleState,
+    events: &[InformationEvent],
+    dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    ability_dex: &HashMap<Ability, AbilityData>,
+    config: &InferenceConfig,
+) {
+    let mut ctx = BattleContext {
+        dex,
+        move_dex,
+        ability_dex,
+        config,
+        move_context: None,
+        switch_slot: None,
+        damaging_hits_this_turn: Vec::new(),
+        switched_slots_this_turn: Vec::new(),
+        move_users_this_turn: Vec::new(),
+        form_changed_slots_this_turn: Vec::new(),
+        analytic_last_movers: compute_analytic_last_movers(events),
+        turn_segment: 0,
+        structural_only: true,
+    };
+    for event in events {
+        process_battle_event(state, event, &mut ctx);
+    }
 }
 
 /// Damage inversion in doubles still has unmodeled cross-target/temporal
@@ -2083,6 +2133,13 @@ struct BattleContext<'a> {
     analytic_last_movers: Vec<Option<FieldSlot>>,
     /// S28: index into `analytic_last_movers`; advanced at each `EndOfTurn`.
     turn_segment: usize,
+    /// When set, `process_battle_event` applies only Pass 1 (direct/structural
+    /// facts — species/move reveals, HP, status, volatiles, boosts) and skips
+    /// the Pass 2/3 block (item/stat inference) entirely. Pass 1 never performs
+    /// absence/ordering reasoning, so it's the only pass safe to run on a
+    /// PARTIAL turn — see `apply_structural_preview`, the sole place this is
+    /// set `true`. Always `false` for a real `apply_information_battle` call.
+    structural_only: bool,
 }
 
 #[derive(Clone)]
@@ -2288,7 +2345,10 @@ fn process_battle_event(
     }
 
     // Pass 2/3 — item and stat inference keyed on the full MoveUsed + reactions.
-    if let EventKind::MoveUsed { user, .. } = &event.kind {
+    // Skipped entirely under a structural-only preview (see `BattleContext::structural_only`'s
+    // doc comment) — these passes reason about absence ("no ability fired, so X is excluded")
+    // and require the pre/post-move snapshots above to reflect a genuinely complete turn.
+    if !ctx.structural_only && let EventKind::MoveUsed { user, .. } = &event.kind {
         let user_slot_for_order = *user;
         pass2_item_from_move(state, event, ctx);
         pass2_contact_absence(state, event, ctx);

@@ -9,8 +9,11 @@ import type {
   GetTrackerResponse,
   LegalCommands,
   PlayerId,
+  TrackerCompletionsDto,
   TrackerEventsRequest,
   TrackerEventsResponse,
+  TrackerPreviewRequest,
+  TrackerPreviewResponse,
   TurnRequest,
   TurnResponse,
 } from './types'
@@ -89,31 +92,63 @@ export function deleteTracker(trackerId: string): Promise<void> {
   return request(`/api/tracker/${trackerId}`, { method: 'DELETE' })
 }
 
-/** Distinct from the generic `request` helper because a parse failure's body
- * shape is `{ line, message }` (see `TrackerParseApiError`), not the ordinary
- * `{ message }` `ApiError` body every other endpoint returns. */
-export async function postTrackerEvents(
-  trackerId: string,
-  req: TrackerEventsRequest,
-): Promise<TrackerEventsResponse> {
-  const response = await fetch(`/api/tracker/${trackerId}/events`, {
-    method: 'POST',
+/** Shared by every tracker-TEXT endpoint (`/events`, `/preview`, `/history`):
+ * a parse failure's body shape is `{ line, message }` (see
+ * `TrackerParseApiError`), not the ordinary `{ message }` `ApiError` body
+ * every other endpoint returns — so this can't just be the generic `request`
+ * helper above. */
+async function requestTrackerText<T>(path: string, method: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify(body),
   })
   if (!response.ok) {
-    let body: { line?: number; message?: string } = {}
+    let parsed: { line?: number; message?: string } = {}
     try {
-      body = await response.json()
+      parsed = await response.json()
     } catch {
       // non-JSON error body; fall through to the generic message below
     }
-    if (typeof body.line === 'number') {
-      throw new TrackerParseApiError(body.line, body.message ?? response.statusText)
+    if (typeof parsed.line === 'number') {
+      throw new TrackerParseApiError(parsed.line, parsed.message ?? response.statusText)
     }
-    throw new ApiError(response.status, body.message ?? response.statusText)
+    throw new ApiError(response.status, parsed.message ?? response.statusText)
   }
-  return response.json() as Promise<TrackerEventsResponse>
+  return response.json() as Promise<T>
+}
+
+export function postTrackerEvents(
+  trackerId: string,
+  req: TrackerEventsRequest,
+): Promise<TrackerEventsResponse> {
+  return requestTrackerText(`/api/tracker/${trackerId}/events`, 'POST', req)
+}
+
+/** Per-event structural preview — see `TrackerPreviewResponse`'s doc comment.
+ * Never mutates the session; safe to call on every keystroke's committed word
+ * (debounced by the caller). */
+export function previewTrackerEvents(
+  trackerId: string,
+  req: TrackerPreviewRequest,
+): Promise<TrackerPreviewResponse> {
+  return requestTrackerText(`/api/tracker/${trackerId}/preview`, 'POST', req)
+}
+
+/** Rebuild the whole session from its initial (pre-first-turn) belief using a
+ * corrected/edited FULL script — the only way an edit to an already-committed
+ * turn takes effect (see `poke_rust::bin::server::tracker::rebuild_tracker_history`'s
+ * doc comment). The response's `log` is the WHOLE log — replace the client's
+ * local log with it, don't append. */
+export function rebuildTrackerHistory(
+  trackerId: string,
+  req: TrackerEventsRequest,
+): Promise<GetTrackerResponse> {
+  return requestTrackerText(`/api/tracker/${trackerId}/history`, 'PUT', req)
+}
+
+export function getTrackerCompletions(trackerId: string): Promise<TrackerCompletionsDto> {
+  return request(`/api/tracker/${trackerId}/completions`)
 }
 
 /** Consumes the `GET /api/benchmark` Server-Sent Events stream — a full,

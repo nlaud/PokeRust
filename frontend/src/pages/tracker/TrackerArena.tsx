@@ -17,7 +17,11 @@ const VIEWER: PlayerId = 'p1'
 const OPPONENT: PlayerId = 'p2'
 
 export default function TrackerArena() {
-  const view = useTracker((s) => s.view)
+  // Prefer the live per-event structural preview (Pass-1-only, uncommitted —
+  // see `TrackerPreviewResponse`'s doc comment) so HP/status/reveals update
+  // as the user types, falling back to the last committed view once the
+  // draft is empty again.
+  const view = useTracker((s) => s.previewView ?? s.view)
   if (!view?.p1 || !view.p2) return null
 
   // Each mon column scales with the horizontal room (flex-1 inside a

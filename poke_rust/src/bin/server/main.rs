@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use clap::Parser;
 use tower_http::cors::CorsLayer;
 
@@ -103,6 +103,9 @@ async fn main() {
             get(tracker::get_tracker).delete(tracker::delete_tracker),
         )
         .route("/api/tracker/{id}/events", post(tracker::submit_tracker_events))
+        .route("/api/tracker/{id}/preview", post(tracker::preview_tracker_events))
+        .route("/api/tracker/{id}/history", put(tracker::rebuild_tracker_history))
+        .route("/api/tracker/{id}/completions", get(tracker::get_tracker_completions))
         .route("/api/benchmark", get(routes::run_benchmark))
         .route("/api/sprites", get(routes::get_sprite))
         .layer(CorsLayer::permissive())

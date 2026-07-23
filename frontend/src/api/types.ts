@@ -380,6 +380,10 @@ export interface CreateTrackerResponse {
 export interface GetTrackerResponse {
   state: BattleView
   log: TurnLogEntry[]
+  /** The full raw tracker-text script committed so far (every turn,
+   * newline-joined) — lets the editor rehydrate its authored text after a
+   * page reload; empty string if nothing has been committed yet. */
+  script: string
 }
 
 export interface TrackerEventsRequest {
@@ -400,4 +404,38 @@ export interface TrackerEventsResponse {
   /** The newly-committed turn(s) this submission produced — append to the
    * client's existing log rather than replacing it. */
   logDelta: TurnLogEntry[]
+}
+
+/** `POST /api/tracker/{id}/preview` request — the current in-progress turn's
+ * tracker-syntax text so far. Unlike `TrackerEventsRequest`, this need not be
+ * a complete turn and need not end with `endofturn`. */
+export interface TrackerPreviewRequest {
+  text: string
+}
+
+/** `POST /api/tracker/{id}/preview` response — a disposable, Pass-1-only
+ * structural view (see `apply_structural_preview` on the Rust side): only
+ * directly-confirmed facts (species/move reveals, HP, status, volatiles,
+ * boosts), never the full six-pass inference — that needs a genuinely
+ * complete turn. Never persisted; superseded the instant the turn is actually
+ * committed via `/events` or `/history`. */
+export interface TrackerPreviewResponse {
+  state: BattleView
+  /** The in-progress turn's events, parsed and guaranteed-effect-augmented
+   * exactly like a committed `TurnLogEntry`'s events — renders through the
+   * same `renderLog` path as a real log entry instead of raw text. */
+  events: EventNode[]
+}
+
+/** `GET /api/tracker/{id}/completions` response — autocomplete name pools
+ * scoped to the species actually in THIS match (both rosters, known from team
+ * preview regardless of fog-of-war). `moves`/`abilities` are the union of
+ * those species' learnsets/ability pools — never the full dex, since a move
+ * no Pokemon in the match could ever have isn't a useful suggestion. Items
+ * are deliberately absent (they aren't species-constrained); the frontend
+ * already owns the full item catalog — see `lib/items.ts`'s `CATALOG`. */
+export interface TrackerCompletionsDto {
+  species: string[]
+  moves: string[]
+  abilities: string[]
 }

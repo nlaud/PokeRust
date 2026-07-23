@@ -670,6 +670,12 @@ pub struct CreateTrackerResponse {
 pub struct GetTrackerResponse {
     pub state: BattleView,
     pub log: Vec<TurnLogEntry>,
+    /// The full raw tracker-text script committed so far (every turn,
+    /// newline-joined) — lets the editor rehydrate its authored text (and
+    /// therefore per-turn navigation/editing) after a page reload, since `log`
+    /// alone can't be reversed back into tracker syntax. Empty string if
+    /// nothing has been committed yet.
+    pub script: String,
 }
 
 #[derive(Deserialize)]
@@ -694,6 +700,47 @@ pub struct TrackerEventsResponse {
     /// The newly-committed turn(s) this submission produced, in order — append
     /// these to the client's existing log rather than replacing it.
     pub log_delta: Vec<TurnLogEntry>,
+}
+
+/// `POST /api/tracker/{id}/preview` request — the current in-progress turn's
+/// tracker-syntax text so far. Unlike `TrackerEventsRequest`, this need not be
+/// a complete turn and need not end with `endofturn`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerPreviewRequest {
+    pub text: String,
+}
+
+/// `POST /api/tracker/{id}/preview` response — a disposable, Pass-1-only
+/// structural view (see `poke_rust::information::inference::apply_structural_preview`'s
+/// doc comment for exactly what that does and doesn't include). Never
+/// persisted server-side; superseded the moment the turn is actually
+/// committed via `/events` or `/history`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerPreviewResponse {
+    pub state: BattleView,
+    /// The in-progress turn's events, parsed and guaranteed-effect-augmented
+    /// exactly like a committed turn's `TurnLogEntry.events` — so the client
+    /// can render them through the same log-rendering path instead of raw text.
+    pub events: Vec<EventNode>,
+}
+
+/// `GET /api/tracker/{id}/completions` response — autocomplete name pools
+/// scoped to the species actually in THIS match (both rosters, from team
+/// preview — independent of fog-of-war, since a player always knows their own
+/// and the opponent's species even under Closed Team Sheet). `moves` is the
+/// union of those species' learnsets and `abilities` the union of their
+/// ability pools — suggesting a move or ability no Pokemon in the match could
+/// ever have would be actively unhelpful, unlike a global dex dump. Items are
+/// intentionally absent: they aren't species-constrained, and the frontend
+/// already owns the full item catalog (`frontend/src/lib/items.ts`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerCompletionsDto {
+    pub species: Vec<String>,
+    pub moves: Vec<String>,
+    pub abilities: Vec<String>,
 }
 
 // ── Benchmarking ─────────────────────────────────────────────────────────────

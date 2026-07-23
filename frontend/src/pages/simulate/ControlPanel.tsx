@@ -93,6 +93,7 @@ export default function ControlPanel() {
             return (
               <button
                 key={mon.monId}
+                data-testid="preview-mon"
                 onClick={() => togglePreviewPick(i)}
                 disabled={!picked && previewPicks.length >= needed}
                 className={`lift relative flex w-28 flex-col items-center rounded-card p-2 ${
@@ -119,6 +120,7 @@ export default function ControlPanel() {
         <div className="mt-3 flex items-center justify-between">
           {backButton(currentPlayer === 'p1' && previewPicks.length === 0)}
           <button
+            data-testid="preview-confirm"
             onClick={() => void submitPreview()}
             disabled={previewPicks.length !== needed || busy}
             className="lift rounded-card bg-primary px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
@@ -266,6 +268,7 @@ export default function ControlPanel() {
             return (
               <button
                 key={moveSlot}
+                data-testid="move-option"
                 onClick={() =>
                   usable
                     ? commit(available, moveSlot)

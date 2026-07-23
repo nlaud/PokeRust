@@ -32,6 +32,24 @@ The server takes the same dex-path flags as the CLI (`--poke-dex`,
 `--move-dex`, defaults point at `../pokemon_info/` so run it from
 `poke_rust/`), plus `--port` (default 3001).
 
+## Testing
+
+`e2e/` has a Playwright suite (currently just tracker mode's input bar).
+`playwright.config.ts`'s `webServer` array launches both halves of the stack
+above automatically — `cargo build --release --bin server` once first so the
+binary exists, then:
+
+```sh
+cd frontend
+npx playwright install chromium   # once
+npx playwright test
+```
+
+`reuseExistingServer` (the default outside CI) means it's fine to already have
+both dev processes running locally; the suite reuses them instead of
+relaunching. There's no unit-test runner configured yet — TypeScript/lint
+checks are `npx tsc -b` and `npm run lint`.
+
 ## Architecture
 
 ```
@@ -47,17 +65,22 @@ src/
                       (sprites are fetched at runtime, never committed)
   lib/eventText.ts    EventNode tree → log lines (chronological walk with a
                       slot→species resolver, since events carry slots not names)
+  lib/trackerGrammar.ts  word-by-word autocomplete mirror of tracker_parse.rs's
+                      keyword tables, for TrackerInputBar — completion-only,
+                      never the source of truth (the server still validates)
   pages/simulate/     SetupPanel, BattleScreen, Arena, ControlPanel,
                       PokemonHUD, FieldIndicators, BattleLogSidebar,
                       TeamInfoSidebar
-  pages/tracker/      TrackerSetupPanel, TrackerScreen, TrackerLogSidebar —
-                      reuses PokemonHUD/FieldIndicators/eventText.ts unchanged
+  pages/tracker/      TrackerSetupPanel, TrackerScreen, TrackerArena,
+                      TrackerInputBar (the autocomplete editor — see "The
+                      input bar" above), TrackerLogSidebar, TrackerTeamSidebar
   pages/benchmark/    BenchmarkChart, ProgressBar — hand-rolled inline-SVG bar
                       chart + determinate progress bar (no charting
                       dependency); used by pages/BenchmarkingPage.tsx
   store/trackerStore.ts  single-perspective session store for tracker mode —
-                      no hotseat flip, no command wizard; `submitText` posts
-                      raw tracker-syntax text to the server each turn
+                      no hotseat flip, no command wizard; owns the authored
+                      script (committedTurns) and the live per-event preview
+e2e/                  Playwright suite (tracker-input.spec.ts) — see "Testing"
 ```
 
 ## Tracker mode
@@ -79,13 +102,47 @@ is unchanged from battle mode: `TrackerScreen` reuses `PokemonHUD` and
 `renderLog` unchanged, since both are pure functions of `BattleView`/
 `TurnLogEntry[]` with no assumption baked in about where that data came from.
 
-This is a Phase-1 MVP: a plain multiline textarea, not the rich inline editor
-(ghost-text completions, autocomplete, arrow-key event navigation) described
-in the tracker-mode design doc — that's a planned follow-up on top of this
-same pipeline. `tracker_parse.rs`'s module doc lists the current grammar's
-scope and known simplifications (e.g. every targeted move needs an explicit
-target slot; guaranteed effects cover a starter set of abilities/moves, not
-the full dex yet).
+### The input bar
+
+`TrackerInputBar.tsx` is a floating, single-line, Minecraft-chat-style
+autocomplete editor — not a plain textarea. `lib/trackerGrammar.ts` mirrors
+`tracker_parse.rs`'s fixed keyword tables (verbs, statuses, cant-reasons,
+volatiles, weather/terrain, stat/effect tokens) to rank word-by-word
+suggestions client-side, with a Levenshtein fallback when nothing prefix-
+matches; species/move/ability suggestions come from `GET
+/api/tracker/{id}/completions`, scoped to the Pokémon actually in the match
+(both rosters' learnsets/ability pools — never the full dex). Item
+suggestions reuse the existing `lib/items.ts` catalog directly (items aren't
+species-constrained, so no round trip is needed).
+
+Two commit tiers, matching the inference engine's own turn-atomic design (see
+`poke_rust/src/information/README.md`):
+
+- **Per event** (`Enter`) — `POST /api/tracker/{id}/preview` runs a
+  Pass-1-only structural pass (`apply_structural_preview` on the Rust side) on
+  a disposable clone of the committed belief, so obvious facts (HP, revealed
+  species/moves, status/volatiles/boosts) render immediately as the user
+  types. It never mutates the session — Pass 2 onward (item/stat inference,
+  speed ordering, EV/IV back-solve, BCP) all reason about *absence* across a
+  whole turn, which is unsound on a still-in-progress one.
+- **Per turn / on edit** (`Shift+Enter`, or editing an already-committed
+  event) — the frontend owns the full authored script as `committedTurns` in
+  `trackerStore.ts` and resubmits it in full to `PUT
+  /api/tracker/{id}/history`, which resets to the session's initial
+  (pre-first-turn) belief and re-applies every turn through the real six-pass
+  pipeline. This one endpoint uniformly handles ending a turn, correcting a
+  past event (`ArrowUp` navigates the flat history — every line ever typed,
+  committed or still-drafted — for in-place editing), and popping the current
+  draft back via `Shift+Escape`, since none of those are actually different
+  operations from the belief's point of view.
+
+`tracker_parse.rs`'s module doc lists the current grammar's scope and known
+simplifications (e.g. every targeted move needs an explicit target slot;
+guaranteed effects cover a starter set of abilities/moves, not the full dex
+yet). `e2e/tracker-input.spec.ts` (Playwright) drives the bar end-to-end
+against the real server — autocomplete ranking/ghost-text, the two-tier
+commit model, editing a past turn and watching the belief recompute, and the
+Escape/Shift+Escape navigation contract.
 
 ### Tracker text grammar
 
