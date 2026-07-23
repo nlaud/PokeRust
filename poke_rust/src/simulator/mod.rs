@@ -3321,16 +3321,36 @@ fn possible_damage_outcomes_for_move(
                 )
             })
             .collect();
-        let actives = match player {
-            Player::P1 => &mut next_state.p1_active_mons,
-            Player::P2 => &mut next_state.p2_active_mons,
-        };
-        for (i, mon) in actives.iter_mut().enumerate() {
-            if mon.fainted || simulator_helpers::heal_is_blocked(mon) {
-                continue;
+        let mut healed = Vec::new();
+        {
+            let actives = match player {
+                Player::P1 => &mut next_state.p1_active_mons,
+                Player::P2 => &mut next_state.p2_active_mons,
+            };
+            for (i, mon) in actives.iter_mut().enumerate() {
+                if mon.fainted || simulator_helpers::heal_is_blocked(mon) {
+                    continue;
+                }
+                let old_hp = mon.hp;
+                let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
+                simulator_helpers::gain_hp(mon, heal, envs[i]);
+                if mon.hp != old_hp {
+                    healed.push((i, mon.hp, mon.stats[0]));
+                }
             }
-            let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
-            simulator_helpers::gain_hp(mon, heal, envs[i]);
+        }
+        for (i, new_hp, max_hp) in healed {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Healed {
+                    target: FieldSlot {
+                        player,
+                        slot_index: i as u8,
+                    },
+                    new_hp: PokemonHP::Number(new_hp),
+                    max_hp,
+                },
+            );
         }
         decrement_move_pp(
             &mut next_state,
@@ -6040,7 +6060,7 @@ fn possible_damage_outcomes_for_move(
     // and never miss — handled in the damage calculation).
     if move_name == PokemonMove::Minimize {
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let minimize_delta = if let Some(mon) =
+        let (minimize_delta, minimize_started) = if let Some(mon) =
             simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
         {
             let d = simulator_helpers::apply_stat_boost_external(
@@ -6048,16 +6068,17 @@ fn possible_damage_outcomes_for_move(
                 &[0, 0, 0, 0, 0, 0, 2],
                 items_suppressed,
             );
-            if !simulator_helpers::has_status_volatile(mon, &VolatileStatus::Minimize) {
+            let started = !simulator_helpers::has_status_volatile(mon, &VolatileStatus::Minimize);
+            if started {
                 mon.volatiles
                     .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
                         VolatileStatus::Minimize,
                         0,
                     ));
             }
-            d
+            (d, started)
         } else {
-            [0i8; 7]
+            ([0i8; 7], false)
         };
         for (boost_idx, &stages) in minimize_delta.iter().enumerate() {
             if stages != 0 {
@@ -6070,6 +6091,15 @@ fn possible_damage_outcomes_for_move(
                     },
                 );
             }
+        }
+        if minimize_started {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileStart {
+                    target: action.user_slot,
+                    volatile: VolatileStatus::Minimize,
+                },
+            );
         }
         decrement_move_pp(
             &mut next_state,
@@ -6119,6 +6149,13 @@ fn possible_damage_outcomes_for_move(
                 );
             }
         }
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Stockpile(level + 1),
+            },
+        );
         decrement_move_pp(
             &mut next_state,
             action.user_slot,
@@ -6637,6 +6674,13 @@ fn possible_damage_outcomes_for_move(
                     0,
                 ));
         }
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Imprison,
+            },
+        );
         decrement_move_pp(
             &mut next_state,
             action.user_slot,
@@ -10737,17 +10781,33 @@ fn execute_action(
                                     }
                                 }
                             }
-                            MatchState::GameOverState { pending_events, .. } => {
+                            MatchState::GameOverState {
+                                pending_events,
+                                final_state,
+                                ..
+                            } => {
                                 // The move ended the battle: wrap this move's events the same
                                 // way so the final turn's log keeps its MoveUsed node. (Empty
                                 // when no observer is attached — nothing to wrap then.)
                                 if pending_events.len() > move_start_len {
                                     let reactions = pending_events.split_off(move_start_len);
+                                    // `possible_damage_outcomes_for_move` resolves automatic,
+                                    // spread, and redirected targets before it detects game over.
+                                    // The representative final BattleState retains that list;
+                                    // using only the command target here loses every auto-target
+                                    // on a battle-ending move (e.g. Hyper Voice becomes `[]`).
+                                    let resolved =
+                                        std::mem::take(&mut final_state.resolved_move_targets);
+                                    let targets = if resolved.is_empty() {
+                                        move_targets.clone()
+                                    } else {
+                                        resolved
+                                    };
                                     pending_events.push(InformationEvent {
                                         kind: EventKind::MoveUsed {
                                             user: move_user,
                                             move_used: move_name.clone(),
-                                            targets: move_targets.clone(),
+                                            targets,
                                         },
                                         reactions,
                                     });

@@ -48,7 +48,8 @@ use poke_rust::information::information::{CantReason, EventKind, InformationEven
 use poke_rust::information::unknowns::{PokemonHP, UnknownBattleState};
 use poke_rust::state::battle::{FieldSlot, Player};
 use poke_rust::state::dex_data::{
-    MoveData, PokemonData, PokemonType, Status, Terrain, VolatileStatus, Weather,
+    MoveData, PokemonData, PokemonType, PseudoWeather, SideCondition, Status, Terrain,
+    VolatileStatus, Weather,
 };
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,38 @@ pub enum TrackerLine {
     EndOfTurn,
 }
 
+fn hp_readings_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, PokemonHP> {
+    belief
+        .p1_active_mons
+        .iter()
+        .enumerate()
+        .map(|(index, mon)| {
+            (
+                FieldSlot {
+                    player: Player::P1,
+                    slot_index: index as u8,
+                },
+                mon.hp.clone(),
+            )
+        })
+        .chain(
+            belief
+                .p2_active_mons
+                .iter()
+                .enumerate()
+                .map(|(index, mon)| {
+                    (
+                        FieldSlot {
+                            player: Player::P2,
+                            slot_index: index as u8,
+                        },
+                        mon.hp.clone(),
+                    )
+                }),
+        )
+        .collect()
+}
+
 /// Parse every line of `text` into `TrackerLine`s. Blank lines and lines
 /// starting with `#` are ignored. `belief` is read (never mutated) to resolve
 /// HP-direction (damage vs. heal vs. unchanged) for `hpspec` tokens.
@@ -76,6 +109,11 @@ pub fn parse_tracker_text(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Result<Vec<TrackerLine>, ParseError> {
     let mut out = Vec::new();
+    // HP direction is contextual. Thread the latest literal reading through
+    // the submission so a switch followed by damage, consecutive multi-hit
+    // readings, and later turns in the same batch compare against the event
+    // immediately before them rather than the pre-submission belief forever.
+    let mut hp_readings = hp_readings_from_belief(belief);
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
         let line = raw_line.trim();
@@ -83,7 +121,14 @@ pub fn parse_tracker_text(
             continue;
         }
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        out.push(parse_line(&tokens, line_no, belief, move_dex, pokemon_dex)?);
+        out.push(parse_line(
+            &tokens,
+            line_no,
+            belief,
+            move_dex,
+            pokemon_dex,
+            &mut hp_readings,
+        )?);
     }
     Ok(out)
 }
@@ -127,20 +172,26 @@ pub fn fold_leads_and_entry_abilities(events: Vec<InformationEvent>) -> Vec<Info
 
     for ev in events {
         match ev.kind {
-            EventKind::SimultaneousSwitch { switches } if combined_index.is_none() || in_leads_block => {
+            EventKind::SimultaneousSwitch { switches }
+                if combined_index.is_none() || in_leads_block =>
+            {
                 still_entered.extend(switches.iter().map(|sw| sw.slot));
                 merged_switches.extend(switches);
                 if combined_index.is_none() {
                     combined_index = Some(result.len());
                     // Placeholder — filled in once the whole leading run is known.
                     result.push(InformationEvent {
-                        kind: EventKind::SimultaneousSwitch { switches: Vec::new() },
+                        kind: EventKind::SimultaneousSwitch {
+                            switches: Vec::new(),
+                        },
                         reactions: Vec::new(),
                     });
                 }
                 in_leads_block = true;
             }
-            EventKind::AbilityRevealed { slot, ability } if in_leads_block && still_entered.contains(&slot) => {
+            EventKind::AbilityRevealed { slot, ability }
+                if in_leads_block && still_entered.contains(&slot) =>
+            {
                 combined_reactions.push(InformationEvent {
                     kind: EventKind::AbilityRevealed { slot, ability },
                     reactions: ev.reactions,
@@ -155,7 +206,9 @@ pub fn fold_leads_and_entry_abilities(events: Vec<InformationEvent>) -> Vec<Info
 
     if let Some(i) = combined_index {
         result[i] = InformationEvent {
-            kind: EventKind::SimultaneousSwitch { switches: merged_switches },
+            kind: EventKind::SimultaneousSwitch {
+                switches: merged_switches,
+            },
             reactions: combined_reactions,
         };
     }
@@ -199,15 +252,22 @@ fn parse_slot(tok: &str) -> Option<FieldSlot> {
     Some(FieldSlot { player, slot_index })
 }
 
-pub(crate) fn opposing_active_slots(belief: &UnknownBattleState, slot: FieldSlot) -> Vec<FieldSlot> {
-    let (opp, count) = match slot.player {
-        Player::P1 => (Player::P2, belief.p2_active_mons.len()),
-        Player::P2 => (Player::P1, belief.p1_active_mons.len()),
+pub(crate) fn opposing_active_slots(
+    belief: &UnknownBattleState,
+    slot: FieldSlot,
+) -> Vec<FieldSlot> {
+    let (opp, mons) = match slot.player {
+        Player::P1 => (Player::P2, &belief.p2_active_mons),
+        Player::P2 => (Player::P1, &belief.p1_active_mons),
     };
-    (0..count as u8)
-        .map(|i| FieldSlot {
+    mons.iter()
+        .enumerate()
+        .filter(|(_, mon)| {
+            !mon.fainted && !matches!(mon.hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
+        })
+        .map(|(index, _)| FieldSlot {
             player: opp,
-            slot_index: i,
+            slot_index: index as u8,
         })
         .collect()
 }
@@ -230,12 +290,13 @@ fn parse_hp_token(tok: &str) -> Option<HpToken> {
     None
 }
 
-fn current_hp(belief: &UnknownBattleState, slot: FieldSlot) -> Option<PokemonHP> {
-    let mons = match slot.player {
-        Player::P1 => &belief.p1_active_mons,
-        Player::P2 => &belief.p2_active_mons,
-    };
-    mons.get(slot.slot_index as usize).map(|m| m.hp.clone())
+fn parse_hit_count_token(tok: &str) -> Option<u8> {
+    let normalized = norm(tok);
+    normalized
+        .strip_suffix("hits")
+        .or_else(|| normalized.strip_suffix("hit"))
+        .and_then(|digits| digits.parse::<u8>().ok())
+        .filter(|hits| *hits > 0)
 }
 
 fn known_max_hp(belief: &UnknownBattleState, slot: FieldSlot) -> u16 {
@@ -255,9 +316,14 @@ fn known_max_hp(belief: &UnknownBattleState, slot: FieldSlot) -> u16 {
 
 /// Build the `DamageDealt`/`Healed`/`SetHp` event for `slot` reaching `token`,
 /// classified by comparing against the belief's current HP for that slot.
-fn hp_event(belief: &UnknownBattleState, slot: FieldSlot, token: HpToken) -> InformationEvent {
+fn hp_event(
+    belief: &UnknownBattleState,
+    hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
+    slot: FieldSlot,
+    token: HpToken,
+) -> InformationEvent {
     let is_own = slot.player == Player::P1;
-    let (new_hp, went_down, went_up) = match (current_hp(belief, slot), token) {
+    let (new_hp, went_down, went_up) = match (hp_readings.get(&slot).cloned(), token) {
         (Some(PokemonHP::Percent(old)), HpToken::Percent(new)) => {
             (PokemonHP::Percent(new), new < old, new > old)
         }
@@ -271,7 +337,12 @@ fn hp_event(belief: &UnknownBattleState, slot: FieldSlot, token: HpToken) -> Inf
         (_, HpToken::Percent(new)) => (PokemonHP::Percent(new), true, false),
         (_, HpToken::Number(new)) => (PokemonHP::Number(new), true, false),
     };
-    let max_hp = if is_own { known_max_hp(belief, slot) } else { 0 };
+    hp_readings.insert(slot, new_hp.clone());
+    let max_hp = if is_own {
+        known_max_hp(belief, slot)
+    } else {
+        0
+    };
     let kind = if went_down {
         EventKind::DamageDealt {
             target: slot,
@@ -295,6 +366,43 @@ fn hp_event(belief: &UnknownBattleState, slot: FieldSlot, token: HpToken) -> Inf
         kind,
         reactions: Vec::new(),
     }
+}
+
+fn typed_hp_event(
+    belief: &UnknownBattleState,
+    hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
+    slot: FieldSlot,
+    token: HpToken,
+    kind_word: &str,
+) -> InformationEvent {
+    let new_hp = match token {
+        HpToken::Percent(value) => PokemonHP::Percent(value),
+        HpToken::Number(value) => PokemonHP::Number(value),
+    };
+    hp_readings.insert(slot, new_hp.clone());
+    let max_hp = if slot.player == Player::P1 {
+        known_max_hp(belief, slot)
+    } else {
+        0
+    };
+    let kind = match kind_word {
+        "damage" | "damaged" => EventKind::DamageDealt {
+            target: slot,
+            new_hp,
+            max_hp,
+        },
+        "heal" | "healed" => EventKind::Healed {
+            target: slot,
+            new_hp,
+            max_hp,
+        },
+        _ => EventKind::SetHp {
+            target: slot,
+            new_hp,
+            max_hp,
+        },
+    };
+    leaf(kind)
 }
 
 // ── stat boosts ──────────────────────────────────────────────────────────────
@@ -334,7 +442,9 @@ fn parse_boost_token(tok: &str) -> Option<(usize, i8)> {
         if pos == 0 {
             let sign: i8 = if signed.starts_with('-') { -1 } else { 1 };
             let rest = &signed[1..];
-            let digit_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            let digit_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
             if digit_end > 0
                 && let Ok(n) = rest[..digit_end].parse::<i8>()
                 && let Some(idx) = stat_idx(&rest[digit_end..])
@@ -449,6 +559,11 @@ fn volatile_from_word(word: &str) -> Option<VolatileStatus> {
         "helpinghand" => Some(VolatileStatus::HelpingHand),
         "powertrick" => Some(VolatileStatus::PowerTrick),
         "forestscurse" => Some(VolatileStatus::ForestsCurse),
+        "throatchop" | "throatchopped" => Some(VolatileStatus::ThroatChop),
+        "mustrecharge" | "recharging" => Some(VolatileStatus::MustRecharge),
+        "substitute" | "sub" => Some(VolatileStatus::Substitute(0)),
+        "encore" | "encored" => Some(VolatileStatus::Encore(PokemonMove::Struggle)),
+        "disable" | "disabled" => Some(VolatileStatus::Disable(PokemonMove::Struggle)),
         // Bide, Sky Drop, Spotlight, Trick-or-Treat, Nightmare, and Power Shift
         // are all `isNonstandard: "Past"`/`"Unobtainable"` in the current move
         // dex — not legal in Pokémon Champions, so a real tracker session can
@@ -478,6 +593,41 @@ fn terrain_from_word(word: &str) -> Option<Terrain> {
         "grassy" | "grassyterrain" => Some(Terrain::GrassyTerrain),
         "misty" | "mistyterrain" => Some(Terrain::MistyTerrain),
         "psychic" | "psychicterrain" => Some(Terrain::PsychicTerrain),
+        _ => None,
+    }
+}
+
+fn pseudo_weather_from_word(word: &str) -> Option<PseudoWeather> {
+    match word {
+        "fairylock" => Some(PseudoWeather::FairyLock),
+        "gravity" => Some(PseudoWeather::Gravity),
+        "iondeluge" => Some(PseudoWeather::IonDeluge),
+        "magicdeluge" => Some(PseudoWeather::MagicDeluge),
+        "mudsport" => Some(PseudoWeather::MudSport),
+        "trickroom" => Some(PseudoWeather::TrickRoom),
+        "watersport" => Some(PseudoWeather::WaterSport),
+        "wonderroom" => Some(PseudoWeather::WonderRoom),
+        _ => None,
+    }
+}
+
+fn side_condition_from_word(word: &str) -> Option<SideCondition> {
+    match word {
+        "auroraveil" => Some(SideCondition::AuroraVeil),
+        "reflect" => Some(SideCondition::Reflect),
+        "craftyshield" => Some(SideCondition::CraftyShield),
+        "lightscreen" => Some(SideCondition::LightScreen),
+        "luckychant" => Some(SideCondition::LuckyChant),
+        "matblock" => Some(SideCondition::MatBlock),
+        "mist" => Some(SideCondition::Mist),
+        "quickguard" => Some(SideCondition::QuickGuard),
+        "safeguard" => Some(SideCondition::SafeGuard),
+        "spikes" => Some(SideCondition::Spikes(1)),
+        "stealthrock" => Some(SideCondition::StealthRock),
+        "stickyweb" => Some(SideCondition::StickyWeb(None)),
+        "tailwind" => Some(SideCondition::TailWind),
+        "toxicspikes" => Some(SideCondition::ToxicSpikes(1)),
+        "wideguard" => Some(SideCondition::WideGuard),
         _ => None,
     }
 }
@@ -572,6 +722,7 @@ fn parse_line(
     move_dex: &HashMap<PokemonMove, MoveData>,
     // Used by the `mega` line to enumerate a species' possible mega forms.
     pokemon_dex: &HashMap<Species, PokemonData>,
+    hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
 ) -> Result<TrackerLine, ParseError> {
     if norm(tokens[0]) == "endofturn" || norm(tokens[0]) == "eot" {
         return Ok(TrackerLine::EndOfTurn);
@@ -614,11 +765,65 @@ fn parse_line(
                 reactions: Vec::new(),
             }));
         }
+        "field" | "pseudoweather" => {
+            let effect_tok = tokens
+                .get(1)
+                .ok_or_else(|| err(line_no, "field requires an effect name"))?;
+            let effect = pseudo_weather_from_word(&norm(effect_tok))
+                .ok_or_else(|| err(line_no, format!("unrecognized field effect '{effect_tok}'")))?;
+            let state_tok = tokens
+                .get(2)
+                .ok_or_else(|| err(line_no, "field requires 'start' or 'end'"))?;
+            let kind = match norm(state_tok).as_str() {
+                "start" | "started" | "on" => EventKind::PseudoWeatherStart { effect },
+                "end" | "ended" | "off" => EventKind::PseudoWeatherEnd { effect },
+                _ => return Err(err(line_no, "field requires 'start' or 'end'")),
+            };
+            return Ok(TrackerLine::Event(InformationEvent {
+                kind,
+                reactions: Vec::new(),
+            }));
+        }
+        "side" => {
+            let side_tok = tokens
+                .get(1)
+                .ok_or_else(|| err(line_no, "side requires 'p' or 'o'"))?;
+            let side = match norm(side_tok).as_str() {
+                "p" | "p1" | "player" => Player::P1,
+                "o" | "o1" | "opponent" => Player::P2,
+                _ => return Err(err(line_no, "side requires 'p' or 'o'")),
+            };
+            let condition_tok = tokens
+                .get(2)
+                .ok_or_else(|| err(line_no, "side requires a condition name"))?;
+            let condition = side_condition_from_word(&norm(condition_tok)).ok_or_else(|| {
+                err(
+                    line_no,
+                    format!("unrecognized side condition '{condition_tok}'"),
+                )
+            })?;
+            let state_tok = tokens
+                .get(3)
+                .ok_or_else(|| err(line_no, "side requires 'start' or 'end'"))?;
+            let kind = match norm(state_tok).as_str() {
+                "start" | "started" | "on" => EventKind::SideConditionStart { side, condition },
+                "end" | "ended" | "off" => EventKind::SideConditionEnd { side, condition },
+                _ => return Err(err(line_no, "side requires 'start' or 'end'")),
+            };
+            return Ok(TrackerLine::Event(InformationEvent {
+                kind,
+                reactions: Vec::new(),
+            }));
+        }
         _ => {}
     }
 
-    let slot = parse_slot(tokens[0])
-        .ok_or_else(|| err(line_no, format!("expected a slot (p1/o1/…), got '{}'", tokens[0])))?;
+    let slot = parse_slot(tokens[0]).ok_or_else(|| {
+        err(
+            line_no,
+            format!("expected a slot (p1/o1/…), got '{}'", tokens[0]),
+        )
+    })?;
     let action = tokens
         .get(1)
         .ok_or_else(|| err(line_no, "expected an action after the slot"))?;
@@ -634,19 +839,31 @@ fn parse_line(
             .ok_or_else(|| err(line_no, "switch requires a species"))?;
         let species = Species::from_str(species_tok);
         if matches!(species, Species::Unknown(_)) {
-            return Err(err(line_no, format!("unrecognized species '{species_tok}'")));
+            return Err(err(
+                line_no,
+                format!("unrecognized species '{species_tok}'"),
+            ));
         }
         let mut switch = build_switch_state(belief, slot, species);
-        // An explicit trailing HP token overrides the default (exact-known-max
-        // for the viewer, 100% for the opponent) `build_switch_state` assumes.
-        if let Some(tok) = tokens.get(3)
-            && let Some(hp_tok) = parse_hp_token(tok)
-        {
-            switch.hp = match hp_tok {
-                HpToken::Percent(p) => PokemonHP::Percent(p),
-                HpToken::Number(n) => PokemonHP::Number(n),
-            };
+        // Optional HP and major-status observations may follow in either order.
+        // This matters for a previously-damaged/statused Pokémon returning from
+        // the bench; `leads` are always fresh and need neither payload.
+        for tok in &tokens[3..] {
+            if let Some(hp_tok) = parse_hp_token(tok) {
+                switch.hp = match hp_tok {
+                    HpToken::Percent(p) => PokemonHP::Percent(p),
+                    HpToken::Number(n) => PokemonHP::Number(n),
+                };
+            } else if let Some(status) = status_from_word(&norm(tok)) {
+                switch.status = Some(status);
+            } else {
+                return Err(err(
+                    line_no,
+                    format!("unrecognized switch observation '{tok}'"),
+                ));
+            }
         }
+        hp_readings.insert(slot, switch.hp.clone());
         return Ok(TrackerLine::Event(InformationEvent {
             kind: EventKind::Switch(switch),
             reactions: Vec::new(),
@@ -674,7 +891,9 @@ fn parse_line(
                 player: slot.player,
                 slot_index: i as u8,
             };
-            switches.push(build_switch_state(belief, lead_slot, species));
+            let switch = build_switch_state(belief, lead_slot, species);
+            hp_readings.insert(lead_slot, switch.hp.clone());
+            switches.push(switch);
         }
         return Ok(TrackerLine::Event(InformationEvent {
             kind: EventKind::SimultaneousSwitch { switches },
@@ -735,7 +954,9 @@ fn parse_line(
                         _ => {
                             return Err(err(
                                 line_no,
-                                format!("unrecognized species or ambiguous mega suffix '{species_tok}'"),
+                                format!(
+                                    "unrecognized species or ambiguous mega suffix '{species_tok}'"
+                                ),
                             ));
                         }
                     }
@@ -768,6 +989,73 @@ fn parse_line(
         }));
     }
 
+    if action_n == "charging" {
+        let move_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "charging requires a move name"))?;
+        let move_used = PokemonMove::from_str(move_tok);
+        if !move_dex.contains_key(&move_used) {
+            return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
+        }
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::ChargingMove {
+                user: slot,
+                move_used,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+
+    if action_n == "illusion" || action_n == "illusionended" {
+        let species_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "illusion requires the actual species"))?;
+        let actual_species = Species::from_str(species_tok);
+        if matches!(actual_species, Species::Unknown(_)) {
+            return Err(err(
+                line_no,
+                format!("unrecognized species '{species_tok}'"),
+            ));
+        }
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::IllusionEnded {
+                slot,
+                actual_species,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+
+    if action_n == "encoremove" || action_n == "disablemove" {
+        let move_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, format!("{action} requires a move name")))?;
+        let payload = PokemonMove::from_str(move_tok);
+        if matches!(payload, PokemonMove::Unknown(_)) {
+            return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
+        }
+        let volatile = if action_n == "encoremove" {
+            VolatileStatus::Encore(payload)
+        } else {
+            VolatileStatus::Disable(payload)
+        };
+        return Ok(TrackerLine::Event(leaf(EventKind::VolatileStart {
+            target: slot,
+            volatile,
+        })));
+    }
+    if action_n == "stockpilelevel" {
+        let level = tokens
+            .get(2)
+            .and_then(|token| token.parse::<u8>().ok())
+            .filter(|level| (1..=3).contains(level))
+            .ok_or_else(|| err(line_no, "stockpilelevel requires 1, 2, or 3"))?;
+        return Ok(TrackerLine::Event(leaf(EventKind::VolatileStart {
+            target: slot,
+            volatile: VolatileStatus::Stockpile(level),
+        })));
+    }
+
     // Explicit no-action marker for an empty/fainted slot. The simulator has
     // no dedicated Pass information event, so use the generic Cant reason:
     // inference treats it as an action-slot commitment with no extra claim.
@@ -788,7 +1076,113 @@ fn parse_line(
             .get(2)
             .and_then(|token| parse_hp_token(token))
             .ok_or_else(|| err(line_no, "hp requires a value such as 88hp or 72%"))?;
-        return Ok(TrackerLine::Event(hp_event(belief, slot, hp_tok)));
+        return Ok(TrackerLine::Event(hp_event(
+            belief,
+            hp_readings,
+            slot,
+            hp_tok,
+        )));
+    }
+
+    if matches!(
+        action_n.as_str(),
+        "damage" | "damaged" | "heal" | "healed" | "sethp"
+    ) {
+        let hp_tok = tokens
+            .get(2)
+            .and_then(|token| parse_hp_token(token))
+            .ok_or_else(|| {
+                err(
+                    line_no,
+                    format!("{action} requires a value such as 88hp or 72%"),
+                )
+            })?;
+        return Ok(TrackerLine::Event(typed_hp_event(
+            belief,
+            hp_readings,
+            slot,
+            hp_tok,
+            &action_n,
+        )));
+    }
+
+    if action_n == "volatileend" || action_n == "endvolatile" {
+        let volatile_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "volatileend requires a volatile name"))?;
+        let volatile = volatile_from_word(&norm(volatile_tok)).ok_or_else(|| {
+            err(
+                line_no,
+                format!("unrecognized payload-free volatile '{volatile_tok}'"),
+            )
+        })?;
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::VolatileEnd {
+                target: slot,
+                volatile,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+
+    if action_n == "cure" || action_n == "statuscured" {
+        let status_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "cure requires a status name"))?;
+        let status = status_from_word(&norm(status_tok))
+            .ok_or_else(|| err(line_no, format!("unrecognized status '{status_tok}'")))?;
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::StatusCured {
+                target: slot,
+                status,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+    if action_n == "status" || action_n == "statusinflicted" {
+        let status_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "status requires a status name"))?;
+        let status = status_from_word(&norm(status_tok))
+            .ok_or_else(|| err(line_no, format!("unrecognized status '{status_tok}'")))?;
+        return Ok(TrackerLine::Event(leaf(EventKind::StatusInflicted {
+            target: slot,
+            status,
+        })));
+    }
+
+    // `p1 copyboosts o1`: p1 copied o1's complete boost table (Psych Up).
+    if action_n == "copyboosts" || action_n == "boostscopied" {
+        let source_tok = tokens
+            .get(2)
+            .ok_or_else(|| err(line_no, "copyboosts requires a source slot"))?;
+        let source = parse_slot(source_tok)
+            .ok_or_else(|| err(line_no, format!("invalid source slot '{source_tok}'")))?;
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::BoostsCopied {
+                source,
+                target: slot,
+            },
+            reactions: Vec::new(),
+        }));
+    }
+    if action_n == "invertboosts" || action_n == "boostsinverted" {
+        return Ok(TrackerLine::Event(leaf(EventKind::BoostsInverted {
+            target: slot,
+        })));
+    }
+
+    // Standalone stat change, primarily for end-of-turn ability effects such
+    // as Speed Boost: `p1 spe+1`.
+    if let Some((boost_idx, stages)) = parse_boost_token(action) {
+        return Ok(TrackerLine::Event(InformationEvent {
+            kind: EventKind::BoostChanged {
+                target: slot,
+                boost_idx,
+                stages,
+            },
+            reactions: Vec::new(),
+        }));
     }
 
     // ── item verbs: `p1 loses leftovers`, `p1 gains choicescarf`, bare `p1 leftovers` ──
@@ -829,7 +1223,14 @@ fn parse_line(
     // ── move ─────────────────────────────────────────────────────────────
     let candidate_move = PokemonMove::from_str(action);
     if move_dex.contains_key(&candidate_move) {
-        return parse_move_line(slot, candidate_move, &tokens[2..], line_no, belief);
+        return parse_move_line(
+            slot,
+            candidate_move,
+            &tokens[2..],
+            line_no,
+            belief,
+            hp_readings,
+        );
     }
 
     // ── ability reveal ──────────────────────────────────────────────────
@@ -926,7 +1327,11 @@ fn find_roster_mon<'a>(
 /// for the opponent, assumes a fresh 100%-HP send-out with no status (the
 /// caller — `switch`'s optional trailing hpspec — may override `hp`
 /// afterward; `leads` never does, a lead is always fresh).
-fn build_switch_state(belief: &UnknownBattleState, slot: FieldSlot, species: Species) -> SwitchState {
+fn build_switch_state(
+    belief: &UnknownBattleState,
+    slot: FieldSlot,
+    species: Species,
+) -> SwitchState {
     if slot.player == Player::P1
         && let Some(mon) = find_roster_mon(belief, Player::P1, &species)
     {
@@ -965,19 +1370,36 @@ fn parse_move_line(
     rest: &[&str],
     line_no: usize,
     belief: &UnknownBattleState,
+    hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
 ) -> Result<TrackerLine, ParseError> {
     let mut targets: Vec<FieldSlot> = Vec::new();
     let mut children: Vec<InformationEvent> = Vec::new();
     let mut current = user;
+    let mut has_explicit_targets = false;
 
     let mut i = 0;
     while i < rest.len() {
         let tok = rest[i];
         let n = norm(tok);
 
+        // `@slot` is an unambiguous target declaration. Plain slot tokens
+        // retain the original shorthand, where naming the user only changes
+        // the attachment point for recoil/self effects. The explicit form is
+        // required when an auto-target move's target set includes its user.
+        if let Some(target_token) = tok.strip_prefix('@')
+            && let Some(target) = parse_slot(target_token)
+        {
+            current = target;
+            has_explicit_targets = true;
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+            i += 1;
+            continue;
+        }
         if let Some(s) = parse_slot(tok) {
             current = s;
-            if !targets.contains(&s) && s != user {
+            if !has_explicit_targets && !targets.contains(&s) && s != user {
                 targets.push(s);
             }
             i += 1;
@@ -993,8 +1415,84 @@ fn parse_move_line(
             children.push(leaf(EventKind::Blocked { target: current }));
         } else if n == "fail" || n == "failed" {
             children.push(leaf(EventKind::MoveFailed { slot: current }));
+        } else if n == "mustrecharge" {
+            children.push(leaf(EventKind::MustRecharge { slot: current }));
+        } else if n == "charging" {
+            i += 1;
+            let move_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a move name")))?;
+            let charging_move = PokemonMove::from_str(move_tok);
+            if matches!(charging_move, PokemonMove::Unknown(_)) {
+                return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
+            }
+            children.push(leaf(EventKind::ChargingMove {
+                user: current,
+                move_used: charging_move,
+            }));
+        } else if n == "illusion" || n == "illusionended" {
+            i += 1;
+            let species_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires the actual species")))?;
+            let actual_species = Species::from_str(species_tok);
+            if matches!(actual_species, Species::Unknown(_)) {
+                return Err(err(
+                    line_no,
+                    format!("unrecognized species '{species_tok}'"),
+                ));
+            }
+            children.push(leaf(EventKind::IllusionEnded {
+                slot: current,
+                actual_species,
+            }));
+        } else if n == "switch" || n == "switchin" || n == "sendout" {
+            i += 1;
+            let species_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a species")))?;
+            let species = Species::from_str(species_tok);
+            if matches!(species, Species::Unknown(_)) {
+                return Err(err(
+                    line_no,
+                    format!("unrecognized species '{species_tok}'"),
+                ));
+            }
+            let mut switch = build_switch_state(belief, current, species);
+            if let Some(next) = rest.get(i + 1)
+                && let Some(hp_tok) = parse_hp_token(next)
+            {
+                switch.hp = match hp_tok {
+                    HpToken::Percent(value) => PokemonHP::Percent(value),
+                    HpToken::Number(value) => PokemonHP::Number(value),
+                };
+                i += 1;
+            }
+            if let Some(next) = rest.get(i + 1)
+                && let Some(status) = status_from_word(&norm(next))
+            {
+                switch.status = Some(status);
+                i += 1;
+            }
+            hp_readings.insert(current, switch.hp.clone());
+            children.push(leaf(EventKind::Switch(switch)));
+        } else if let Some(hits) = parse_hit_count_token(tok) {
+            children.push(leaf(EventKind::HitCount {
+                target: current,
+                hits,
+            }));
+        } else if matches!(
+            n.as_str(),
+            "damage" | "damaged" | "heal" | "healed" | "sethp"
+        ) {
+            i += 1;
+            let hp_tok = rest
+                .get(i)
+                .and_then(|token| parse_hp_token(token))
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires an HP value")))?;
+            children.push(typed_hp_event(belief, hp_readings, current, hp_tok, &n));
         } else if let Some(hp) = parse_hp_token(tok) {
-            children.push(hp_event(belief, current, hp));
+            children.push(hp_event(belief, hp_readings, current, hp));
         } else if let Some((idx, delta)) = parse_boost_token(tok) {
             children.push(leaf(EventKind::BoostChanged {
                 target: current,
@@ -1006,6 +1504,114 @@ fn parse_move_line(
                 target: current,
                 status,
             }));
+        } else if n == "cure" || n == "statuscured" {
+            i += 1;
+            let status_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a status name")))?;
+            let status = status_from_word(&norm(status_tok))
+                .ok_or_else(|| err(line_no, format!("unrecognized status '{status_tok}'")))?;
+            children.push(leaf(EventKind::StatusCured {
+                target: current,
+                status,
+            }));
+        } else if n == "copyboosts" || n == "boostscopied" {
+            i += 1;
+            let source_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a source slot")))?;
+            let source = parse_slot(source_tok)
+                .ok_or_else(|| err(line_no, format!("invalid source slot '{source_tok}'")))?;
+            children.push(leaf(EventKind::BoostsCopied {
+                source,
+                target: current,
+            }));
+        } else if n == "invertboosts" || n == "boostsinverted" {
+            children.push(leaf(EventKind::BoostsInverted { target: current }));
+        } else if n == "volatileend" || n == "endvolatile" {
+            i += 1;
+            let volatile_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a volatile name")))?;
+            let volatile = volatile_from_word(&norm(volatile_tok))
+                .ok_or_else(|| err(line_no, format!("unrecognized volatile '{volatile_tok}'")))?;
+            children.push(leaf(EventKind::VolatileEnd {
+                target: current,
+                volatile,
+            }));
+        } else if n == "encoremove" || n == "disablemove" {
+            i += 1;
+            let move_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires a move name")))?;
+            let payload = PokemonMove::from_str(move_tok);
+            if matches!(payload, PokemonMove::Unknown(_)) {
+                return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
+            }
+            let volatile = if n == "encoremove" {
+                VolatileStatus::Encore(payload)
+            } else {
+                VolatileStatus::Disable(payload)
+            };
+            children.push(leaf(EventKind::VolatileStart {
+                target: current,
+                volatile,
+            }));
+        } else if n == "stockpilelevel" {
+            i += 1;
+            let level = rest
+                .get(i)
+                .and_then(|token| token.parse::<u8>().ok())
+                .filter(|level| (1..=3).contains(level))
+                .ok_or_else(|| err(line_no, "stockpilelevel requires 1, 2, or 3"))?;
+            children.push(leaf(EventKind::VolatileStart {
+                target: current,
+                volatile: VolatileStatus::Stockpile(level),
+            }));
+        } else if n == "field" || n == "pseudoweather" {
+            let effect_tok = rest
+                .get(i + 1)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires an effect name")))?;
+            let state_tok = rest
+                .get(i + 2)
+                .ok_or_else(|| err(line_no, format!("'{tok}' requires 'start' or 'end'")))?;
+            let effect = pseudo_weather_from_word(&norm(effect_tok))
+                .ok_or_else(|| err(line_no, format!("unrecognized field effect '{effect_tok}'")))?;
+            let kind = match norm(state_tok).as_str() {
+                "start" | "started" | "on" => EventKind::PseudoWeatherStart { effect },
+                "end" | "ended" | "off" => EventKind::PseudoWeatherEnd { effect },
+                _ => return Err(err(line_no, format!("'{tok}' requires 'start' or 'end'"))),
+            };
+            children.push(leaf(kind));
+            i += 2;
+        } else if n == "side" {
+            let side_tok = rest
+                .get(i + 1)
+                .ok_or_else(|| err(line_no, "side requires 'p' or 'o'"))?;
+            let side = match norm(side_tok).as_str() {
+                "p" | "p1" | "player" => Player::P1,
+                "o" | "o1" | "opponent" => Player::P2,
+                _ => return Err(err(line_no, "side requires 'p' or 'o'")),
+            };
+            let condition_tok = rest
+                .get(i + 2)
+                .ok_or_else(|| err(line_no, "side requires a condition name"))?;
+            let condition = side_condition_from_word(&norm(condition_tok)).ok_or_else(|| {
+                err(
+                    line_no,
+                    format!("unrecognized side condition '{condition_tok}'"),
+                )
+            })?;
+            let state_tok = rest
+                .get(i + 3)
+                .ok_or_else(|| err(line_no, "side requires 'start' or 'end'"))?;
+            let kind = match norm(state_tok).as_str() {
+                "start" | "started" | "on" => EventKind::SideConditionStart { side, condition },
+                "end" | "ended" | "off" => EventKind::SideConditionEnd { side, condition },
+                _ => return Err(err(line_no, "side requires 'start' or 'end'")),
+            };
+            children.push(leaf(kind));
+            i += 3;
         } else if let Some(volatile) = volatile_from_word(&n) {
             children.push(leaf(EventKind::VolatileStart {
                 target: current,
@@ -1076,9 +1682,9 @@ mod tests {
     use poke_rust::information::inference::{InferenceConfig, apply_information};
     use poke_rust::information::unknowns::UnknownMatchState;
     use poke_rust::state::dex_data::{parse_ability_dex, parse_move_dex, parse_pokemon_dex};
-    use std::sync::OnceLock;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use std::sync::OnceLock;
 
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     static MOVE_DEX: OnceLock<HashMap<PokemonMove, MoveData>> = OnceLock::new();
@@ -1095,7 +1701,10 @@ mod tests {
         ABILITY_DEX.get_or_init(|| parse_ability_dex("../pokemon_info/showdownAbilities.txt"))
     }
 
-    fn make_active(species: Species, hp: PokemonHP) -> poke_rust::information::unknowns::UnknownPokemonState {
+    fn make_active(
+        species: Species,
+        hp: PokemonHP,
+    ) -> poke_rust::information::unknowns::UnknownPokemonState {
         let mut mon = poke_rust::information::unknowns::UnknownPokemonState::from_opponent_species(
             species,
             pokemon_dex(),
@@ -1213,8 +1822,9 @@ mod tests {
     #[test]
     fn hp_event_classifies_direction_against_belief() {
         let belief = test_belief();
+        let mut hp_readings = hp_readings_from_belief(&belief);
         // o1 (opponent) starts at 100% — a lower reading is damage.
-        let ev = hp_event(&belief, o1(), HpToken::Percent(45));
+        let ev = hp_event(&belief, &mut hp_readings, o1(), HpToken::Percent(45));
         assert!(matches!(
             ev.kind,
             EventKind::DamageDealt {
@@ -1223,9 +1833,9 @@ mod tests {
             }
         ));
         // p1 (own) starts at 100 exact — a higher reading is healing.
-        let ev = hp_event(&belief, p1(), HpToken::Number(100));
+        let ev = hp_event(&belief, &mut hp_readings, p1(), HpToken::Number(100));
         assert!(matches!(ev.kind, EventKind::SetHp { .. }));
-        let ev = hp_event(&belief, p1(), HpToken::Number(120));
+        let ev = hp_event(&belief, &mut hp_readings, p1(), HpToken::Number(120));
         assert!(matches!(
             ev.kind,
             EventKind::Healed {
@@ -1262,7 +1872,10 @@ mod tests {
                 other => panic!("expected MoveUsed, got {other:?}"),
             }
             assert_eq!(ev.reactions.len(), 1);
-            assert!(matches!(ev.reactions[0].kind, EventKind::DamageDealt { .. }));
+            assert!(matches!(
+                ev.reactions[0].kind,
+                EventKind::DamageDealt { .. }
+            ));
         }
     }
 
@@ -1290,7 +1903,10 @@ mod tests {
         assert!(matches!(
             &bare[0],
             TrackerLine::Event(InformationEvent {
-                kind: EventKind::Cant { reason: CantReason::Taunt, .. },
+                kind: EventKind::Cant {
+                    reason: CantReason::Taunt,
+                    ..
+                },
                 ..
             })
         ));
@@ -1300,7 +1916,10 @@ mod tests {
         let TrackerLine::Event(ev) = &with_target[0] else {
             panic!("expected an event line")
         };
-        let EventKind::MoveUsed { move_used, targets, .. } = &ev.kind else {
+        let EventKind::MoveUsed {
+            move_used, targets, ..
+        } = &ev.kind
+        else {
             panic!("expected MoveUsed, got {:?}", ev.kind)
         };
         assert_eq!(*move_used, PokemonMove::Taunt);
@@ -1351,8 +1970,11 @@ mod tests {
         // `p leads pikachu` — the viewer's own side; pulls the real exact HP
         // already recorded in the belief (100, per `test_belief`), not a
         // fresh-100%-percent guess.
-        let lines = parse_tracker_text("p leads pikachu", &belief, move_dex(), pokemon_dex()).unwrap();
-        let TrackerLine::Event(ev) = &lines[0] else { panic!() };
+        let lines =
+            parse_tracker_text("p leads pikachu", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = &lines[0] else {
+            panic!()
+        };
         let EventKind::SimultaneousSwitch { switches } = &ev.kind else {
             panic!("expected SimultaneousSwitch, got {:?}", ev.kind)
         };
@@ -1363,10 +1985,16 @@ mod tests {
 
         // `o leads ...` — two species assigned left-to-right to slots 0/1 on
         // the opponent's side, each a fresh 100% send-out.
-        let lines =
-            parse_tracker_text("o leads garchomp dragapult", &belief, move_dex(), pokemon_dex())
-                .unwrap();
-        let TrackerLine::Event(ev) = &lines[0] else { panic!() };
+        let lines = parse_tracker_text(
+            "o leads garchomp dragapult",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        let TrackerLine::Event(ev) = &lines[0] else {
+            panic!()
+        };
         let EventKind::SimultaneousSwitch { switches } = &ev.kind else {
             panic!("expected SimultaneousSwitch, got {:?}", ev.kind)
         };
@@ -1426,14 +2054,21 @@ mod tests {
         assert_eq!(switches[1].species, Species::Lucario);
         assert_eq!(
             switches[1].slot,
-            FieldSlot { player: Player::P1, slot_index: 1 }
+            FieldSlot {
+                player: Player::P1,
+                slot_index: 1
+            }
         );
         assert_eq!(switches[2].species, Species::Aerodactyl);
         assert_eq!(switches[2].slot, o1());
         assert_eq!(switches[3].species, Species::Charizard);
 
         let reactions = &folded[0].reactions;
-        assert_eq!(reactions.len(), 2, "both entry-ability lines should nest as reactions");
+        assert_eq!(
+            reactions.len(),
+            2,
+            "both entry-ability lines should nest as reactions"
+        );
         assert!(matches!(
             &reactions[0].kind,
             EventKind::AbilityRevealed { slot, ability: Ability::SandStream } if *slot == p1()
@@ -1468,14 +2103,27 @@ mod tests {
             .collect();
 
         let folded = fold_leads_and_entry_abilities(events);
-        assert_eq!(folded.len(), 3, "the move and the later ability reveal stay top-level");
-        assert!(matches!(folded[0].kind, EventKind::SimultaneousSwitch { .. }));
+        assert_eq!(
+            folded.len(),
+            3,
+            "the move and the later ability reveal stay top-level"
+        );
+        assert!(matches!(
+            folded[0].kind,
+            EventKind::SimultaneousSwitch { .. }
+        ));
         assert!(matches!(folded[1].kind, EventKind::MoveUsed { .. }));
         assert!(matches!(
             folded[2].kind,
-            EventKind::AbilityRevealed { ability: Ability::FlashFire, .. }
+            EventKind::AbilityRevealed {
+                ability: Ability::FlashFire,
+                ..
+            }
         ));
-        assert!(folded[0].reactions.is_empty(), "leads merged from both sides, but no ability lines to fold");
+        assert!(
+            folded[0].reactions.is_empty(),
+            "leads merged from both sides, but no ability lines to fold"
+        );
     }
 
     #[test]
@@ -1553,7 +2201,11 @@ mod tests {
     fn mega_line_requires_species_when_ambiguous() {
         let belief = test_belief_with(Species::Charizard, Species::Garchomp);
         let error = parse_tracker_text("p1 mega", &belief, move_dex(), pokemon_dex()).unwrap_err();
-        assert!(error.message.contains("multiple mega forms"), "{}", error.message);
+        assert!(
+            error.message.contains("multiple mega forms"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
@@ -1573,7 +2225,8 @@ mod tests {
     fn mega_line_full_species_token_still_works() {
         let belief = test_belief_with(Species::Charizard, Species::Garchomp);
         let lines =
-            parse_tracker_text("p1 mega charizardmegax", &belief, move_dex(), pokemon_dex()).unwrap();
+            parse_tracker_text("p1 mega charizardmegax", &belief, move_dex(), pokemon_dex())
+                .unwrap();
         let TrackerLine::Event(ev) = &lines[0] else {
             panic!()
         };
@@ -1588,7 +2241,8 @@ mod tests {
     #[test]
     fn intimidate_reveal_synthesizes_opposing_atk_drop() {
         let belief = test_belief();
-        let lines = parse_tracker_text("o1 intimidate", &belief, move_dex(), pokemon_dex()).unwrap();
+        let lines =
+            parse_tracker_text("o1 intimidate", &belief, move_dex(), pokemon_dex()).unwrap();
         let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
             panic!()
         };
@@ -1607,7 +2261,8 @@ mod tests {
     #[test]
     fn swords_dance_synthesizes_self_boost() {
         let belief = test_belief();
-        let lines = parse_tracker_text("p1 swordsdance", &belief, move_dex(), pokemon_dex()).unwrap();
+        let lines =
+            parse_tracker_text("p1 swordsdance", &belief, move_dex(), pokemon_dex()).unwrap();
         let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
             panic!()
         };
@@ -1635,15 +2290,22 @@ mod tests {
     #[test]
     fn syrup_bomb_volatile_seeds_and_decrements_across_end_of_turns() {
         let belief = test_belief();
-        let lines =
-            parse_tracker_text("p1 syrupbomb o1\nendofturn", &belief, move_dex(), pokemon_dex())
-                .unwrap();
+        let lines = parse_tracker_text(
+            "p1 syrupbomb o1\nendofturn",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => {
-                    events.push(augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex()))
-                }
+                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                    ev,
+                    &belief,
+                    move_dex(),
+                    pokemon_dex(),
+                )),
                 TrackerLine::EndOfTurn => events.push(leaf(EventKind::EndOfTurn)),
             }
         }
@@ -1713,14 +2375,12 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => {
-                    events.push(augment_with_guaranteed_effects(
-                        ev,
-                        &belief,
-                        move_dex(),
-                        pokemon_dex(),
-                    ))
-                }
+                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                    ev,
+                    &belief,
+                    move_dex(),
+                    pokemon_dex(),
+                )),
                 TrackerLine::EndOfTurn => events.push(leaf(EventKind::EndOfTurn)),
             }
         }
@@ -1878,9 +2538,13 @@ mod tests {
         // generic secondary synthesis (see tracker_effects.rs) must only fire
         // at chance == 100, unlike Thunder Wave's guaranteed Paralysis.
         let belief = test_belief();
-        let lines =
-            parse_tracker_text("p1 scald o1 50%\nendofturn", &belief, move_dex(), pokemon_dex())
-                .unwrap();
+        let lines = parse_tracker_text(
+            "p1 scald o1 50%\nendofturn",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
         let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
             panic!()
         };
@@ -1999,41 +2663,129 @@ mod tests {
                 0 => {
                     let hp = rng.gen_range(1..100);
                     (
-                        format!("p1 Thunder-Bolt o1 {hp}% o1 {}", if rng.gen_bool(0.5) { "def-1" } else { "-1def" }),
-                        |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::MoveUsed { move_used: PokemonMove::Thunderbolt, .. }, .. })),
+                        format!(
+                            "p1 Thunder-Bolt o1 {hp}% o1 {}",
+                            if rng.gen_bool(0.5) { "def-1" } else { "-1def" }
+                        ),
+                        |line| {
+                            matches!(
+                                line,
+                                TrackerLine::Event(InformationEvent {
+                                    kind: EventKind::MoveUsed {
+                                        move_used: PokemonMove::Thunderbolt,
+                                        ..
+                                    },
+                                    ..
+                                })
+                            )
+                        },
                     )
                 }
                 1 => (
-                    format!("o1 {} garchomp 73%", ["switch", "switchin", "sendout"][rng.gen_range(0..3)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Switch(_), .. })),
+                    format!(
+                        "o1 {} garchomp 73%",
+                        ["switch", "switchin", "sendout"][rng.gen_range(0..3)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::Switch(_),
+                                ..
+                            })
+                        )
+                    },
                 ),
                 2 => (
                     "p leads pikachu charizard".to_string(),
                     |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::SimultaneousSwitch { switches }, .. }) if switches.len() == 2),
                 ),
                 3 => (
-                    format!("weather {}", ["rain", "sun", "sand", "snow", "clear"][rng.gen_range(0..5)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::WeatherChanged { .. }, .. })),
+                    format!(
+                        "weather {}",
+                        ["rain", "sun", "sand", "snow", "clear"][rng.gen_range(0..5)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::WeatherChanged { .. },
+                                ..
+                            })
+                        )
+                    },
                 ),
                 4 => (
-                    format!("terrain {}", ["electric", "grassy", "misty", "psychic", "none"][rng.gen_range(0..5)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::TerrainChanged { .. }, .. })),
+                    format!(
+                        "terrain {}",
+                        ["electric", "grassy", "misty", "psychic", "none"][rng.gen_range(0..5)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::TerrainChanged { .. },
+                                ..
+                            })
+                        )
+                    },
                 ),
                 5 => (
-                    format!("p1 {} electric", ["tera", "terastallize", "terastallized"][rng.gen_range(0..3)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Terastallization { .. }, .. })),
+                    format!(
+                        "p1 {} electric",
+                        ["tera", "terastallize", "terastallized"][rng.gen_range(0..3)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::Terastallization { .. },
+                                ..
+                            })
+                        )
+                    },
                 ),
                 6 => (
-                    format!("o1 {} sitrus", ["loses", "consumes", "ate", "gains"][rng.gen_range(0..4)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::ItemLost { .. } | EventKind::ItemGained { .. }, .. })),
+                    format!(
+                        "o1 {} sitrus",
+                        ["loses", "consumes", "ate", "gains"][rng.gen_range(0..4)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::ItemLost { .. } | EventKind::ItemGained { .. },
+                                ..
+                            })
+                        )
+                    },
                 ),
-                7 => (
-                    format!("p1 hp {}hp", rng.gen_range(0..151)),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::DamageDealt { .. } | EventKind::Healed { .. } | EventKind::SetHp { .. }, .. })),
-                ),
+                7 => (format!("p1 hp {}hp", rng.gen_range(0..151)), |line| {
+                    matches!(
+                        line,
+                        TrackerLine::Event(InformationEvent {
+                            kind: EventKind::DamageDealt { .. }
+                                | EventKind::Healed { .. }
+                                | EventKind::SetHp { .. },
+                            ..
+                        })
+                    )
+                }),
                 8 => (
-                    format!("o1 {}", ["flinch", "fullpara", "sleep", "taunt", "encore", "pass"][rng.gen_range(0..6)]),
-                    |line| matches!(line, TrackerLine::Event(InformationEvent { kind: EventKind::Cant { .. }, .. })),
+                    format!(
+                        "o1 {}",
+                        ["flinch", "fullpara", "sleep", "taunt", "encore", "pass"]
+                            [rng.gen_range(0..6)]
+                    ),
+                    |line| {
+                        matches!(
+                            line,
+                            TrackerLine::Event(InformationEvent {
+                                kind: EventKind::Cant { .. },
+                                ..
+                            })
+                        )
+                    },
                 ),
                 _ => (
                     ["endofturn", "eot"][rng.gen_range(0..2)].to_string(),
@@ -2049,7 +2801,11 @@ mod tests {
                     )
                 });
             assert_eq!(parsed.len(), 1, "grammar fuzz seed={seed}: {text}");
-            assert!(check(&parsed[0]), "grammar fuzz seed={seed}: {text}\n{:#?}", parsed[0]);
+            assert!(
+                check(&parsed[0]),
+                "grammar fuzz seed={seed}: {text}\n{:#?}",
+                parsed[0]
+            );
         }
     }
 }

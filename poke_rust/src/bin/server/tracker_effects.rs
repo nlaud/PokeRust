@@ -76,15 +76,20 @@
 //! unambiguous; Trace only fires when exactly one opposing active's ability
 //! is already `Known`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use poke_rust::data::ability::Ability;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
 use poke_rust::information::information::{EventKind, InformationEvent};
-use poke_rust::information::unknowns::{PokemonHP, Unknown, UnknownBattleState, UnknownPokemonState};
+use poke_rust::information::unknowns::{
+    PokemonHP, Unknown, UnknownBattleState, UnknownPokemonState,
+};
 use poke_rust::state::battle::{FieldSlot, Player};
-use poke_rust::state::dex_data::{MoveData, MoveTarget, PokemonData, Terrain, Weather};
+use poke_rust::state::dex_data::{
+    MoveData, MoveTarget, PokemonData, PokemonType, Terrain, VolatileStatus, Weather,
+};
+use poke_rust::state::pokemon::VolatileStatusState;
 
 use crate::tracker_parse::opposing_active_slots;
 
@@ -105,14 +110,97 @@ pub fn augment_turn(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<InformationEvent> {
     let mut scratch = belief.clone();
+    let mut live_slots: HashSet<FieldSlot> = [Player::P1, Player::P2]
+        .into_iter()
+        .flat_map(|player| {
+            let mons = match player {
+                Player::P1 => &belief.p1_active_mons,
+                Player::P2 => &belief.p2_active_mons,
+            };
+            mons.iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted && !is_zero_hp(&mon.hp))
+                .map(move |(index, _)| FieldSlot {
+                    player,
+                    slot_index: index as u8,
+                })
+        })
+        .collect();
     events
         .into_iter()
-        .map(|e| {
-            let augmented = augment_with_guaranteed_effects(e, &scratch, move_dex, pokemon_dex);
-            fold_field_changes_into_scratch(&mut scratch, &augmented);
-            augmented
+        .flat_map(|e| {
+            match &e.kind {
+                EventKind::Switch(sw) => {
+                    if !is_zero_hp(&sw.hp) {
+                        live_slots.insert(sw.slot);
+                    } else {
+                        live_slots.remove(&sw.slot);
+                    }
+                }
+                EventKind::SimultaneousSwitch { switches } => {
+                    for sw in switches {
+                        if !is_zero_hp(&sw.hp) {
+                            live_slots.insert(sw.slot);
+                        } else {
+                            live_slots.remove(&sw.slot);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let augmented =
+                augment_with_live_slots(e, &scratch, move_dex, pokemon_dex, &live_slots, true);
+            fold_event_into_synthesis_scratch(&mut scratch, &augmented, pokemon_dex);
+            remove_fainted_slots(&augmented, &mut live_slots);
+            let top_level_faint = match &augmented.kind {
+                EventKind::DamageDealt { target, new_hp, .. }
+                | EventKind::Healed { target, new_hp, .. }
+                | EventKind::SetHp { target, new_hp, .. }
+                    if is_zero_hp(new_hp) =>
+                {
+                    Some(*target)
+                }
+                _ => None,
+            };
+            let mut out = vec![augmented];
+            if let Some(slot) = top_level_faint {
+                let faint = leaf(EventKind::Faint { slot });
+                fold_event_into_synthesis_scratch(&mut scratch, &faint, pokemon_dex);
+                live_slots.remove(&slot);
+                out.push(faint);
+            }
+            out
         })
         .collect()
+}
+
+fn remove_fainted_slots(event: &InformationEvent, live_slots: &mut HashSet<FieldSlot>) {
+    match &event.kind {
+        EventKind::Faint { slot } => {
+            live_slots.remove(slot);
+        }
+        EventKind::DamageDealt {
+            target,
+            new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+            ..
+        }
+        | EventKind::Healed {
+            target,
+            new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+            ..
+        }
+        | EventKind::SetHp {
+            target,
+            new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+            ..
+        } => {
+            live_slots.remove(target);
+        }
+        _ => {}
+    }
+    for reaction in &event.reactions {
+        remove_fainted_slots(reaction, live_slots);
+    }
 }
 
 /// Recursively scan `event` (and its already-synthesized reactions) for
@@ -123,14 +211,221 @@ pub fn augment_turn(
 /// table gates a decision on that another event earlier in the SAME turn can
 /// change (Intimidate/Download/Trace/one-time boosts don't have this
 /// same-turn ordering dependency).
-fn fold_field_changes_into_scratch(scratch: &mut UnknownBattleState, event: &InformationEvent) {
-    match &event.kind {
-        EventKind::WeatherChanged { weather } => scratch.weather = weather.clone(),
-        EventKind::TerrainChanged { terrain } => scratch.terrain = terrain.clone(),
+fn active_mon_mut(
+    state: &mut UnknownBattleState,
+    slot: FieldSlot,
+) -> Option<&mut UnknownPokemonState> {
+    match slot.player {
+        Player::P1 => state.p1_active_mons.get_mut(slot.slot_index as usize),
+        Player::P2 => state.p2_active_mons.get_mut(slot.slot_index as usize),
+    }
+}
+
+fn roster_mon_for_species(
+    state: &UnknownBattleState,
+    player: Player,
+    species: &Species,
+) -> Option<UnknownPokemonState> {
+    let buckets = match player {
+        Player::P1 => [
+            &state.p1_active_mons,
+            &state.p1_known_back_mons,
+            &state.p1_possible_back_mons,
+            &state.p1_fainted_mons,
+        ],
+        Player::P2 => [
+            &state.p2_active_mons,
+            &state.p2_known_back_mons,
+            &state.p2_possible_back_mons,
+            &state.p2_fainted_mons,
+        ],
+    };
+    buckets.into_iter().find_map(|bucket| {
+        bucket.iter().find_map(|mon| {
+            matches!(&mon.possible_species, Unknown::Known(actual) if actual == species)
+                .then(|| mon.clone())
+        })
+    })
+}
+
+fn fold_switch_into_synthesis_scratch(
+    state: &mut UnknownBattleState,
+    sw: &poke_rust::information::information::SwitchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) {
+    let mut incoming =
+        roster_mon_for_species(state, sw.slot.player, &sw.species).unwrap_or_else(|| {
+            UnknownPokemonState::from_opponent_species(sw.species.clone(), pokemon_dex, sw.level)
+        });
+    incoming.possible_species = Unknown::Known(sw.species.clone());
+    incoming.level = sw.level;
+    incoming.hp = sw.hp.clone();
+    incoming.status = sw.status.clone();
+    incoming.fainted = false;
+    incoming.last_used_move = None;
+    if let Some(data) = pokemon_dex.get(&sw.species)
+        && let [only] = data.abilities.as_slice()
+    {
+        incoming.possible_abilities = Unknown::Known(only.clone());
+    }
+    let active = match sw.slot.player {
+        Player::P1 => &mut state.p1_active_mons,
+        Player::P2 => &mut state.p2_active_mons,
+    };
+    let index = sw.slot.slot_index as usize;
+    if index < active.len() {
+        active[index] = incoming;
+    } else if index == active.len() {
+        active.push(incoming);
+    }
+}
+
+fn fold_event_kind_into_synthesis_scratch(
+    state: &mut UnknownBattleState,
+    kind: &EventKind,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) {
+    match kind {
+        EventKind::Switch(sw) => fold_switch_into_synthesis_scratch(state, sw, pokemon_dex),
+        EventKind::SimultaneousSwitch { switches } => {
+            let mut ordered: Vec<_> = switches.iter().collect();
+            ordered.sort_by_key(|sw| {
+                (
+                    match sw.slot.player {
+                        Player::P1 => 0u8,
+                        Player::P2 => 1u8,
+                    },
+                    sw.slot.slot_index,
+                )
+            });
+            for sw in ordered {
+                fold_switch_into_synthesis_scratch(state, sw, pokemon_dex);
+            }
+        }
+        EventKind::MegaEvolution { slot, into } => {
+            if let Some(mon) = active_mon_mut(state, *slot) {
+                mon.possible_species = Unknown::Known(into.clone());
+                mon.is_mega = true;
+                if let Some(ability) = pokemon_dex
+                    .get(into)
+                    .and_then(|data| data.primary_ability.clone())
+                {
+                    mon.possible_abilities = Unknown::Known(ability);
+                }
+            }
+        }
+        EventKind::AbilityRevealed { slot, ability } => {
+            if let Some(mon) = active_mon_mut(state, *slot) {
+                mon.possible_abilities = Unknown::Known(ability.clone());
+            }
+        }
+        EventKind::IllusionEnded {
+            slot,
+            actual_species,
+        } => {
+            if let Some(mon) = active_mon_mut(state, *slot) {
+                mon.possible_species = Unknown::Known(actual_species.clone());
+            }
+        }
+        EventKind::BoostChanged {
+            target,
+            boost_idx,
+            stages,
+        } => {
+            if let Some(mon) = active_mon_mut(state, *target)
+                && let Some(boost) = mon.boosts.get_mut(*boost_idx)
+            {
+                *boost = (*boost + *stages).clamp(-6, 6);
+            }
+        }
+        EventKind::BoostsInverted { target } => {
+            if let Some(mon) = active_mon_mut(state, *target) {
+                for boost in &mut mon.boosts {
+                    *boost = -*boost;
+                }
+            }
+        }
+        EventKind::WeatherChanged { weather } => state.weather = weather.clone(),
+        EventKind::TerrainChanged { terrain } => state.terrain = terrain.clone(),
+        EventKind::PseudoWeatherStart { effect } => {
+            if !state.pseudo_weathers.contains(effect) {
+                state.pseudo_weathers.push(effect.clone());
+            }
+        }
+        EventKind::PseudoWeatherEnd { effect } => {
+            state.pseudo_weathers.retain(|active| active != effect);
+        }
+        EventKind::SideConditionStart { side, condition } => {
+            let conditions = match side {
+                Player::P1 => &mut state.p1_side_conditions,
+                Player::P2 => &mut state.p2_side_conditions,
+            };
+            if !conditions
+                .iter()
+                .any(|active| std::mem::discriminant(active) == std::mem::discriminant(condition))
+            {
+                conditions.push(condition.clone());
+            }
+        }
+        EventKind::SideConditionEnd { side, condition } => {
+            let conditions = match side {
+                Player::P1 => &mut state.p1_side_conditions,
+                Player::P2 => &mut state.p2_side_conditions,
+            };
+            conditions.retain(|active| {
+                std::mem::discriminant(active) != std::mem::discriminant(condition)
+            });
+        }
+        EventKind::Faint { slot } => {
+            if let Some(mon) = active_mon_mut(state, *slot) {
+                mon.fainted = true;
+            }
+        }
+        EventKind::DamageDealt { target, new_hp, .. }
+        | EventKind::Healed { target, new_hp, .. }
+        | EventKind::SetHp { target, new_hp, .. } => {
+            if let Some(mon) = active_mon_mut(state, *target) {
+                mon.hp = new_hp.clone();
+                if matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0)) {
+                    mon.fainted = true;
+                }
+            }
+        }
         _ => {}
     }
-    for r in &event.reactions {
-        fold_field_changes_into_scratch(scratch, r);
+}
+
+pub(crate) fn fold_event_into_synthesis_scratch(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) {
+    fold_event_kind_into_synthesis_scratch(state, &event.kind, pokemon_dex);
+    if let EventKind::MoveUsed {
+        user, move_used, ..
+    } = &event.kind
+        && !move_failed_at_all(&event.reactions)
+    {
+        if let Some(mon) = active_mon_mut(state, *user) {
+            mon.last_used_move = Some(move_used.clone());
+        }
+        state.last_move_on_field = Some(move_used.clone());
+    }
+    for reaction in &event.reactions {
+        fold_event_into_synthesis_scratch(state, reaction, pokemon_dex);
+    }
+}
+
+pub(crate) fn fold_ability_reveals_into_synthesis_scratch(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) {
+    if matches!(event.kind, EventKind::AbilityRevealed { .. }) {
+        fold_event_kind_into_synthesis_scratch(state, &event.kind, pokemon_dex);
+    }
+    for reaction in &event.reactions {
+        fold_ability_reveals_into_synthesis_scratch(state, reaction, pokemon_dex);
     }
 }
 
@@ -141,22 +436,98 @@ fn fold_field_changes_into_scratch(scratch: &mut UnknownBattleState, event: &Inf
 /// `augment_turn` (not this function directly) is the entry point tracker.rs
 /// should call for a whole turn's events; see its doc comment.
 pub fn augment_with_guaranteed_effects(
-    mut event: InformationEvent,
+    event: InformationEvent,
     belief: &UnknownBattleState,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> InformationEvent {
+    let live_slots: HashSet<FieldSlot> = [Player::P1, Player::P2]
+        .into_iter()
+        .flat_map(|player| {
+            let mons = match player {
+                Player::P1 => &belief.p1_active_mons,
+                Player::P2 => &belief.p2_active_mons,
+            };
+            mons.iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted && !is_zero_hp(&mon.hp))
+                .map(move |(index, _)| FieldSlot {
+                    player,
+                    slot_index: index as u8,
+                })
+        })
+        .collect();
+    augment_with_live_slots(event, belief, move_dex, pokemon_dex, &live_slots, true)
+}
+
+fn augment_with_live_slots(
+    mut event: InformationEvent,
+    belief: &UnknownBattleState,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    live_slots: &HashSet<FieldSlot>,
+    allow_entry_ability_effect: bool,
+) -> InformationEvent {
+    // Reactions are ordered. Thread field state between siblings so two entry
+    // abilities nested under one simultaneous switch see each other's weather
+    // or terrain changes just as two top-level events do.
+    let mut reaction_scratch = belief.clone();
+    // A switch/mega parent establishes the entering identity before its
+    // nested ability reactions fire.
+    fold_event_kind_into_synthesis_scratch(&mut reaction_scratch, &event.kind, pokemon_dex);
+    // Flat tracker text may place an explicitly revealed reactive ability as
+    // a sibling rather than nesting it under the trigger. Make every such
+    // reveal visible to synthesis decisions before processing the siblings.
+    for reaction in &event.reactions {
+        fold_ability_reveals_into_synthesis_scratch(&mut reaction_scratch, reaction, pokemon_dex);
+    }
+    let child_allows_entry_ability = matches!(
+        event.kind,
+        EventKind::Switch(_)
+            | EventKind::SimultaneousSwitch { .. }
+            | EventKind::MegaEvolution { .. }
+    );
     event.reactions = event
         .reactions
         .into_iter()
-        .map(|r| augment_with_guaranteed_effects(r, belief, move_dex, pokemon_dex))
+        .map(|reaction| {
+            let augmented = augment_with_live_slots(
+                reaction,
+                &reaction_scratch,
+                move_dex,
+                pokemon_dex,
+                live_slots,
+                child_allows_entry_ability,
+            );
+            fold_event_into_synthesis_scratch(&mut reaction_scratch, &augmented, pokemon_dex);
+            augmented
+        })
         .collect();
 
     match &event.kind {
-        EventKind::AbilityRevealed { slot, ability } => {
-            event
+        EventKind::AbilityRevealed { slot, ability } if allow_entry_ability_effect => {
+            let mirror_armor_slots: HashSet<FieldSlot> = event
                 .reactions
-                .extend(guaranteed_ability_reactions(*slot, ability, belief));
+                .iter()
+                .filter_map(|reaction| match &reaction.kind {
+                    EventKind::AbilityRevealed {
+                        slot,
+                        ability: Ability::MirrorArmor,
+                    } => Some(*slot),
+                    _ => None,
+                })
+                .collect();
+            let mut guaranteed = guaranteed_ability_reactions(*slot, ability, belief, live_slots);
+            if *ability == Ability::Intimidate {
+                guaranteed.retain(|reaction| {
+                    !matches!(
+                        reaction.kind,
+                        EventKind::BoostChanged { target, .. }
+                            if mirror_armor_slots.contains(&target)
+                    )
+                });
+            }
+            event.reactions.extend(guaranteed);
         }
         EventKind::MoveUsed {
             user,
@@ -166,26 +537,41 @@ pub fn augment_with_guaranteed_effects(
             if let Some(md) = move_dex.get(move_used)
                 && !move_failed_at_all(&event.reactions)
             {
-                for (idx, &delta) in md.self_boost.iter().enumerate() {
-                    if delta != 0 {
-                        event.reactions.push(leaf(EventKind::BoostChanged {
-                            target: *user,
-                            boost_idx: idx,
-                            stages: delta,
-                        }));
+                let connected_somewhere = targets.is_empty()
+                    || targets.iter().any(|target| {
+                        live_slots.contains(target) && !target_has_failed(&event.reactions, *target)
+                    });
+                if connected_somewhere {
+                    for (idx, &delta) in md.self_boost.iter().enumerate() {
+                        let delta = adjusted_boost_delta(belief, *user, idx, delta);
+                        if delta != 0 {
+                            event.reactions.push(leaf(EventKind::BoostChanged {
+                                target: *user,
+                                boost_idx: idx,
+                                stages: delta,
+                            }));
+                        }
                     }
                 }
 
                 // Field-level payloads (weather/terrain/pseudo-weather/side
                 // condition) apply once per move use, regardless of which
                 // bucket housed them — see this module's doc comment.
-                for sec in md
-                    .secondaries
-                    .iter()
-                    .chain(md.self_secondaries.iter())
-                    .filter(|s| s.chance == 100 && s.random_choices.is_empty())
-                {
-                    synthesize_field_effects(&mut event.reactions, &sec.effect, *user, &md.target);
+                if connected_somewhere {
+                    for sec in md
+                        .secondaries
+                        .iter()
+                        .chain(md.self_secondaries.iter())
+                        .filter(|s| s.chance == 100 && s.random_choices.is_empty())
+                    {
+                        synthesize_field_effects(
+                            &mut event.reactions,
+                            &sec.effect,
+                            *user,
+                            &md.target,
+                            belief,
+                        );
+                    }
                 }
 
                 // Per-Pokemon payloads (status/volatile/boosts): `secondaries`
@@ -213,27 +599,44 @@ pub fn augment_with_guaranteed_effects(
                     .filter(|s| s.chance == 100 && s.random_choices.is_empty())
                 {
                     for &target in secondary_targets {
-                        if !target_has_failed(&event.reactions, target) {
-                            synthesize_per_mon_effects(&mut event.reactions, &sec.effect, target);
+                        if live_slots.contains(&target)
+                            && !target_has_failed(&event.reactions, target)
+                        {
+                            synthesize_per_mon_effects(
+                                &mut event.reactions,
+                                &sec.effect,
+                                target,
+                                belief,
+                            );
                         }
                     }
                 }
-                for sec in md
-                    .self_secondaries
-                    .iter()
-                    .filter(|s| s.chance == 100 && s.random_choices.is_empty())
-                {
-                    if !target_has_failed(&event.reactions, *user) {
-                        synthesize_per_mon_effects(&mut event.reactions, &sec.effect, *user);
+                if connected_somewhere {
+                    for sec in md
+                        .self_secondaries
+                        .iter()
+                        .filter(|s| s.chance == 100 && s.random_choices.is_empty())
+                    {
+                        if !target_has_failed(&event.reactions, *user) {
+                            synthesize_per_mon_effects(
+                                &mut event.reactions,
+                                &sec.effect,
+                                *user,
+                                belief,
+                            );
+                        }
                     }
                 }
             }
         }
         EventKind::MegaEvolution { slot, into } => {
-            if let Some(ability) = pokemon_dex.get(into).and_then(|d| d.primary_ability.clone()) {
+            if let Some(ability) = pokemon_dex
+                .get(into)
+                .and_then(|d| d.primary_ability.clone())
+            {
                 event
                     .reactions
-                    .push(ability_revealed_node(*slot, ability, belief));
+                    .push(ability_revealed_node(*slot, ability, belief, live_slots));
             }
         }
         _ => {}
@@ -275,8 +678,10 @@ fn synthesize_field_effects(
     effect: &poke_rust::state::dex_data::HitEffect,
     user: FieldSlot,
     move_target: &MoveTarget,
+    belief: &UnknownBattleState,
 ) {
     if let Some(weather) = &effect.weather
+        && belief.weather.as_ref() != Some(weather)
         && !reactions.iter().any(
             |r| matches!(&r.kind, EventKind::WeatherChanged { weather: Some(w) } if w == weather),
         )
@@ -286,6 +691,7 @@ fn synthesize_field_effects(
         }));
     }
     if let Some(terrain) = &effect.terrain
+        && belief.terrain.as_ref() != Some(terrain)
         && !reactions.iter().any(
             |r| matches!(&r.kind, EventKind::TerrainChanged { terrain: Some(t) } if t == terrain),
         )
@@ -295,6 +701,7 @@ fn synthesize_field_effects(
         }));
     }
     if let Some(pw) = &effect.pseudo_weather
+        && !belief.pseudo_weathers.contains(pw)
         && !reactions
             .iter()
             .any(|r| matches!(&r.kind, EventKind::PseudoWeatherStart { effect: e } if e == pw))
@@ -309,7 +716,14 @@ fn synthesize_field_effects(
             MoveTarget::FoeSide => user.player.opponent(),
             _ => user.player,
         };
-        if !reactions.iter().any(|r| {
+        let current = match side {
+            Player::P1 => &belief.p1_side_conditions,
+            Player::P2 => &belief.p2_side_conditions,
+        };
+        let already_active = current
+            .iter()
+            .any(|condition| std::mem::discriminant(condition) == std::mem::discriminant(sc));
+        if !already_active && !reactions.iter().any(|r| {
             matches!(&r.kind, EventKind::SideConditionStart { side: s, condition } if *s == side && condition == sc)
         }) {
             reactions.push(leaf(EventKind::SideConditionStart {
@@ -327,6 +741,7 @@ fn synthesize_per_mon_effects(
     reactions: &mut Vec<InformationEvent>,
     effect: &poke_rust::state::dex_data::HitEffect,
     target: FieldSlot,
+    belief: &UnknownBattleState,
 ) {
     if let Some(status) = &effect.status {
         reactions.push(leaf(EventKind::StatusInflicted {
@@ -335,12 +750,53 @@ fn synthesize_per_mon_effects(
         }));
     }
     if let Some(volatile) = &effect.volatile_status {
-        reactions.push(leaf(EventKind::VolatileStart {
-            target,
-            volatile: volatile.clone(),
-        }));
+        // The move dex stores a placeholder move inside Encore/Disable. Their
+        // actual payload is the target's last move, and both moves fail when
+        // there is no eligible last move (notably immediately after switch-in).
+        let resolved = match volatile {
+            // These are not guaranteed merely from the move name: they fail
+            // for several target-state reasons (PP, existing lock, immunity,
+            // Aroma Veil/Mental Herb). A successful payload is entered
+            // explicitly as `encoremove <move>` / `disablemove <move>`.
+            VolatileStatus::Encore(_)
+            | VolatileStatus::Disable(_)
+            | VolatileStatus::Stockpile(_) => None,
+            VolatileStatus::LeechSeed => {
+                let definitely_seedable = mon_at(belief, target).is_some_and(|mon| {
+                    matches!(
+                        &mon.possible_types,
+                        Unknown::Known(types) if !types.contains(&PokemonType::Grass)
+                    )
+                });
+                definitely_seedable.then_some(VolatileStatus::LeechSeed)
+            }
+            other => {
+                let already_active = mon_at(belief, target).is_some_and(|mon| {
+                    mon.volatiles.iter().any(|state| match state {
+                        VolatileStatusState::TurnStatus(active, _)
+                        | VolatileStatusState::MoveStatus(active, _) => {
+                            std::mem::discriminant(active) == std::mem::discriminant(other)
+                        }
+                        VolatileStatusState::Charging(_, _) => false,
+                    })
+                });
+                (!already_active).then(|| other.clone())
+            }
+        };
+        if let Some(volatile) = resolved {
+            reactions.push(leaf(EventKind::VolatileStart { target, volatile }));
+        }
     }
     for (idx, &delta) in effect.boosts.iter().enumerate() {
+        if delta < 0
+            && matches!(
+                mon_at(belief, target).map(|mon| &mon.possible_abilities),
+                Some(Unknown::Known(Ability::MirrorArmor))
+            )
+        {
+            continue;
+        }
+        let delta = adjusted_boost_delta(belief, target, idx, delta);
         if delta != 0 {
             reactions.push(leaf(EventKind::BoostChanged {
                 target,
@@ -349,6 +805,46 @@ fn synthesize_per_mon_effects(
             }));
         }
     }
+}
+
+fn adjusted_boost_delta(
+    belief: &UnknownBattleState,
+    target: FieldSlot,
+    boost_idx: usize,
+    stages: i8,
+) -> i8 {
+    let Some(mon) = mon_at(belief, target) else {
+        return stages;
+    };
+    let mut adjusted = match &mon.possible_abilities {
+        Unknown::Known(Ability::Contrary) => -stages,
+        Unknown::Known(Ability::Simple) => stages.saturating_mul(2),
+        Unknown::Known(_) => stages,
+        Unknown::Possibly(abilities) => {
+            let mut outcomes = abilities.iter().map(|ability| match ability {
+                Ability::Contrary => -stages,
+                Ability::Simple => stages.saturating_mul(2),
+                _ => stages,
+            });
+            let Some(first) = outcomes.next() else {
+                return 0;
+            };
+            if outcomes.any(|outcome| outcome != first) {
+                return 0;
+            }
+            first
+        }
+        Unknown::Not(excluded) => {
+            if !excluded.contains(&Ability::Contrary) || !excluded.contains(&Ability::Simple) {
+                return 0;
+            }
+            stages
+        }
+    };
+    if let Some(current) = mon.boosts.get(boost_idx) {
+        adjusted = (*current + adjusted).clamp(-6, 6) - *current;
+    }
+    adjusted
 }
 
 /// Any `DamageDealt`/`Healed`/`SetHp` child landing exactly on 0 HP gets a
@@ -395,8 +891,13 @@ fn mon_at(belief: &UnknownBattleState, slot: FieldSlot) -> Option<&UnknownPokemo
 /// user typed: the outer recursive walk only processes a node's *existing*
 /// children before handling its own kind, so a freshly-appended
 /// `AbilityRevealed` would never otherwise get its cascade applied.
-fn ability_revealed_node(slot: FieldSlot, ability: Ability, belief: &UnknownBattleState) -> InformationEvent {
-    let reactions = guaranteed_ability_reactions(slot, &ability, belief);
+fn ability_revealed_node(
+    slot: FieldSlot,
+    ability: Ability,
+    belief: &UnknownBattleState,
+    live_slots: &HashSet<FieldSlot>,
+) -> InformationEvent {
+    let reactions = guaranteed_ability_reactions(slot, &ability, belief, live_slots);
     InformationEvent {
         kind: EventKind::AbilityRevealed { slot, ability },
         reactions,
@@ -407,24 +908,56 @@ fn guaranteed_ability_reactions(
     slot: FieldSlot,
     ability: &Ability,
     belief: &UnknownBattleState,
+    live_slots: &HashSet<FieldSlot>,
 ) -> Vec<InformationEvent> {
     match ability {
-        Ability::Intimidate => opposing_active_slots(belief, slot)
-            .into_iter()
-            .map(|target| {
-                leaf(EventKind::BoostChanged {
-                    target,
-                    boost_idx: 0,
-                    stages: -1,
+        Ability::Intimidate => live_slots
+            .iter()
+            .copied()
+            .filter(|target| target.player != slot.player)
+            .filter_map(|target| {
+                if matches!(
+                    mon_at(belief, target).map(|mon| &mon.possible_abilities),
+                    Some(Unknown::Known(Ability::MirrorArmor))
+                ) {
+                    // Reflection is observable but not derivable from the
+                    // Intimidate line alone. The explicit Mirror Armor reveal
+                    // and reflected boost carry it; merely suppress the
+                    // incorrect direct drop here.
+                    return None;
+                }
+                let stages = adjusted_boost_delta(belief, target, 0, -1);
+                (stages != 0).then(|| {
+                    leaf(EventKind::BoostChanged {
+                        target,
+                        boost_idx: 0,
+                        stages,
+                    })
                 })
             })
             .collect(),
-        Ability::Drizzle if !weather_is_strong(&belief.weather) => vec![weather_event(Weather::Rain)],
-        Ability::Drought if !weather_is_strong(&belief.weather) => vec![weather_event(Weather::Sun)],
-        Ability::SandStream if !weather_is_strong(&belief.weather) => {
+        Ability::Drizzle
+            if !weather_is_strong(&belief.weather)
+                && !matches!(belief.weather, Some(Weather::Rain)) =>
+        {
+            vec![weather_event(Weather::Rain)]
+        }
+        Ability::Drought
+            if !weather_is_strong(&belief.weather)
+                && !matches!(belief.weather, Some(Weather::Sun)) =>
+        {
+            vec![weather_event(Weather::Sun)]
+        }
+        Ability::SandStream
+            if !weather_is_strong(&belief.weather)
+                && !matches!(belief.weather, Some(Weather::Sandstorm)) =>
+        {
             vec![weather_event(Weather::Sandstorm)]
         }
-        Ability::SnowWarning if !weather_is_strong(&belief.weather) => {
+        Ability::SnowWarning
+            if !weather_is_strong(&belief.weather)
+                && !matches!(belief.weather, Some(Weather::Snow)) =>
+        {
             vec![weather_event(Weather::Snow)]
         }
         // Terrain has no "strong terrain" exception — a terrain-setting
@@ -453,7 +986,7 @@ fn guaranteed_ability_reactions(
             })]
         }
         Ability::Download => download_reaction(slot, belief),
-        Ability::Trace => trace_reaction(slot, belief),
+        Ability::Trace => trace_reaction(slot, belief, live_slots),
         _ => Vec::new(),
     }
 }
@@ -495,7 +1028,11 @@ fn download_reaction(slot: FieldSlot, belief: &UnknownBattleState) -> Vec<Inform
 /// Trace copies an opposing active's ability — only synthesizable when
 /// exactly one opposing active's ability is already `Known` (otherwise which
 /// one the real game copied is new information the user has to type).
-fn trace_reaction(slot: FieldSlot, belief: &UnknownBattleState) -> Vec<InformationEvent> {
+fn trace_reaction(
+    slot: FieldSlot,
+    belief: &UnknownBattleState,
+    live_slots: &HashSet<FieldSlot>,
+) -> Vec<InformationEvent> {
     let known: Vec<Ability> = opposing_active_slots(belief, slot)
         .into_iter()
         .filter_map(|opp| mon_at(belief, opp))
@@ -505,7 +1042,12 @@ fn trace_reaction(slot: FieldSlot, belief: &UnknownBattleState) -> Vec<Informati
         })
         .collect();
     match known.as_slice() {
-        [ability] => vec![ability_revealed_node(slot, ability.clone(), belief)],
+        [ability] => vec![ability_revealed_node(
+            slot,
+            ability.clone(),
+            belief,
+            live_slots,
+        )],
         _ => Vec::new(),
     }
 }
@@ -547,7 +1089,9 @@ mod tests {
     use poke_rust::information::inference::{InferenceConfig, apply_information};
     use poke_rust::information::unknowns::{PokemonHP, UnknownMatchState, UnknownPokemonState};
     use poke_rust::state::battle::Player;
-    use poke_rust::state::dex_data::{parse_ability_dex, parse_move_dex, parse_pokemon_dex, AbilityData};
+    use poke_rust::state::dex_data::{
+        AbilityData, parse_ability_dex, parse_move_dex, parse_pokemon_dex,
+    };
     use std::sync::OnceLock;
 
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
@@ -726,7 +1270,9 @@ mod tests {
         let augmented = parse_and_augment("p1 raindance", &belief);
         assert!(augmented.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::WeatherChanged { weather: Some(Weather::Rain) }
+            EventKind::WeatherChanged {
+                weather: Some(Weather::Rain)
+            }
         )));
     }
 
@@ -736,7 +1282,10 @@ mod tests {
         let augmented = parse_and_augment("p1 stealthrock", &belief);
         assert!(augmented.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::SideConditionStart { side: Player::P2, condition: poke_rust::state::dex_data::SideCondition::StealthRock }
+            EventKind::SideConditionStart {
+                side: Player::P2,
+                condition: poke_rust::state::dex_data::SideCondition::StealthRock
+            }
         )));
     }
 
@@ -744,10 +1293,12 @@ mod tests {
     fn missed_target_does_not_get_guaranteed_status() {
         let belief = test_belief();
         let augmented = parse_and_augment("p1 thunderwave o1 miss", &belief);
-        assert!(!augmented.reactions.iter().any(|r| matches!(
-            &r.kind,
-            EventKind::StatusInflicted { .. }
-        )));
+        assert!(
+            !augmented
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::StatusInflicted { .. }))
+        );
     }
 
     #[test]
@@ -767,11 +1318,21 @@ mod tests {
         let ability_node = augmented
             .reactions
             .iter()
-            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { ability: Ability::Drought, .. }))
+            .find(|r| {
+                matches!(
+                    &r.kind,
+                    EventKind::AbilityRevealed {
+                        ability: Ability::Drought,
+                        ..
+                    }
+                )
+            })
             .expect("expected a synthesized Drought reveal");
         assert!(ability_node.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::WeatherChanged { weather: Some(Weather::Sun) }
+            EventKind::WeatherChanged {
+                weather: Some(Weather::Sun)
+            }
         )));
     }
 
@@ -787,7 +1348,9 @@ mod tests {
         let augmented = parse_and_augment("o1 sandstream", &belief);
         assert!(augmented.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::WeatherChanged { weather: Some(Weather::Sandstorm) }
+            EventKind::WeatherChanged {
+                weather: Some(Weather::Sandstorm)
+            }
         )));
     }
 
@@ -796,10 +1359,12 @@ mod tests {
         let mut belief = test_belief();
         belief.weather = Some(Weather::HeavyRain);
         let augmented = parse_and_augment("p1 drought", &belief);
-        assert!(!augmented
-            .reactions
-            .iter()
-            .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. })));
+        assert!(
+            !augmented
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. }))
+        );
     }
 
     #[test]
@@ -813,34 +1378,65 @@ mod tests {
         // Sun into a scratch snapshot before augmenting the second.
         let belief = test_belief();
         let charizard = InformationEvent {
-            kind: EventKind::MegaEvolution { slot: o1(), into: Species::CharizardMegaY },
+            kind: EventKind::MegaEvolution {
+                slot: o1(),
+                into: Species::CharizardMegaY,
+            },
             reactions: Vec::new(),
         };
         let tyranitar = InformationEvent {
-            kind: EventKind::MegaEvolution { slot: p1(), into: Species::TyranitarMega },
+            kind: EventKind::MegaEvolution {
+                slot: p1(),
+                into: Species::TyranitarMega,
+            },
             reactions: Vec::new(),
         };
-        let augmented = augment_turn(vec![charizard, tyranitar], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![charizard, tyranitar],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let [charizard_aug, tyranitar_aug] = augmented.as_slice() else {
             panic!("expected exactly two augmented events")
         };
         let drought = charizard_aug
             .reactions
             .iter()
-            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { ability: Ability::Drought, .. }))
+            .find(|r| {
+                matches!(
+                    &r.kind,
+                    EventKind::AbilityRevealed {
+                        ability: Ability::Drought,
+                        ..
+                    }
+                )
+            })
             .expect("expected a synthesized Drought reveal");
         assert!(drought.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::WeatherChanged { weather: Some(Weather::Sun) }
+            EventKind::WeatherChanged {
+                weather: Some(Weather::Sun)
+            }
         )));
         let sand_stream = tyranitar_aug
             .reactions
             .iter()
-            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { ability: Ability::SandStream, .. }))
+            .find(|r| {
+                matches!(
+                    &r.kind,
+                    EventKind::AbilityRevealed {
+                        ability: Ability::SandStream,
+                        ..
+                    }
+                )
+            })
             .expect("expected a synthesized Sand Stream reveal");
         assert!(sand_stream.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::WeatherChanged { weather: Some(Weather::Sandstorm) }
+            EventKind::WeatherChanged {
+                weather: Some(Weather::Sandstorm)
+            }
         )));
     }
 
@@ -851,17 +1447,27 @@ mod tests {
         // pre-turn `belief` yet — proves `fold_field_changes_into_scratch`
         // actually threads strength, not just presence.
         let belief = test_belief();
-        let heavy_rain = leaf(EventKind::WeatherChanged { weather: Some(Weather::HeavyRain) });
-        let drought_line = parse_tracker_text("p1 drought", &belief, move_dex(), pokemon_dex()).unwrap();
+        let heavy_rain = leaf(EventKind::WeatherChanged {
+            weather: Some(Weather::HeavyRain),
+        });
+        let drought_line =
+            parse_tracker_text("p1 drought", &belief, move_dex(), pokemon_dex()).unwrap();
         let TrackerLine::Event(drought_event) = drought_line.into_iter().next().unwrap() else {
             panic!("expected an event line")
         };
-        let augmented = augment_turn(vec![heavy_rain, drought_event], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![heavy_rain, drought_event],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let drought_aug = &augmented[1];
-        assert!(!drought_aug
-            .reactions
-            .iter()
-            .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. })));
+        assert!(
+            !drought_aug
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. }))
+        );
     }
 
     #[test]
@@ -871,7 +1477,9 @@ mod tests {
         let augmented = parse_and_augment("o1 electricsurge", &belief);
         assert!(augmented.reactions.iter().any(|r| matches!(
             &r.kind,
-            EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) }
+            EventKind::TerrainChanged {
+                terrain: Some(Terrain::ElectricTerrain)
+            }
         )));
     }
 
@@ -889,9 +1497,12 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => {
-                    events.push(augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex()))
-                }
+                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                    ev,
+                    &belief,
+                    move_dex(),
+                    pokemon_dex(),
+                )),
                 TrackerLine::EndOfTurn => events.push(leaf(EventKind::EndOfTurn)),
             }
         }
@@ -901,10 +1512,12 @@ mod tests {
             .iter()
             .find(|e| matches!(e.kind, EventKind::MoveUsed { .. }))
             .unwrap();
-        assert!(move_event
-            .reactions
-            .iter()
-            .any(|r| matches!(&r.kind, EventKind::Faint { slot } if *slot == o1())));
+        assert!(
+            move_event
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::Faint { slot } if *slot == o1()))
+        );
 
         let config = InferenceConfig::default();
         let result = apply_information(

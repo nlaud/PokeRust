@@ -55,7 +55,10 @@ use poke_rust::state::dex_data::{
     MoveData, PokemonData, PokemonType, Status, Terrain, VolatileStatus, Weather,
 };
 
-use crate::tracker_effects::augment_with_guaranteed_effects;
+use crate::tracker_effects::{
+    augment_with_guaranteed_effects, fold_ability_reveals_into_synthesis_scratch,
+    fold_event_into_synthesis_scratch,
+};
 
 /// A reaction/event this renderer has no tracker-grammar word for. Carries a
 /// short human-readable reason so a fuzz failure identifies the missing grammar.
@@ -78,16 +81,19 @@ pub fn render_turn(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Result<String, Unsupported> {
     let mut lines = Vec::new();
+    let mut scratch = belief.clone();
     for event in events {
         if matches!(event.kind, EventKind::EndOfTurn) {
             for reaction in &event.reactions {
-                render_standalone_tree(reaction, belief, &mut lines)?;
+                render_standalone_tree(reaction, &scratch, &mut lines)?;
             }
+            fold_event_into_synthesis_scratch(&mut scratch, event, pokemon_dex);
             continue; // the sentinel itself is added once below.
         }
-        if let Some(line) = render_top_level_event(event, belief, move_dex, pokemon_dex)? {
+        if let Some(line) = render_top_level_event(event, &scratch, move_dex, pokemon_dex)? {
             lines.push(line);
         }
+        fold_event_into_synthesis_scratch(&mut scratch, event, pokemon_dex);
     }
     lines.push("endofturn".to_string());
     Ok(lines.join("\n"))
@@ -99,18 +105,38 @@ fn render_standalone_tree(
     lines: &mut Vec<String>,
 ) -> Result<(), Unsupported> {
     match &event.kind {
-        EventKind::DamageDealt { target, new_hp, .. }
-        | EventKind::Healed { target, new_hp, .. }
-        | EventKind::SetHp { target, new_hp, .. } => lines.push(format!(
-            "{} hp {}",
+        EventKind::DamageDealt { target, new_hp, .. } => lines.push(format!(
+            "{} damage {}",
+            slot_token(*target),
+            raw_hp_token(new_hp)
+        )),
+        EventKind::Healed { target, new_hp, .. } => lines.push(format!(
+            "{} heal {}",
+            slot_token(*target),
+            raw_hp_token(new_hp)
+        )),
+        EventKind::SetHp { target, new_hp, .. } => lines.push(format!(
+            "{} sethp {}",
             slot_token(*target),
             raw_hp_token(new_hp)
         )),
         EventKind::Faint { .. } => {}
         EventKind::AbilityRevealed { .. }
         | EventKind::ItemRevealed { .. }
+        | EventKind::ItemLost { .. }
+        | EventKind::ItemGained { .. }
         | EventKind::WeatherChanged { .. }
-        | EventKind::TerrainChanged { .. } => lines.push(render_standalone_event(event, belief)?),
+        | EventKind::TerrainChanged { .. }
+        | EventKind::PseudoWeatherStart { .. }
+        | EventKind::PseudoWeatherEnd { .. }
+        | EventKind::VolatileEnd { .. }
+        | EventKind::StatusInflicted { .. }
+        | EventKind::StatusCured { .. }
+        | EventKind::BoostChanged { .. }
+        | EventKind::BoostsCopied { .. }
+        | EventKind::BoostsInverted { .. }
+        | EventKind::SideConditionStart { .. }
+        | EventKind::SideConditionEnd { .. } => lines.push(render_standalone_event(event, belief)?),
         other => {
             return Err(unsupported(format!(
                 "{other:?} has no standalone end-of-turn tracker grammar yet"
@@ -132,13 +158,18 @@ fn render_top_level_event(
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Result<Option<String>, Unsupported> {
-    let explicit_reactions = reactions_requiring_explicit_render(event, belief, move_dex, pokemon_dex);
+    let explicit_reactions =
+        reactions_requiring_explicit_render(event, belief, move_dex, pokemon_dex);
 
     match &event.kind {
-        EventKind::MoveUsed { user, move_used, targets } => {
+        EventKind::MoveUsed {
+            user,
+            move_used,
+            targets,
+        } => {
             let mut line = format!("{} {}", slot_token(*user), move_word(move_used));
             for &target in targets {
-                let _ = write!(line, " {}", slot_token(target));
+                let _ = write!(line, " @{}", slot_token(target));
             }
             for r in &explicit_reactions {
                 let _ = write!(
@@ -147,22 +178,44 @@ fn render_top_level_event(
                     render_move_qualifier(r, belief, move_dex, pokemon_dex)?
                 );
             }
-            for qualifier in missing_guaranteed_status_blockers(
-                event,
-                belief,
-                move_dex,
-                pokemon_dex,
-            ) {
+            for (_, qualifier) in
+                missing_guaranteed_status_blockers(event, belief, move_dex, pokemon_dex)
+            {
                 let _ = write!(line, " {qualifier}");
             }
             Ok(Some(line))
         }
-        EventKind::Switch(sw) => Ok(Some(format!(
-            "{} switch {} {}",
-            slot_token(sw.slot),
-            species_word(&sw.species),
-            hp_token(&sw.hp)
-        ))),
+        EventKind::Switch(sw) => {
+            let mut out = vec![switch_line(sw)?];
+            let mut after_switch = belief.clone();
+            fold_event_into_synthesis_scratch(
+                &mut after_switch,
+                &InformationEvent {
+                    kind: event.kind.clone(),
+                    reactions: Vec::new(),
+                },
+                pokemon_dex,
+            );
+            for reaction in &event.reactions {
+                fold_ability_reveals_into_synthesis_scratch(
+                    &mut after_switch,
+                    reaction,
+                    pokemon_dex,
+                );
+            }
+            for reaction in &explicit_reactions {
+                out.push(render_standalone_event(reaction, &after_switch)?);
+                for child in reactions_requiring_explicit_render(
+                    reaction,
+                    &after_switch,
+                    move_dex,
+                    pokemon_dex,
+                ) {
+                    render_standalone_tree(child, &after_switch, &mut out)?;
+                }
+            }
+            Ok(Some(out.join("\n")))
+        }
         EventKind::SimultaneousSwitch { switches } => {
             // Rendered as separate per-side `leads` lines (mirroring how a
             // user types them) — `fold_leads_and_entry_abilities` re-merges
@@ -171,20 +224,42 @@ fn render_top_level_event(
             // guaranteed cascades are re-synthesized by `augment_turn`, same
             // diffing discipline as everywhere else.
             let mut out = Vec::new();
+            let mut after_switch = belief.clone();
+            fold_event_into_synthesis_scratch(
+                &mut after_switch,
+                &InformationEvent {
+                    kind: event.kind.clone(),
+                    reactions: Vec::new(),
+                },
+                pokemon_dex,
+            );
+            for reaction in &event.reactions {
+                fold_ability_reveals_into_synthesis_scratch(
+                    &mut after_switch,
+                    reaction,
+                    pokemon_dex,
+                );
+            }
             for player in [Player::P1, Player::P2] {
-                let mut side: Vec<&SwitchState> =
-                    switches.iter().filter(|sw| sw.slot.player == player).collect();
+                let mut side: Vec<&SwitchState> = switches
+                    .iter()
+                    .filter(|sw| sw.slot.player == player)
+                    .collect();
                 if side.is_empty() {
                     continue;
                 }
                 // Simulator action order is speed/queue order, not slot order;
                 // `leads` assigns species left-to-right to slots 0, 1, ... .
                 side.sort_by_key(|sw| sw.slot.slot_index);
+                let side_was_empty = match player {
+                    Player::P1 => belief.p1_active_mons.is_empty(),
+                    Player::P2 => belief.p2_active_mons.is_empty(),
+                };
                 let fills_from_left = side
                     .iter()
                     .enumerate()
                     .all(|(index, sw)| sw.slot.slot_index as usize == index);
-                if fills_from_left {
+                if side_was_empty && fills_from_left {
                     let species_list = side
                         .iter()
                         .map(|sw| species_word(&sw.species))
@@ -195,41 +270,77 @@ fn render_top_level_event(
                     // A simultaneous post-faint replacement may fill only a
                     // subset of doubles slots. `leads` cannot preserve those
                     // indices, so emit ordinary slot-addressed switches.
-                    out.extend(side.iter().map(|sw| {
-                        format!(
-                            "{} switch {} {}",
-                            slot_token(sw.slot),
-                            species_word(&sw.species),
-                            hp_token(&sw.hp)
-                        )
-                    }));
+                    out.extend(
+                        side.iter()
+                            .map(|sw| switch_line(sw))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
                 }
             }
             for r in &explicit_reactions {
-                out.push(render_standalone_event(r, belief)?);
+                out.push(render_standalone_event(r, &after_switch)?);
+                for child in
+                    reactions_requiring_explicit_render(r, &after_switch, move_dex, pokemon_dex)
+                {
+                    render_standalone_tree(child, &after_switch, &mut out)?;
+                }
             }
             Ok(Some(out.join("\n")))
         }
-        EventKind::MegaEvolution { slot, into } => {
-            Ok(Some(format!("{} mega {}", slot_token(*slot), species_word(into))))
-        }
+        EventKind::MegaEvolution { slot, into } => Ok(Some(format!(
+            "{} mega {}",
+            slot_token(*slot),
+            species_word(into)
+        ))),
         EventKind::Terastallization { slot, tera_type } => Ok(Some(format!(
             "{} tera {}",
             slot_token(*slot),
             type_word(tera_type)
         ))),
         EventKind::Cant { slot, reason } => {
-            Ok(Some(format!("{} {}", slot_token(*slot), cant_reason_word(reason)?)))
+            let mut out = vec![format!(
+                "{} {}",
+                slot_token(*slot),
+                cant_reason_word(reason)?
+            )];
+            for reaction in &explicit_reactions {
+                render_standalone_tree(reaction, belief, &mut out)?;
+            }
+            Ok(Some(out.join("\n")))
         }
         EventKind::MustRecharge { slot } => Ok(Some(format!("{} mustrecharge", slot_token(*slot)))),
-        EventKind::AbilityRevealed { .. } | EventKind::ItemRevealed { .. } => {
-            render_standalone_event(event, belief).map(Some)
-        }
+        EventKind::AbilityRevealed { .. }
+        | EventKind::ItemRevealed { .. }
+        | EventKind::WeatherChanged { .. }
+        | EventKind::TerrainChanged { .. }
+        | EventKind::PseudoWeatherStart { .. }
+        | EventKind::PseudoWeatherEnd { .. }
+        | EventKind::SideConditionStart { .. }
+        | EventKind::SideConditionEnd { .. }
+        | EventKind::VolatileEnd { .. }
+        | EventKind::StatusCured { .. }
+        | EventKind::BoostChanged { .. }
+        | EventKind::BoostsCopied { .. } => render_standalone_event(event, belief).map(Some),
         // Auto-synthesized as a sibling of any zero-HP DamageDealt/Healed/SetHp
         // (`synthesize_guaranteed_faints`) — never rendered directly.
         EventKind::Faint { .. } => Ok(None),
-        other => Err(unsupported(format!("{other:?} has no top-level tracker grammar yet"))),
+        other => Err(unsupported(format!(
+            "{other:?} has no top-level tracker grammar yet"
+        ))),
     }
+}
+
+fn switch_line(sw: &SwitchState) -> Result<String, Unsupported> {
+    let mut line = format!(
+        "{} switch {} {}",
+        slot_token(sw.slot),
+        species_word(&sw.species),
+        hp_token(&sw.hp)
+    );
+    if let Some(status) = &sw.status {
+        let _ = write!(line, " {}", status_word(status)?);
+    }
+    Ok(line)
 }
 
 fn missing_guaranteed_status_blockers(
@@ -237,7 +348,7 @@ fn missing_guaranteed_status_blockers(
     belief: &UnknownBattleState,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
-) -> Vec<String> {
+) -> Vec<(FieldSlot, String)> {
     let EventKind::MoveUsed { .. } = &event.kind else {
         return Vec::new();
     };
@@ -269,7 +380,8 @@ fn missing_guaranteed_status_blockers(
                         if actual_target == target
                 ) || matches!(actual.kind, EventKind::MoveFailed { .. })
             });
-            (!observed && !already_failed).then(|| format!("{} blocked", slot_token(*target)))
+            (!observed && !already_failed)
+                .then(|| (*target, format!("{} blocked", slot_token(*target))))
         })
         .collect()
 }
@@ -287,11 +399,76 @@ fn render_standalone_event(
         EventKind::ItemRevealed { slot, item } => {
             Ok(format!("{} {}", slot_token(*slot), item_word(item)))
         }
-        EventKind::WeatherChanged { weather: Some(w) } => Ok(format!("weather {}", weather_word(w))),
+        EventKind::ItemLost {
+            slot,
+            item,
+            consumed,
+        } => Ok(format!(
+            "{} {} {}",
+            slot_token(*slot),
+            if *consumed { "consumes" } else { "loses" },
+            item_word(item)
+        )),
+        EventKind::ItemGained { slot, item } => {
+            Ok(format!("{} gains {}", slot_token(*slot), item_word(item)))
+        }
+        EventKind::WeatherChanged { weather: Some(w) } => {
+            Ok(format!("weather {}", weather_word(w)))
+        }
         EventKind::WeatherChanged { weather: None } => Ok("weather none".to_string()),
-        EventKind::TerrainChanged { terrain: Some(t) } => Ok(format!("terrain {}", terrain_word(t))),
+        EventKind::TerrainChanged { terrain: Some(t) } => {
+            Ok(format!("terrain {}", terrain_word(t)))
+        }
         EventKind::TerrainChanged { terrain: None } => Ok("terrain none".to_string()),
-        other => Err(unsupported(format!("{other:?} has no standalone tracker grammar yet"))),
+        EventKind::PseudoWeatherStart { effect } => {
+            Ok(format!("field {} start", pseudo_weather_word(effect)))
+        }
+        EventKind::PseudoWeatherEnd { effect } => {
+            Ok(format!("field {} end", pseudo_weather_word(effect)))
+        }
+        EventKind::VolatileEnd { target, volatile } => Ok(format!(
+            "{} volatileend {}",
+            slot_token(*target),
+            volatile_word(volatile)?
+        )),
+        EventKind::StatusCured { target, status } => Ok(format!(
+            "{} cure {}",
+            slot_token(*target),
+            status_word(status)?
+        )),
+        EventKind::StatusInflicted { target, status } => Ok(format!(
+            "{} status {}",
+            slot_token(*target),
+            status_word(status)?
+        )),
+        EventKind::BoostChanged {
+            target,
+            boost_idx,
+            stages,
+        } => Ok(format!(
+            "{} {}",
+            slot_token(*target),
+            boost_token(*boost_idx, *stages)?
+        )),
+        EventKind::BoostsCopied { source, target } => Ok(format!(
+            "{} copyboosts {}",
+            slot_token(*target),
+            slot_token(*source)
+        )),
+        EventKind::BoostsInverted { target } => Ok(format!("{} invertboosts", slot_token(*target))),
+        EventKind::SideConditionStart { side, condition } => Ok(format!(
+            "side {} {} start",
+            side_word(*side),
+            side_condition_word(condition)
+        )),
+        EventKind::SideConditionEnd { side, condition } => Ok(format!(
+            "side {} {} end",
+            side_word(*side),
+            side_condition_word(condition)
+        )),
+        other => Err(unsupported(format!(
+            "{other:?} has no standalone tracker grammar yet"
+        ))),
     }
 }
 
@@ -309,55 +486,175 @@ fn render_move_qualifier(
         EventKind::Immune { target } => Ok(format!("{} immune", slot_token(*target))),
         EventKind::Blocked { target } => Ok(format!("{} blocked", slot_token(*target))),
         EventKind::MoveFailed { slot } => Ok(format!("{} fail", slot_token(*slot))),
-        EventKind::DamageDealt { target, new_hp, .. } => {
-            Ok(format!("{} {}", slot_token(*target), raw_hp_token(new_hp)))
-        }
-        EventKind::Healed { target, new_hp, .. } => {
-            Ok(format!("{} {}", slot_token(*target), raw_hp_token(new_hp)))
-        }
-        EventKind::SetHp { target, new_hp, .. } => {
-            Ok(format!("{} {}", slot_token(*target), raw_hp_token(new_hp)))
-        }
+        EventKind::MustRecharge { slot } => Ok(format!("{} mustrecharge", slot_token(*slot))),
+        EventKind::ChargingMove { user, move_used } => Ok(format!(
+            "{} charging {}",
+            slot_token(*user),
+            move_word(move_used)
+        )),
+        EventKind::IllusionEnded {
+            slot,
+            actual_species,
+        } => Ok(format!(
+            "{} illusion {}",
+            slot_token(*slot),
+            species_word(actual_species)
+        )),
+        EventKind::Switch(switch) => Ok(format!(
+            "{} switch {} {}{}",
+            slot_token(switch.slot),
+            species_word(&switch.species),
+            hp_token(&switch.hp),
+            switch
+                .status
+                .as_ref()
+                .map(|status| status_word(status).map(|word| format!(" {word}")))
+                .transpose()?
+                .unwrap_or_default()
+        )),
+        EventKind::HitCount { target, hits } => Ok(format!("{} {hits}hits", slot_token(*target))),
+        EventKind::DamageDealt { target, new_hp, .. } => Ok(format!(
+            "{} damage {}",
+            slot_token(*target),
+            raw_hp_token(new_hp)
+        )),
+        EventKind::Healed { target, new_hp, .. } => Ok(format!(
+            "{} heal {}",
+            slot_token(*target),
+            raw_hp_token(new_hp)
+        )),
+        EventKind::SetHp { target, new_hp, .. } => Ok(format!(
+            "{} sethp {}",
+            slot_token(*target),
+            raw_hp_token(new_hp)
+        )),
         EventKind::StatusInflicted { target, status } => {
             Ok(format!("{} {}", slot_token(*target), status_word(status)?))
         }
-        EventKind::VolatileStart { target, volatile } => {
-            Ok(format!("{} {}", slot_token(*target), volatile_word(volatile)?))
-        }
-        EventKind::BoostChanged { target, boost_idx, stages } => {
-            Ok(format!("{} {}", slot_token(*target), boost_token(*boost_idx, *stages)?))
-        }
-        EventKind::ItemLost { slot, item, consumed } => Ok(format!(
+        EventKind::StatusCured { target, status } => Ok(format!(
+            "{} cure {}",
+            slot_token(*target),
+            status_word(status)?
+        )),
+        EventKind::VolatileStart {
+            target,
+            volatile: VolatileStatus::Encore(move_used),
+        } => Ok(format!(
+            "{} encoremove {}",
+            slot_token(*target),
+            move_word(move_used)
+        )),
+        EventKind::VolatileStart {
+            target,
+            volatile: VolatileStatus::Disable(move_used),
+        } => Ok(format!(
+            "{} disablemove {}",
+            slot_token(*target),
+            move_word(move_used)
+        )),
+        EventKind::VolatileStart {
+            target,
+            volatile: VolatileStatus::Stockpile(level),
+        } => Ok(format!("{} stockpilelevel {level}", slot_token(*target))),
+        EventKind::VolatileStart { target, volatile } => Ok(format!(
+            "{} {}",
+            slot_token(*target),
+            volatile_word(volatile)?
+        )),
+        EventKind::VolatileEnd { target, volatile } => Ok(format!(
+            "{} volatileend {}",
+            slot_token(*target),
+            volatile_word(volatile)?
+        )),
+        EventKind::BoostChanged {
+            target,
+            boost_idx,
+            stages,
+        } => Ok(format!(
+            "{} {}",
+            slot_token(*target),
+            boost_token(*boost_idx, *stages)?
+        )),
+        EventKind::BoostsCopied { source, target } => Ok(format!(
+            "{} copyboosts {}",
+            slot_token(*target),
+            slot_token(*source)
+        )),
+        EventKind::BoostsInverted { target } => Ok(format!("{} invertboosts", slot_token(*target))),
+        EventKind::ItemLost {
+            slot,
+            item,
+            consumed,
+        } => Ok(format!(
             "{} {} {}",
             slot_token(*slot),
             if *consumed { "consumes" } else { "loses" },
             item_word(item)
         )),
+        EventKind::ItemGained { slot, item } => {
+            Ok(format!("{} gains {}", slot_token(*slot), item_word(item)))
+        }
+        EventKind::ItemRevealed { slot, item } => {
+            Ok(format!("{} {}", slot_token(*slot), item_word(item)))
+        }
         EventKind::AbilityRevealed { slot, ability } => {
             Ok(format!("{} {}", slot_token(*slot), ability_word(ability)))
         }
+        EventKind::PseudoWeatherStart { effect } => {
+            Ok(format!("field {} start", pseudo_weather_word(effect)))
+        }
+        EventKind::PseudoWeatherEnd { effect } => {
+            Ok(format!("field {} end", pseudo_weather_word(effect)))
+        }
+        EventKind::SideConditionStart { side, condition } => Ok(format!(
+            "side {} {} start",
+            side_word(*side),
+            side_condition_word(condition)
+        )),
+        EventKind::SideConditionEnd { side, condition } => Ok(format!(
+            "side {} {} end",
+            side_word(*side),
+            side_condition_word(condition)
+        )),
         // Field-level payloads of a move's own secondaries — rendered as a
         // standalone-style word appended inline; the target-agnostic ones
         // (weather/terrain) don't need a slot prefix on a move line since
         // they're global/side-scoped, not per-mon.
         EventKind::WeatherChanged { weather: Some(w) } => Ok(weather_word(w).to_string()),
         EventKind::TerrainChanged { terrain: Some(t) } => Ok(terrain_word(t).to_string()),
-        other => return Err(unsupported(format!(
-            "{other:?} has no inline move-qualifier tracker grammar yet"
-        ))),
+        other => {
+            return Err(unsupported(format!(
+                "{other:?} has no inline move-qualifier tracker grammar yet"
+            )));
+        }
     }?;
 
     // The simulator often nests observations below their trigger (Crit below
     // DamageDealt, recoil below an AbilityRevealed, berry healing below
     // ItemLost). Tracker syntax is intentionally flat, so recursively append
     // only children that the production augmenter will not recreate.
+    let mut reaction_scratch;
+    let reaction_belief = if matches!(event.kind, EventKind::Switch(_)) {
+        reaction_scratch = belief.clone();
+        fold_event_into_synthesis_scratch(
+            &mut reaction_scratch,
+            &InformationEvent {
+                kind: event.kind.clone(),
+                reactions: Vec::new(),
+            },
+            pokemon_dex,
+        );
+        &reaction_scratch
+    } else {
+        belief
+    };
     for reaction in
-        reactions_requiring_explicit_render(event, belief, move_dex, pokemon_dex)
+        reactions_requiring_explicit_render(event, reaction_belief, move_dex, pokemon_dex)
     {
         let _ = write!(
             rendered,
             " {}",
-            render_move_qualifier(reaction, belief, move_dex, pokemon_dex)?
+            render_move_qualifier(reaction, reaction_belief, move_dex, pokemon_dex)?
         );
     }
     Ok(rendered)
@@ -377,57 +674,77 @@ fn reactions_requiring_explicit_render<'a>(
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<&'a InformationEvent> {
-    let bare = InformationEvent { kind: event.kind.clone(), reactions: Vec::new() };
+    let bare = InformationEvent {
+        kind: event.kind.clone(),
+        reactions: Vec::new(),
+    };
     let synthetic = augment_with_guaranteed_effects(bare, belief, move_dex, pokemon_dex);
     let mut remaining_synthetic = synthetic.reactions;
-    event
-        .reactions
-        .iter()
-        .filter(|r| {
-            if let EventKind::Faint { slot } = &r.kind
-                && event.reactions.iter().any(|sibling| match &sibling.kind {
-                    EventKind::DamageDealt { target, new_hp, .. }
-                    | EventKind::Healed { target, new_hp, .. }
-                    | EventKind::SetHp { target, new_hp, .. } => {
-                        target == slot
-                            && matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
-                    }
-                    _ => false,
-                })
-            {
-                return false;
-            }
-            if matches!(r.kind, EventKind::Faint { .. })
-                && matches!(
-                    &event.kind,
-                    EventKind::DamageDealt { new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0), .. }
-                        | EventKind::Healed { new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0), .. }
-                        | EventKind::SetHp { new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0), .. }
-                )
-            {
-                return false;
-            }
-            // Protect-style resolution emits this bookkeeping child even
-            // though the enclosing MoveUsed already records the same user and
-            // move. The tracker parser intentionally represents the action
-            // once; inference treats MoveUsed as the same committed action.
-            if let (
-                EventKind::MoveUsed { user, move_used, .. },
-                EventKind::SingleMoveOrTurn { slot, move_used: child_move },
-            ) = (&event.kind, &r.kind)
-                && user == slot
-                && move_used == child_move
-            {
-                return false;
-            }
-            if let Some(pos) = remaining_synthetic.iter().position(|s| s == *r) {
-                remaining_synthetic.remove(pos);
-                false
-            } else {
-                true
-            }
-        })
-        .collect()
+    let mut explicit = Vec::new();
+    for r in &event.reactions {
+        if let EventKind::Faint { slot } = &r.kind
+            && event.reactions.iter().any(|sibling| match &sibling.kind {
+                EventKind::DamageDealt { target, new_hp, .. }
+                | EventKind::Healed { target, new_hp, .. }
+                | EventKind::SetHp { target, new_hp, .. } => {
+                    target == slot && matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
+                }
+                _ => false,
+            })
+        {
+            continue;
+        }
+        if matches!(r.kind, EventKind::Faint { .. })
+            && matches!(
+                &event.kind,
+                EventKind::DamageDealt {
+                    new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+                    ..
+                } | EventKind::Healed {
+                    new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+                    ..
+                } | EventKind::SetHp {
+                    new_hp: PokemonHP::Number(0) | PokemonHP::Percent(0),
+                    ..
+                }
+            )
+        {
+            continue;
+        }
+        // Protect-style resolution emits this bookkeeping child even
+        // though the enclosing MoveUsed already records the same user and
+        // move. The tracker parser intentionally represents the action
+        // once; inference treats MoveUsed as the same committed action.
+        if let (
+            EventKind::MoveUsed {
+                user, move_used, ..
+            },
+            EventKind::SingleMoveOrTurn {
+                slot,
+                move_used: child_move,
+            },
+        ) = (&event.kind, &r.kind)
+            && user == slot
+            && move_used == child_move
+        {
+            continue;
+        }
+        if let Some(pos) = remaining_synthetic.iter().position(|s| s == r) {
+            remaining_synthetic.remove(pos);
+            continue;
+        }
+        // A guaranteed node may carry additional simulator-only children
+        // (for example Charm's guaranteed -2 Atk containing a Competitive
+        // reveal and its +2 SpA reaction). Match the guaranteed parent by
+        // kind, suppress that parent token, but preserve its observations.
+        if let Some(pos) = remaining_synthetic.iter().position(|s| s.kind == r.kind) {
+            remaining_synthetic.remove(pos);
+            explicit.extend(r.reactions.iter());
+            continue;
+        }
+        explicit.push(r);
+    }
+    explicit
 }
 
 // ── Word rendering — inverse of tracker_parse.rs's word tables ─────────────
@@ -560,7 +877,16 @@ fn volatile_word(v: &VolatileStatus) -> Result<&'static str, Unsupported> {
         HelpingHand => "helpinghand",
         PowerTrick => "powertrick",
         ForestsCurse => "forestscurse",
-        other => return Err(unsupported(format!("{other:?} has no volatile tracker word yet"))),
+        ThroatChop => "throatchop",
+        MustRecharge => "mustrecharge",
+        Substitute(_) => "substitute",
+        Encore(_) => "encore",
+        Disable(_) => "disable",
+        other => {
+            return Err(unsupported(format!(
+                "{other:?} has no volatile tracker word yet"
+            )));
+        }
     })
 }
 
@@ -599,6 +925,41 @@ fn terrain_word(t: &Terrain) -> &'static str {
     }
 }
 
+fn pseudo_weather_word(effect: &poke_rust::state::dex_data::PseudoWeather) -> &'static str {
+    use poke_rust::state::dex_data::PseudoWeather::*;
+    match effect {
+        FairyLock => "fairylock",
+        Gravity => "gravity",
+        IonDeluge => "iondeluge",
+        MagicDeluge => "magicdeluge",
+        MudSport => "mudsport",
+        TrickRoom => "trickroom",
+        WaterSport => "watersport",
+        WonderRoom => "wonderroom",
+    }
+}
+
+fn side_condition_word(condition: &poke_rust::state::dex_data::SideCondition) -> &'static str {
+    use poke_rust::state::dex_data::SideCondition::*;
+    match condition {
+        AuroraVeil => "auroraveil",
+        Reflect => "reflect",
+        CraftyShield => "craftyshield",
+        LightScreen => "lightscreen",
+        LuckyChant => "luckychant",
+        MatBlock => "matblock",
+        Mist => "mist",
+        QuickGuard => "quickguard",
+        SafeGuard => "safeguard",
+        Spikes(_) => "spikes",
+        StealthRock => "stealthrock",
+        StickyWeb(_) => "stickyweb",
+        TailWind => "tailwind",
+        ToxicSpikes(_) => "toxicspikes",
+        WideGuard => "wideguard",
+    }
+}
+
 fn cant_reason_word(
     reason: &poke_rust::information::information::CantReason,
 ) -> Result<&'static str, Unsupported> {
@@ -621,7 +982,11 @@ fn cant_reason_word(
         Gravity => "gravity",
         HealBlock => "healblock",
         Encore => "encore",
-        other => return Err(unsupported(format!("{other:?} has no cant-reason tracker word yet"))),
+        other => {
+            return Err(unsupported(format!(
+                "{other:?} has no cant-reason tracker word yet"
+            )));
+        }
     })
 }
 
@@ -647,6 +1012,8 @@ mod tests {
     //! entry-ability weather trigger (Sand Stream), a guaranteed-secondary
     //! status move (Thunder Wave), and an ordinary damaging move.
     use super::*;
+    use crate::session::Dexes;
+    use crate::tracker::{TrackerSession, apply_tracker_text};
     use poke_rust::information::inference::{InferenceConfig, apply_information};
     use poke_rust::information::information::mask_events_for;
     use poke_rust::information::subset_check::assert_true_state_subset_of_belief;
@@ -654,12 +1021,12 @@ mod tests {
     use poke_rust::state::battle::{
         AttackCommand, BattleCommand, BattleState, MatchState, PlayerCommand, TeamPreviewCommand,
     };
-    use poke_rust::state::dex_data::{parse_ability_dex, parse_move_dex, parse_pokemon_dex, AbilityData};
-    use std::sync::OnceLock;
+    use poke_rust::state::dex_data::{
+        AbilityData, parse_ability_dex, parse_move_dex, parse_pokemon_dex,
+    };
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use crate::session::Dexes;
-    use crate::tracker::{TrackerSession, apply_tracker_text};
+    use std::sync::OnceLock;
 
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     static MOVE_DEX: OnceLock<HashMap<PokemonMove, MoveData>> = OnceLock::new();
@@ -679,9 +1046,7 @@ mod tests {
         OnceLock::new();
     fn learnset_dex() -> &'static HashMap<Species, std::collections::HashSet<PokemonMove>> {
         LEARNSET_DEX.get_or_init(|| {
-            poke_rust::state::dex_data::parse_learnset_dex(
-                "../pokemon_info/showdownLearnsets.txt",
-            )
+            poke_rust::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt")
         })
     }
 
@@ -704,6 +1069,23 @@ mod tests {
     // event kinds for which tracker text has no grammar yet.
     const FUZZ_TEAM_P1: &str = "Pikachu\nAbility: Static\nLevel: 50\n- Thunderbolt\n- Thunder Wave\n- Quick Attack\n- Protect\n\nCharizard\nAbility: Blaze\nLevel: 50\n- Flamethrower\n- Air Slash\n- Dragon Claw\n- Protect\n\nGyarados\nAbility: Intimidate\nLevel: 50\n- Waterfall\n- Thunder Wave\n- Crunch\n- Protect\n\nLucario\nAbility: Inner Focus\nLevel: 50\n- Aura Sphere\n- Flash Cannon\n- Extreme Speed\n- Protect\n";
     const FUZZ_TEAM_P2: &str = "Garchomp\nAbility: Rough Skin\nLevel: 50\n- Dragon Claw\n- Earthquake\n- Rock Slide\n- Protect\n\nTyranitar\nAbility: Unnerve\nLevel: 50\n- Rock Slide\n- Crunch\n- Earthquake\n- Protect\n\nSylveon\nAbility: Pixilate\nLevel: 50\n- Moonblast\n- Hyper Voice\n- Quick Attack\n- Protect\n\nAerodactyl\nAbility: Unnerve\nLevel: 50\n- Rock Slide\n- Aerial Ace\n- Crunch\n- Protect\n";
+
+    const REAL_FUZZ_TEAMSHEETS: [&str; 14] = [
+        "../teamsheets/MA_charizard_sylveon.txt",
+        "../teamsheets/MA_dragonite_rain.txt",
+        "../teamsheets/MA_floette_froslass.txt",
+        "../teamsheets/MA_tyranitar_zoroark.txt",
+        "../teamsheets/MA_venusaur_aerodactl.txt",
+        "../teamsheets/MB_aboma_pidgeon.txt",
+        "../teamsheets/MB_barbaracle_zoroark.txt",
+        "../teamsheets/MB_espathra_scovillain.txt",
+        "../teamsheets/MB_gallade_clefable.txt",
+        "../teamsheets/MB_gyarados_volcarona.txt",
+        "../teamsheets/MB_malamar_tr.txt",
+        "../teamsheets/MB_raptor_stuff.txt",
+        "../teamsheets/MB_sand_doggo_rat.txt",
+        "../teamsheets/MB_vivillon_camerupt.txt",
+    ];
 
     const TRACKER_FUZZ_SAMPLE_SALT: u64 = 0x5452_4143_4b45_5253;
 
@@ -755,9 +1137,7 @@ mod tests {
         for _ in 0..32 {
             let commands: Vec<BattleCommand> = options
                 .iter()
-                .map(|slot_options| {
-                    slot_options[rng.gen_range(0..slot_options.len())].clone()
-                })
+                .map(|slot_options| slot_options[rng.gen_range(0..slot_options.len())].clone())
                 .collect();
             if poke_rust::simulator::validate_battle_command_combination(&commands) {
                 return commands;
@@ -794,14 +1174,17 @@ mod tests {
             unreachable!()
         };
         let all_p1: Vec<usize> = (0..preview.p1_mons.len()).collect();
+        let belief = team_preview_belief.into_battle_state(Player::P1, &[], &all_p1, &[], &[]);
+        let mut roster_species: Vec<Species> = Vec::new();
+        for mon in preview.p1_mons.iter().chain(preview.p2_mons.iter()) {
+            if !roster_species.contains(&mon.species) {
+                roster_species.push(mon.species.clone());
+            }
+        }
         TrackerSession {
-            belief: team_preview_belief.into_battle_state(
-                Player::P1,
-                &[],
-                &all_p1,
-                &[],
-                &[],
-            ),
+            initial_belief: belief.clone(),
+            belief,
+            script: Vec::new(),
             active_per_side: 2,
             brought_per_side: 4,
             inference_config: InferenceConfig {
@@ -812,40 +1195,42 @@ mod tests {
             },
             log: Vec::new(),
             turn_count: 0,
+            roster_species,
         }
     }
 
     fn append_explicit_passes(
         mut text: String,
-        p1_cmd: &PlayerCommand,
-        p2_cmd: &PlayerCommand,
+        command_phases: &[(PlayerCommand, PlayerCommand)],
         events: &[InformationEvent],
         game_over: bool,
     ) -> String {
         let mut passes = Vec::new();
-        for (player, command) in [(Player::P1, p1_cmd), (Player::P2, p2_cmd)] {
-            if let PlayerCommand::Battle(commands) = command {
-                for (slot_index, command) in commands.iter().enumerate() {
-                    let slot = FieldSlot {
-                        player,
-                        slot_index: slot_index as u8,
-                    };
-                    let acted = events.iter().any(|event| match &event.kind {
-                        EventKind::MoveUsed { user, .. } => *user == slot,
-                        EventKind::Switch(sw) => sw.slot == slot,
-                        EventKind::SimultaneousSwitch { switches } => {
-                            switches.iter().any(|sw| sw.slot == slot)
+        for (p1_cmd, p2_cmd) in command_phases {
+            for (player, command) in [(Player::P1, p1_cmd), (Player::P2, p2_cmd)] {
+                if let PlayerCommand::Battle(commands) = command {
+                    for (slot_index, command) in commands.iter().enumerate() {
+                        let slot = FieldSlot {
+                            player,
+                            slot_index: slot_index as u8,
+                        };
+                        let acted = events.iter().any(|event| match &event.kind {
+                            EventKind::MoveUsed { user, .. } => *user == slot,
+                            EventKind::Switch(sw) => sw.slot == slot,
+                            EventKind::SimultaneousSwitch { switches } => {
+                                switches.iter().any(|sw| sw.slot == slot)
+                            }
+                            EventKind::Cant {
+                                slot: event_slot, ..
+                            }
+                            | EventKind::MustRecharge { slot: event_slot } => *event_slot == slot,
+                            _ => false,
+                        });
+                        if (matches!(command, BattleCommand::Pass) || (game_over && !acted))
+                            && !passes.contains(&slot)
+                        {
+                            passes.push(slot);
                         }
-                        EventKind::Cant { slot: event_slot, .. }
-                        | EventKind::MustRecharge { slot: event_slot } => *event_slot == slot,
-                        _ => false,
-                    });
-                    if matches!(command, BattleCommand::Pass) || (game_over && !acted) {
-                        passes.push(format!(
-                            "{}{} pass",
-                            side_word(player),
-                            slot_index + 1
-                        ));
                     }
                 }
             }
@@ -856,10 +1241,169 @@ mod tests {
         let sentinel = "endofturn";
         debug_assert!(text.ends_with(sentinel));
         text.truncate(text.len() - sentinel.len());
-        text.push_str(&passes.join("\n"));
+        text.push_str(
+            &passes
+                .into_iter()
+                .map(|slot| format!("{} pass", slot_token(slot)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         text.push('\n');
         text.push_str(sentinel);
         text
+    }
+
+    /// Parse rendered text through the same structural stages the production
+    /// submission path runs before inference. Keeping this separate from
+    /// `apply_tracker_text` gives the fuzzer an event-level round-trip oracle:
+    /// a successful belief update alone can miss silently dropped or invented
+    /// observations.
+    fn decode_rendered_turn(text: &str, belief: &UnknownBattleState) -> Vec<InformationEvent> {
+        let lines = crate::tracker_parse::parse_tracker_text(
+            text,
+            belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "re-parsing rendered text failed at line {}: {}\n--- tracker text ---\n{text}",
+                error.line, error.message
+            )
+        });
+        let mut events = Vec::new();
+        for line in lines {
+            match line {
+                crate::tracker_parse::TrackerLine::Event(event) => events.push(event),
+                crate::tracker_parse::TrackerLine::EndOfTurn => events.push(InformationEvent {
+                    kind: EventKind::EndOfTurn,
+                    reactions: Vec::new(),
+                }),
+            }
+        }
+        let events = crate::tracker_parse::fold_leads_and_entry_abilities(events);
+        crate::tracker_effects::augment_turn(events, belief, move_dex(), pokemon_dex())
+    }
+
+    /// Flatten the deliberately-flat tracker representation into a sorted
+    /// multiset of observable event payloads. Parent/child shape and sibling
+    /// order are intentionally ignored because tracker syntax attaches all
+    /// move qualifiers directly to `MoveUsed`. Hidden `max_hp` is also ignored:
+    /// masking keeps it as an internal companion value, while grammar exposes
+    /// only the resulting exact/percent HP token. Multiplicity remains part of
+    /// the comparison, so double-applied or silently dropped effects fail.
+    fn canonical_event_multiset(events: &[InformationEvent]) -> Vec<String> {
+        fn status_signature(status: &Status) -> &'static str {
+            match status {
+                Status::Burn => "Burn",
+                Status::Poison => "Poison",
+                Status::ToxicPoison(_) => "ToxicPoison",
+                Status::Paralysis => "Paralysis",
+                Status::Sleep(_) => "Sleep",
+                Status::Frozen(_) => "Frozen",
+            }
+        }
+
+        fn switch_signature(sw: &SwitchState) -> String {
+            let status = sw.status.as_ref().map(status_signature);
+            format!(
+                "Switch(slot={:?},species={:?},level={},hp={:?},status={:?},tera_type={:?})",
+                sw.slot, sw.species, sw.level, sw.hp, status, sw.tera_type
+            )
+        }
+
+        fn visit(event: &InformationEvent, out: &mut Vec<String>) {
+            match &event.kind {
+                // Turn sentinels and protect-family bookkeeping duplicate the
+                // enclosing action. The simulator represents a successful
+                // stalling move as `SingleMoveOrTurn`; tracker augmentation
+                // derives the equivalent one-turn volatile from MoveData.
+                EventKind::SingleMoveOrTurn { .. } | EventKind::EndOfTurn => {}
+                EventKind::VolatileStart { volatile, .. }
+                    if matches!(
+                        volatile,
+                        VolatileStatus::Protect
+                            | VolatileStatus::Endure
+                            | VolatileStatus::KingsShield
+                            | VolatileStatus::BanefulBunker
+                            | VolatileStatus::SpikyShield
+                            | VolatileStatus::SilkTrap
+                            | VolatileStatus::Obstruct
+                            | VolatileStatus::BurningBulwark
+                            | VolatileStatus::HelpingHand
+                            | VolatileStatus::Flinch
+                    ) => {}
+                EventKind::Switch(sw) => out.push(switch_signature(sw)),
+                EventKind::SimultaneousSwitch { switches } => {
+                    out.extend(switches.iter().map(switch_signature));
+                }
+                EventKind::DamageDealt { target, new_hp, .. } => {
+                    out.push(format!("DamageDealt(target={target:?},new_hp={new_hp:?})"));
+                }
+                EventKind::Healed { target, new_hp, .. } => {
+                    out.push(format!("Healed(target={target:?},new_hp={new_hp:?})"));
+                }
+                EventKind::SetHp { target, new_hp, .. } => {
+                    out.push(format!("SetHp(target={target:?},new_hp={new_hp:?})"));
+                }
+                EventKind::StatusInflicted { target, status } => out.push(format!(
+                    "StatusInflicted(target={target:?},status={})",
+                    status_signature(status)
+                )),
+                EventKind::StatusCured { target, status } => out.push(format!(
+                    "StatusCured(target={target:?},status={})",
+                    status_signature(status)
+                )),
+                other => out.push(format!("{other:?}")),
+            }
+            for reaction in &event.reactions {
+                visit(reaction, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        for event in events {
+            visit(event, &mut out);
+        }
+        out.sort_unstable();
+        out
+    }
+
+    fn assert_event_round_trip(
+        original: &[InformationEvent],
+        decoded: &[InformationEvent],
+        belief: &UnknownBattleState,
+        context: &str,
+        text: &str,
+    ) {
+        let expected = canonical_event_multiset(original);
+        let mut actual = canonical_event_multiset(decoded);
+        // `blocked` is currently the grammar's control word for “a guaranteed
+        // status payload was inapplicable” (for example Thunder Wave into an
+        // already-burned target). It deliberately suppresses augmentation but
+        // is not a simulator observation in that case, so remove precisely
+        // those renderer-introduced markers from the semantic comparison.
+        for event in original {
+            for (target, _) in
+                missing_guaranteed_status_blockers(event, belief, move_dex(), pokemon_dex())
+            {
+                let signature = format!("Blocked {{ target: {target:?} }}");
+                let position = actual
+                    .iter()
+                    .position(|value| value == &signature)
+                    .unwrap_or_else(|| {
+                        panic!("{context}: encoding-only blocker was not recovered for {target:?}")
+                    });
+                actual.remove(position);
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "{context}: tracker grammar changed the observable event multiset\n\
+             --- tracker text ---\n{text}\n\
+             --- original events ---\n{original:#?}\n\
+             --- decoded events ---\n{decoded:#?}"
+        );
     }
 
     /// Run one turn's real events (`sample_turn`, observer = P1) through the
@@ -895,22 +1439,40 @@ mod tests {
         let text = render_turn(&masked, fog_before, move_dex(), pokemon_dex())
             .unwrap_or_else(|e| panic!("{context}: renderer hit an unsupported event: {}", e.0));
 
-        let lines = crate::tracker_parse::parse_tracker_text(&text, fog_before, move_dex(), pokemon_dex())
-            .unwrap_or_else(|e| panic!("{context}: re-parsing rendered text failed at line {}: {}\n---\n{text}", e.line, e.message));
+        let lines =
+            crate::tracker_parse::parse_tracker_text(&text, fog_before, move_dex(), pokemon_dex())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{context}: re-parsing rendered text failed at line {}: {}\n---\n{text}",
+                        e.line, e.message
+                    )
+                });
 
         let mut turn_events = Vec::new();
         for line in lines {
             match line {
                 crate::tracker_parse::TrackerLine::Event(ev) => turn_events.push(ev),
                 crate::tracker_parse::TrackerLine::EndOfTurn => {
-                    turn_events.push(InformationEvent { kind: EventKind::EndOfTurn, reactions: Vec::new() })
+                    turn_events.push(InformationEvent {
+                        kind: EventKind::EndOfTurn,
+                        reactions: Vec::new(),
+                    })
                 }
             }
         }
         let turn_events = crate::tracker_parse::fold_leads_and_entry_abilities(turn_events);
-        let turn_events = crate::tracker_effects::augment_turn(turn_events, fog_before, move_dex(), pokemon_dex());
+        let turn_events = crate::tracker_effects::augment_turn(
+            turn_events,
+            fog_before,
+            move_dex(),
+            pokemon_dex(),
+        );
 
-        let config = InferenceConfig { use_stat_points: true, force_max_ivs: true, ..Default::default() };
+        let config = InferenceConfig {
+            use_stat_points: true,
+            force_max_ivs: true,
+            ..Default::default()
+        };
         let next_belief = apply_information(
             belief,
             &turn_events,
@@ -935,9 +1497,18 @@ mod tests {
     #[test]
     fn hand_authored_tracker_round_trip_stays_a_sound_superset_of_the_real_battle() {
         let preview = poke_rust::simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, pokemon_dex(), move_dex(), 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            pokemon_dex(),
+            move_dex(),
+            1,
+            1,
+            true,
         );
-        let tp = TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let tp = TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
         let p1_cmd = PlayerCommand::TeamPreview(tp.clone());
         let p2_cmd = PlayerCommand::TeamPreview(tp.clone());
 
@@ -948,7 +1519,14 @@ mod tests {
         // the actives through the ordinary switch-handling path.
         let UnknownMatchState::TeamPreview(team_preview_belief) =
             UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                Player::P1, &preview.p1_mons, &preview.p2_mons, pokemon_dex(), 1, 1, 50, true,
+                Player::P1,
+                &preview.p1_mons,
+                &preview.p2_mons,
+                pokemon_dex(),
+                1,
+                1,
+                50,
+                true,
             )
         else {
             panic!("expected TeamPreview variant")
@@ -991,13 +1569,19 @@ mod tests {
         // one), P2 Tackles back.
         let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Attack(AttackCommand {
             move_slot: 1,
-            target: Some(FieldSlot { player: Player::P2, slot_index: 0 }),
+            target: Some(FieldSlot {
+                player: Player::P2,
+                slot_index: 0,
+            }),
             terastallize: false,
             mega_evolve: false,
         })]);
         let p2_cmd = PlayerCommand::Battle(vec![BattleCommand::Attack(AttackCommand {
             move_slot: 0,
-            target: Some(FieldSlot { player: Player::P1, slot_index: 0 }),
+            target: Some(FieldSlot {
+                player: Player::P1,
+                slot_index: 0,
+            }),
             terastallize: false,
             mega_evolve: false,
         })]);
@@ -1048,18 +1632,39 @@ mod tests {
         let seed_start = fuzz_env_u64("POKERUST_TRACKER_FUZZ_SEED_START", 0);
         let max_turns = fuzz_env_u64("POKERUST_TRACKER_FUZZ_MAX_TURNS", 150) as usize;
         let replay = fuzz_env_bool("POKERUST_TRACKER_FUZZ_REPLAY");
+        let real_teams = fuzz_env_bool("POKERUST_TRACKER_FUZZ_REAL_TEAMS");
 
         for iter in seed_start..seed_start.saturating_add(iterations) {
             let mut rng = StdRng::seed_from_u64(iter);
-            let preview = poke_rust::simulator::team_preview_state_from_team_strings(
-                FUZZ_TEAM_P1,
-                FUZZ_TEAM_P2,
-                pokemon_dex(),
-                move_dex(),
-                2,
-                4,
-                true,
-            );
+            let (preview, matchup) = if real_teams {
+                let p1_path = REAL_FUZZ_TEAMSHEETS[rng.gen_range(0..REAL_FUZZ_TEAMSHEETS.len())];
+                let p2_path = REAL_FUZZ_TEAMSHEETS[rng.gen_range(0..REAL_FUZZ_TEAMSHEETS.len())];
+                (
+                    poke_rust::simulator::team_preview_state_from_teamsheets(
+                        p1_path,
+                        p2_path,
+                        pokemon_dex(),
+                        move_dex(),
+                        2,
+                        4,
+                        true,
+                    ),
+                    format!("{p1_path} vs {p2_path}"),
+                )
+            } else {
+                (
+                    poke_rust::simulator::team_preview_state_from_team_strings(
+                        FUZZ_TEAM_P1,
+                        FUZZ_TEAM_P2,
+                        pokemon_dex(),
+                        move_dex(),
+                        2,
+                        4,
+                        true,
+                    ),
+                    "renderer-complete corpus".to_string(),
+                )
+            };
             let mut session = fully_benched_tracker_session(&preview);
             let mut state = MatchState::TeamPreviewState(preview.clone());
             let mut p1_cmd = PlayerCommand::TeamPreview(random_team_preview_command(
@@ -1070,14 +1675,19 @@ mod tests {
                 preview.p2_mons.len(),
                 &mut rng,
             ));
+            let mut pending_masked: Vec<InformationEvent> = Vec::new();
+            let mut pending_raw: Vec<InformationEvent> = Vec::new();
+            let mut pending_commands: Vec<(PlayerCommand, PlayerCommand)> = Vec::new();
+            let mut logical_turn = 1usize;
 
-            for turn in 1..=max_turns {
+            for phase in 1..=max_turns {
                 let context = format!(
-                    "tracker_fuzz seed={iter} turn={turn} p1_cmd={p1_cmd:?} p2_cmd={p2_cmd:?}"
+                    "tracker_fuzz seed={iter} turn={logical_turn} phase={phase} matchup={matchup} p1_cmd={p1_cmd:?} p2_cmd={p2_cmd:?}"
                 );
                 let sample_seed = iter
                     .wrapping_mul(TRACKER_FUZZ_SAMPLE_SALT)
-                    .wrapping_add(turn as u64);
+                    .wrapping_add(phase as u64);
+                let was_team_preview = matches!(state, MatchState::TeamPreviewState(_));
                 let (next_state, raw_events, _) = poke_rust::simulator::sample_turn_raw_seeded(
                     sample_seed,
                     &state,
@@ -1091,6 +1701,36 @@ mod tests {
                 );
                 let raw_events = raw_events.expect("observer enabled");
                 let masked = mask_events_for(Player::P1, &raw_events);
+                pending_commands.push((p1_cmd.clone(), p2_cmd.clone()));
+                pending_raw.extend(raw_events);
+                let has_end_of_turn = masked
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::EndOfTurn));
+                pending_masked.extend(masked);
+                state = next_state;
+                let game_over = matches!(state, MatchState::GameOverState { .. });
+                let turn_complete = was_team_preview || has_end_of_turn || game_over;
+
+                if !turn_complete {
+                    let MatchState::BattleState(true_state) = &state else {
+                        panic!("{context}: incomplete simulator phase returned a non-battle state")
+                    };
+                    p1_cmd = PlayerCommand::Battle(random_commands_for_player(
+                        true_state,
+                        Player::P1,
+                        &mut rng,
+                    ));
+                    p2_cmd = PlayerCommand::Battle(random_commands_for_player(
+                        true_state,
+                        Player::P2,
+                        &mut rng,
+                    ));
+                    continue;
+                }
+
+                let raw_events = std::mem::take(&mut pending_raw);
+                let masked = std::mem::take(&mut pending_masked);
+                let command_phases = std::mem::take(&mut pending_commands);
                 let text = render_turn(
                     &masked,
                     &session.belief,
@@ -1103,13 +1743,9 @@ mod tests {
                         error.0
                     )
                 });
-                let text = append_explicit_passes(
-                    text,
-                    &p1_cmd,
-                    &p2_cmd,
-                    &masked,
-                    matches!(next_state, MatchState::GameOverState { .. }),
-                );
+                let decoded = decode_rendered_turn(&text, &session.belief);
+                assert_event_round_trip(&masked, &decoded, &session.belief, &context, &text);
+                let text = append_explicit_passes(text, &command_phases, &masked, game_over);
                 if replay {
                     eprintln!(
                         "[TRACKER-FUZZ] {context}\n--- tracker text ---\n{text}\n--- raw events ---\n{raw_events:#?}\n--- masked events ---\n{masked:#?}"
@@ -1138,7 +1774,6 @@ mod tests {
                     "{context}: response view drifted from the committed belief"
                 );
 
-                state = next_state;
                 match &state {
                     MatchState::GameOverState { .. } => break,
                     MatchState::BattleState(true_state) => {
@@ -1177,9 +1812,12 @@ mod tests {
                     }
                     MatchState::TeamPreviewState(_) => unreachable!(),
                 }
+                logical_turn += 1;
 
-                if turn == max_turns {
-                    eprintln!("{context}: battle exceeded the fuzz hang guard; stopping this seed");
+                if phase == max_turns {
+                    eprintln!(
+                        "{context}: battle exceeded the fuzz phase guard; stopping this seed"
+                    );
                     break;
                 }
             }
