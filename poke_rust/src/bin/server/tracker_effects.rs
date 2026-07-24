@@ -148,10 +148,56 @@ pub fn augment_turn(
                 }
                 _ => {}
             }
-            let augmented =
+            let mut augmented =
                 augment_with_live_slots(e, &scratch, move_dex, pokemon_dex, &live_slots, true);
             fold_event_into_synthesis_scratch(&mut scratch, &augmented, pokemon_dex);
             remove_fainted_slots(&augmented, &mut live_slots);
+            // The turn's own events are all folded into `scratch` by this
+            // point (we're at the LAST event — `split_into_turns` always
+            // appends `EndOfTurn` last) — compare it against the pre-turn
+            // `belief` to decide which timers are guaranteed to expire
+            // (`Known(1)`, unchanged by anything typed this turn) and attach
+            // their clears as this node's own reactions, matching where the
+            // real engine's `EndOfTurn` reactions carry them.
+            //
+            // Skip entirely if this same turn's events leave either side with
+            // every active slot down and no CONFIRMED healthy reserve
+            // (fuzz-discovered): tracker syntax requires every complete turn
+            // to end with an explicit `endofturn` sentinel even when the last
+            // action was the game-ending KO, so the parsed-back event stream
+            // always carries a `EventKind::EndOfTurn` node regardless of
+            // whether the real engine ever ran a genuine end-of-turn pass for
+            // it — `step_action_queue` skips `end_turn` entirely once the
+            // battle is already decided (see `simulator/mod.rs`), so a
+            // synthesized clear here would claim a duration tick that never
+            // actually happened. This can't be answered with full certainty
+            // from a fog-of-war belief — the opponent's exact bench size may
+            // still be ambiguous — so this deliberately checks only `known_
+            // back` (a *confirmed* healthy reserve), not `possible_back`:
+            // requiring certainty of "the battle continues" before trusting a
+            // tick occurred, rather than certainty of "it doesn't" before
+            // skipping. Sound: this only ever WITHHOLDS a clear the real
+            // engine might still have emitted, never fabricates one. Uses
+            // active-wipe (not full elimination) specifically because
+            // `end_turn` genuinely DOES still run, and duration timers DO
+            // still tick, on an ordinary "fainted but a reserve is waiting"
+            // turn — see the wide unit tests below distinguishing the two.
+            let side_ambiguously_wiped = |player: Player| -> bool {
+                let (active, known_back) = match player {
+                    Player::P1 => (&scratch.p1_active_mons, &scratch.p1_known_back_mons),
+                    Player::P2 => (&scratch.p2_active_mons, &scratch.p2_known_back_mons),
+                };
+                !active.is_empty()
+                    && active.iter().all(|mon| mon.fainted)
+                    && !known_back.iter().any(|mon| !mon.fainted)
+            };
+            let game_might_already_be_over = matches!(augmented.kind, EventKind::EndOfTurn)
+                && (side_ambiguously_wiped(Player::P1) || side_ambiguously_wiped(Player::P2));
+            if matches!(augmented.kind, EventKind::EndOfTurn) && !game_might_already_be_over {
+                augmented
+                    .reactions
+                    .extend(synthesize_expiry_clears(belief, &scratch));
+            }
             let top_level_faint = match &augmented.kind {
                 EventKind::DamageDealt { target, new_hp, .. }
                 | EventKind::Healed { target, new_hp, .. }
@@ -201,6 +247,94 @@ fn remove_fainted_slots(event: &InformationEvent, live_slots: &mut HashSet<Field
     for reaction in &event.reactions {
         remove_fainted_slots(reaction, live_slots);
     }
+}
+
+/// Synthesize the field-effect EXPIRIES a user should never have to type.
+/// `inference.rs::decrement_unknown_turns` deliberately decrements a belief's
+/// weather/terrain/pseudo-weather/side-condition timers WITHOUT clearing the
+/// field itself, deferring that to an event — `WeatherChanged{None}`,
+/// `TerrainChanged{None}`, `PseudoWeatherEnd`, `SideConditionEnd` — the same
+/// way the real simulator's `decrement_effect_timers` (`simulator/helpers.rs`)
+/// both decrements AND emits that event once `turns == 1`. Tracker mode has
+/// no simulator to emit it, so without this, a belief's field effects tick
+/// down internally but never actually clear.
+///
+/// `belief` is the state as it stood BEFORE this turn's own events (passed
+/// into `augment_turn`); `scratch` is the running synthesis snapshot after
+/// every one of this turn's own events has been folded in (see
+/// `augment_turn`'s doc comment) — comparing the two tells us whether
+/// something the user typed THIS turn already changed the effect (a new
+/// weather, an explicit `weather none`, a fresh side condition), in which
+/// case there's nothing left to synthesize.
+///
+/// Only ever fires on `Known(1)` — a *guaranteed* expiry this turn:
+/// - Fixed-duration effects (Trick Room=5, Tailwind=4, Safeguard=5, …) reach
+///   `Known(1)` on their exact last turn, same as the real engine.
+/// - Item-extendable effects (weather/terrain's `Possibly([5, 8])` for a
+///   rock/Terrain Extender, screens' `Possibly([5, 8])` for Light Clay) only
+///   ever COLLAPSE to `Known` once the ambiguous turn-5 branch has already
+///   been soundly excluded (see `apply_end_of_turn`'s three-way resolution
+///   in `inference.rs`) — so this never fires at the ambiguous turn-5
+///   midpoint, only once a genuine `Known(1)` is reached.
+/// - `Known(0)` (the permanent/no-countdown sentinel for primordial weather
+///   and entry hazards) and any still-`Possibly` timer are left untouched.
+fn synthesize_expiry_clears(
+    belief: &UnknownBattleState,
+    scratch: &UnknownBattleState,
+) -> Vec<InformationEvent> {
+    let mut clears = Vec::new();
+
+    if scratch.weather == belief.weather
+        && matches!(belief.weather_turns, Some(Unknown::Known(1)))
+    {
+        clears.push(leaf(EventKind::WeatherChanged { weather: None }));
+    }
+
+    if scratch.terrain == belief.terrain
+        && matches!(belief.terrain_turns, Some(Unknown::Known(1)))
+    {
+        clears.push(leaf(EventKind::TerrainChanged { terrain: None }));
+    }
+
+    for (i, pw) in belief.pseudo_weathers.iter().enumerate() {
+        if !scratch.pseudo_weathers.contains(pw) {
+            continue; // already ended by an explicit event this turn
+        }
+        if matches!(belief.pseudo_weather_turns.get(i), Some(Unknown::Known(1))) {
+            clears.push(leaf(EventKind::PseudoWeatherEnd { effect: pw.clone() }));
+        }
+    }
+
+    for player in [Player::P1, Player::P2] {
+        let (conditions, turns, scratch_conditions) = match player {
+            Player::P1 => (
+                &belief.p1_side_conditions,
+                &belief.p1_side_condition_turns,
+                &scratch.p1_side_conditions,
+            ),
+            Player::P2 => (
+                &belief.p2_side_conditions,
+                &belief.p2_side_condition_turns,
+                &scratch.p2_side_conditions,
+            ),
+        };
+        for (i, sc) in conditions.iter().enumerate() {
+            let still_active = scratch_conditions
+                .iter()
+                .any(|active| std::mem::discriminant(active) == std::mem::discriminant(sc));
+            if !still_active {
+                continue; // already ended by an explicit event this turn
+            }
+            if matches!(turns.get(i), Some(Unknown::Known(1))) {
+                clears.push(leaf(EventKind::SideConditionEnd {
+                    side: player,
+                    condition: sc.clone(),
+                }));
+            }
+        }
+    }
+
+    clears
 }
 
 /// Recursively scan `event` (and its already-synthesized reactions) for
@@ -1479,6 +1613,156 @@ mod tests {
             &r.kind,
             EventKind::TerrainChanged {
                 terrain: Some(Terrain::ElectricTerrain)
+            }
+        )));
+    }
+
+    #[test]
+    fn augment_turn_synthesizes_weather_clear_at_guaranteed_expiry() {
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sandstorm);
+        belief.weather_turns = Some(Unknown::Known(1));
+        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let eot = augmented.last().expect("expected the EndOfTurn event");
+        assert!(matches!(eot.kind, EventKind::EndOfTurn));
+        assert!(
+            eot.reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { weather: None })),
+            "expected a synthesized WeatherChanged{{None}} under EndOfTurn's reactions"
+        );
+    }
+
+    #[test]
+    fn augment_turn_skips_weather_clear_when_a_side_is_ambiguously_wiped() {
+        // Fuzz-discovered (doubles wipeout while the opponent's bench was
+        // still fog-of-war ambiguous): if this same turn's own events leave
+        // every one of a side's active slots fainted with no CONFIRMED
+        // healthy reserve, the real engine may never have run a genuine
+        // end-of-turn pass at all (`step_action_queue` skips `end_turn` once
+        // the battle is already decided) — synthesizing a clear here would
+        // claim a duration tick that might never have happened.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sandstorm);
+        belief.weather_turns = Some(Unknown::Known(1));
+        // No known/possible back mon for P2 — an ambiguous wipe once o1 faints.
+        let augmented = augment_turn(
+            vec![leaf(EventKind::Faint { slot: o1() }), leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
+        let eot = augmented.last().expect("expected the EndOfTurn event");
+        assert!(matches!(eot.kind, EventKind::EndOfTurn));
+        assert!(
+            !eot.reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. })),
+            "must not synthesize a clear while it's ambiguous whether the real \
+             engine even ran a genuine end-of-turn this turn, got {:?}",
+            eot.reactions
+        );
+    }
+
+    #[test]
+    fn augment_turn_still_synthesizes_weather_clear_with_a_confirmed_reserve() {
+        // Contrast case: a side's only active slot fainting is the ORDINARY,
+        // common scenario (a KO mid-battle) whenever a confirmed healthy
+        // reserve exists — the real engine's `end_turn` genuinely still runs
+        // (only a battle-ending wipe skips it), so expiry synthesis must
+        // still fire normally here. Guards against over-restricting the
+        // feature for the common case while fixing the ambiguous-wipe one.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sandstorm);
+        belief.weather_turns = Some(Unknown::Known(1));
+        belief
+            .p2_known_back_mons
+            .push(make_active(Species::Tyranitar, PokemonHP::Percent(100)));
+        let augmented = augment_turn(
+            vec![leaf(EventKind::Faint { slot: o1() }), leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
+        let eot = augmented.last().expect("expected the EndOfTurn event");
+        assert!(
+            eot.reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { weather: None })),
+            "a confirmed healthy reserve means the battle demonstrably continues, \
+             so the clear must still synthesize normally, got {:?}",
+            eot.reactions
+        );
+    }
+
+    #[test]
+    fn augment_turn_does_not_synthesize_weather_clear_while_still_ambiguous() {
+        // A Possibly([5, 8]) timer only ever reaches Known(1) once the
+        // extension-item branch has already been excluded — this must never
+        // fire against the still-ambiguous candidate set.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sandstorm);
+        belief.weather_turns = Some(Unknown::Possibly(vec![5, 8]));
+        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let eot = &augmented[0];
+        assert!(
+            !eot.reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::WeatherChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn augment_turn_skips_weather_clear_when_this_turns_own_event_already_changed_it() {
+        // Weather was about to naturally expire (Known(1)) but the user also
+        // typed a brand-new weather this same turn — the natural-expiry
+        // synthesis must not fire a spurious clear on top of the override.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sandstorm);
+        belief.weather_turns = Some(Unknown::Known(1));
+        let rain = leaf(EventKind::WeatherChanged {
+            weather: Some(Weather::Rain),
+        });
+        let augmented = augment_turn(
+            vec![rain, leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
+        let eot = augmented.last().unwrap();
+        assert!(
+            eot.reactions.is_empty(),
+            "expiry clear must not fire once the weather was overridden this turn"
+        );
+    }
+
+    #[test]
+    fn augment_turn_synthesizes_side_condition_end_at_guaranteed_expiry() {
+        let mut belief = test_belief();
+        belief.p1_side_conditions = vec![poke_rust::state::dex_data::SideCondition::Reflect];
+        belief.p1_side_condition_turns = vec![Unknown::Known(1)];
+        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let eot = &augmented[0];
+        assert!(eot.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::SideConditionEnd {
+                side: Player::P1,
+                condition: poke_rust::state::dex_data::SideCondition::Reflect
+            }
+        )));
+    }
+
+    #[test]
+    fn augment_turn_synthesizes_pseudo_weather_end_at_guaranteed_expiry() {
+        let mut belief = test_belief();
+        belief.pseudo_weathers = vec![poke_rust::state::dex_data::PseudoWeather::TrickRoom];
+        belief.pseudo_weather_turns = vec![Unknown::Known(1)];
+        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let eot = &augmented[0];
+        assert!(eot.reactions.iter().any(|r| matches!(
+            &r.kind,
+            EventKind::PseudoWeatherEnd {
+                effect: poke_rust::state::dex_data::PseudoWeather::TrickRoom
             }
         )));
     }

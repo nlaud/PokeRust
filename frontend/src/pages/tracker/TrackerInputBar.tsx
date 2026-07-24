@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTracker } from '../../store/trackerStore'
-import { completionsAt, norm } from '../../lib/trackerGrammar'
+import { completionsAt, isSelfCompleteToken, norm } from '../../lib/trackerGrammar'
 
 /** Cap on the rising suggestion list — the glass panel above the bar grows to
  * fit however many render, so this bounds how tall it can get. */
@@ -64,22 +64,47 @@ function applyTopSuggestion(
  * own `Line N` error numbering), and the two-tier commit model: `Enter` saves
  * the current line locally and jumps to a fresh event — or, on an emptied
  * existing line, deletes that event instead and steps back to the previous
- * one; `Shift+Enter` additionally ends the turn, appending `endofturn` and
+ * one — and, when editing a NON-last line, instead inserts a fresh empty
+ * event immediately after it and lands the cursor there, so a missed event
+ * can be slotted into the middle of a turn without disturbing anything after
+ * it; `Shift+Enter` additionally ends the turn, appending `endofturn` and
  * rebuilding the whole script so inference recomputes for real; `Backspace`
  * on an already-empty existing line deletes it the same way Enter does;
  * `Escape` discards the current line's unsaved edits without jumping anywhere
- * new-content-wise; `Shift+Escape` discards the WHOLE in-progress draft (every
- * line saved via `Enter` this turn, never sent to the server, so purely
- * local) and starts the turn over from a fresh, empty line.
+ * new-content-wise; `Shift+Escape` reopens the last COMMITTED turn for editing
+ * (discarding whatever's in the current in-progress draft first) — this
+ * actually rolls the session back one turn via `popLastCommittedTurn` (a real
+ * `PUT /history` rebuild, not a local-only pop), so live preview against the
+ * reopened lines is accurate and abandoning the edit without recommitting
+ * just leaves the session one turn shorter rather than losing anything
+ * silently. A second Shift+Escape while already mid-reopen does not cascade
+ * into popping yet another turn (that would merge two turns' lines into one
+ * draft) — it's just a non-destructive jump to the end of what's loaded.
  */
 export default function TrackerInputBar() {
-  const { view, completions, previewEvents, error, errorLine, busy, previewDraft, clearPreview, endTurn, clearError } =
-    useTracker()
+  const {
+    view,
+    completions,
+    previewEvents,
+    lastLineWarning,
+    error,
+    errorLine,
+    busy,
+    previewDraft,
+    clearPreview,
+    endTurn,
+    popLastCommittedTurn,
+    clearError,
+  } = useTracker()
 
   const [draftLines, setDraftLines] = useState<string[]>([])
   const [text, setText] = useState('')
   const [caretPos, setCaretPos] = useState(0)
   const [historyIndex, setHistoryIndex] = useState(0)
+  // Set while the draft holds a committed turn popped back open by
+  // Shift+Escape (see that handler) — guards against a second Shift+Escape
+  // cascading into another rollback and merging two turns' lines together.
+  const [reopenedCommittedTurn, setReopenedCommittedTurn] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // `disabled={busy}` makes the browser auto-blur the input the instant a
@@ -106,7 +131,11 @@ export default function TrackerInputBar() {
   // nothing left to autocomplete OR autocorrect, so suppress both the ghost
   // and the suggestion panel entirely rather than keep dangling a redundant
   // (or, worse, an unwanted autocorrect-away-from-what-was-just-typed) option.
-  const partialIsComplete = partial !== '' && suggestions.some((s) => norm(s) === norm(partial))
+  // Numeric/percent/fraction HP tokens (`50%`, `120/200`) are self-complete —
+  // `completionsAt` already returns `[]` for them, so the candidate-match
+  // check alone would never catch them; check both.
+  const partialIsComplete =
+    partial !== '' && (isSelfCompleteToken(partial) || suggestions.some((s) => norm(s) === norm(partial)))
   const ghost =
     !partialIsComplete &&
     atEndOfInput &&
@@ -180,11 +209,19 @@ export default function TrackerInputBar() {
       return
     }
     if (currentEntry) {
+      const insertIndex = currentEntry.lineIndex + 1
       const next = [...draftLines]
       next[currentEntry.lineIndex] = trimmed
+      // Insert a fresh empty slot right after the line just saved instead of
+      // jumping to the turn's end — lets a missed event be slotted into the
+      // middle of a turn without disturbing anything recorded after it.
+      // Saving that new slot empty deletes it again via the `trimmed === ''`
+      // branch above (same as any other existing line).
+      next.splice(insertIndex, 0, '')
       setDraftLines(next)
       void previewDraft(next)
-      jumpToAppend(next)
+      setHistoryIndex(insertIndex)
+      loadBuffer('')
       return
     }
     const next = [...draftLines, trimmed]
@@ -213,24 +250,46 @@ export default function TrackerInputBar() {
     } else if (trimmed !== '') {
       finalDraft = [...draftLines, trimmed]
     }
+    // Drop any OTHER still-blank slots left over from an insert-after (issue
+    // 3) the user never came back to fill in — harmless to the parser
+    // (blank lines are skipped, `tracker_parse.rs:158`) but tidier not to
+    // persist a stray empty content line into the committed script.
+    finalDraft = finalDraft.filter((l) => l.trim() !== '')
     if (finalDraft.length === 0) return
     const ok = await endTurn(finalDraft)
     if (ok) {
       setDraftLines([])
+      setReopenedCommittedTurn(false)
       jumpToAppend([])
     }
   }
 
-  function handleShiftEscape() {
-    // Discards every still-uncommitted draft line (not just the current
-    // buffer) and starts completely fresh. There is no longer a separate
-    // "already on the server" layer to fall back to re-opening — a draft
-    // line only ever lives locally until `Shift+Enter` sends the whole turn
-    // — so unlike `Escape` (which only abandons the current line's unsaved
-    // edit), this is the "start this turn over" action.
-    clearPreview()
-    setDraftLines([])
-    jumpToAppend([])
+  async function handleShiftEscape() {
+    if (reopenedCommittedTurn) {
+      // Already mid-edit of a reopened turn — don't cascade into rolling
+      // back yet another committed turn (that would merge two turns' worth
+      // of lines into a single draft, changing turn boundaries on commit).
+      // Just a non-destructive jump to the end of what's already loaded.
+      jumpToAppend(draftLines)
+      return
+    }
+    const popped = await popLastCommittedTurn()
+    if (!popped) {
+      // Nothing committed yet to reopen — same as the old "restart" behavior:
+      // discard whatever's in progress and start fresh.
+      clearPreview()
+      setDraftLines([])
+      jumpToAppend([])
+      return
+    }
+    // `popLastCommittedTurn` already rolled the session back one turn on the
+    // server (a real `PUT /history` rebuild, not a local-only pop), so the
+    // belief `previewDraft` below previews against genuinely excludes this
+    // turn's effects — load its lines back into the draft and land at the end.
+    setDraftLines(popped)
+    setReopenedCommittedTurn(true)
+    jumpToAppend(popped)
+    void previewDraft(popped)
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -278,7 +337,7 @@ export default function TrackerInputBar() {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
-      if (e.shiftKey) handleShiftEscape()
+      if (e.shiftKey) void handleShiftEscape()
       else handleEscape()
       return
     }
@@ -362,7 +421,7 @@ export default function TrackerInputBar() {
 
       <div className="flex items-center justify-between px-3 pb-1 pt-1">
         <span className="text-[11px] text-ink-muted">
-          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: restart turn
+          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: reopen last turn
         </span>
         {previewEvents.length > 0 && (
           <span className="text-[11px] text-ink-muted">
@@ -370,6 +429,17 @@ export default function TrackerInputBar() {
           </span>
         )}
       </div>
+
+      {/* Non-blocking advisory (yellow): the line just committed/edited parsed
+          fine but had no observable effect — distinct from `error` below
+          (red), which means the turn was actually rejected. Auto-clears the
+          next time `previewDraft` runs and the tree actually changes, so
+          there's no dismiss button — see `lastLineWarning`'s doc comment. */}
+      {lastLineWarning && !error && (
+        <div className="mx-1 mb-1 mt-1 rounded-card bg-warning px-3 py-1.5 text-xs text-white">
+          {lastLineWarning}
+        </div>
+      )}
 
       {error && (
         <div className="mx-1 mb-1 mt-1 flex items-center justify-between gap-2 rounded-card bg-danger px-3 py-1.5 text-xs text-white">

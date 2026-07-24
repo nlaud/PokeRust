@@ -418,14 +418,38 @@ fn side_was_eliminated(
             .is_some_and(|mon| mon.fainted)
             || slot_was_zeroed(events, slot)
     });
-    if !all_active_fainted {
-        return false;
-    }
+    all_active_fainted && side_has_no_healthy_reserve(belief, player)
+}
+
+/// Does `player`'s bench hold not a single non-fainted reserve — neither a
+/// revealed (`known_back`) nor a still-unrevealed-but-possible
+/// (`possible_back`) one? Sound under fog: a `possible_back` mon that
+/// *might* still be alive keeps this `false`, the same soundness discipline
+/// every other belief-only predicate in this module follows. Shared by
+/// `side_was_eliminated` (this turn's not-yet-committed events may zero a
+/// slot the belief doesn't reflect yet) and [`side_eliminated`] (the
+/// already-committed belief alone, for rendering game-over after the fact).
+fn side_has_no_healthy_reserve(belief: &UnknownBattleState, player: Player) -> bool {
     let (known_back, possible_back) = match player {
         Player::P1 => (&belief.p1_known_back_mons, &belief.p1_possible_back_mons),
         Player::P2 => (&belief.p2_known_back_mons, &belief.p2_possible_back_mons),
     };
     !known_back.iter().any(|mon| !mon.fainted) && !possible_back.iter().any(|mon| !mon.fainted)
+}
+
+/// Belief-only counterpart to [`side_was_eliminated`], for rendering: true
+/// when `player`'s active slots are ALL fainted (per the already-committed
+/// belief — no in-flight `events` to cross-check, unlike the turn-validation
+/// caller above) and the bench holds no possible survivor either. Used by
+/// `mapping::battle_view_from_belief` to decide `PhaseDto::GameOver`.
+pub(crate) fn side_eliminated(belief: &UnknownBattleState, player: Player, active_per_side: u8) -> bool {
+    let active = match player {
+        Player::P1 => &belief.p1_active_mons,
+        Player::P2 => &belief.p2_active_mons,
+    };
+    let all_active_fainted = (0..active_per_side)
+        .all(|slot_index| active.get(slot_index as usize).is_some_and(|mon| mon.fainted));
+    all_active_fainted && side_has_no_healthy_reserve(belief, player)
 }
 
 fn slot_was_zeroed(events: &[InformationEvent], slot: FieldSlot) -> bool {
@@ -1108,6 +1132,46 @@ mod tests {
             })],
         }];
         assert!(validate_turn_completeness(&events, &belief, 1).is_ok());
+    }
+
+    #[test]
+    fn side_eliminated_true_once_last_active_faints_with_no_reserve() {
+        let mut belief = belief_1v1();
+        belief.p2_active_mons[0].fainted = true;
+        assert!(side_eliminated(&belief, Player::P2, 1));
+        // The other side, still alive, must not be reported eliminated.
+        assert!(!side_eliminated(&belief, Player::P1, 1));
+    }
+
+    #[test]
+    fn side_eliminated_false_with_a_known_healthy_reserve() {
+        let mut belief = belief_1v1();
+        belief.p2_active_mons[0].fainted = true;
+        belief
+            .p2_known_back_mons
+            .push(make_active(Species::Tyranitar, false));
+        assert!(!side_eliminated(&belief, Player::P2, 1));
+    }
+
+    #[test]
+    fn side_eliminated_false_with_only_a_possible_healthy_reserve() {
+        // Soundness: an unrevealed bench mon that MIGHT still be alive must
+        // keep this false — never claim elimination is certain when it isn't.
+        let mut belief = belief_1v1();
+        belief.p2_active_mons[0].fainted = true;
+        belief
+            .p2_possible_back_mons
+            .push(make_active(Species::Tyranitar, false));
+        assert!(!side_eliminated(&belief, Player::P2, 1));
+    }
+
+    #[test]
+    fn side_eliminated_false_before_a_lead_has_been_sent_out() {
+        // Fresh session, nobody active yet — an empty active Vec must never
+        // read as "every active mon fainted."
+        let mut belief = belief_1v1();
+        belief.p2_active_mons.clear();
+        assert!(!side_eliminated(&belief, Player::P2, 1));
     }
 
     #[test]

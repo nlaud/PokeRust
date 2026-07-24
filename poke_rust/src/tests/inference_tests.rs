@@ -7940,6 +7940,18 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
         "ability set must be recomputed from the mega species dex entry, got {:?}",
         mon.possible_abilities
     );
+    // Regression (fuzz-discovered): the pending Mega Stone target is consumed
+    // the instant Mega Evolution actually happens (mirrors
+    // `try_mega_evolution`'s own `mon.mega_species = None;`,
+    // `state/battle.rs:719`) — a fully-`Known` belief (e.g. the tracker's own
+    // side) must not keep claiming `Known(Some(mega_forme))` after the mega
+    // already occurred, or a subsequent subset-soundness check against ground
+    // truth (which is genuinely `None` by then) fails.
+    assert!(
+        matches!(&mon.mega_species, Unknown::Known(None)),
+        "mega_species must clear to Known(None) once Mega Evolution has happened, got {:?}",
+        mon.mega_species
+    );
 }
 
 /// S61: nature arithmetic during a forme change must use the simulator's f32
@@ -10598,6 +10610,58 @@ fn test_weather_clause_turns_decrement_stays_in_sync() {
         result.weather_turns,
         Some(Unknown::Known(6)),
         "clause turns must have decremented with the timer (8 − 2 EOTs = 6)"
+    );
+}
+
+/// Fuzz-discovered regression: `is_battle_start_setup` (`turn_number == 0`)
+/// alone is not a sound proxy for "the free team-preview→battle pass, skip
+/// decrementing." A tracker session's `leads` line is syntactically its own
+/// turn (a standalone `apply_information` call whose only content is the
+/// switch-in reveal, ending with its own `EndOfTurn` and genuinely NO move
+/// action) — `turn_number` really is still 0 there with nothing having
+/// happened yet, matching the real engine's own free pass. But battle mode's
+/// own harness (and by extension the CLI/server battle path) folds the leads
+/// reveal into the SAME event batch as the very first REAL move-choice turn —
+/// there is no separate leads-only call to consume `turn_number == 0` first,
+/// so the belief's genuine first decrementing turn also reads `turn_number ==
+/// 0` here. Before this fix, that turn's weather/terrain/side-condition
+/// (whether set by an entry ability on the lead or a first-turn move) silently
+/// gained one extra turn of belief-side duration relative to ground truth —
+/// caught via `random_doubles_beliefs_stay_sound_subset`'s `Statement::
+/// WeatherTurns` checks, not the (weaker) contradiction-only oracle. Fixed by
+/// also gating on `ctx.move_users_this_turn` (populated by any real action
+/// this turn segment, cleared only after this same `EndOfTurn` finishes) —
+/// still empty for a genuine `leads`-only turn, never empty once a real move
+/// has been chosen, even on the battle's very first turn.
+#[test]
+fn test_weather_decrements_on_the_same_turn_it_was_set_with_no_prior_end_of_turn() {
+    let mut state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
+    // `battle_with_p2`/`battle_nvn` default to `turn_number: 1` — a convenience
+    // that happens to sidestep this exact bug. Override to `0`, mirroring
+    // `into_battle_state`'s real seeding for a brand-new battle, so this test
+    // actually exercises the same-turn-as-set-with-no-prior-EndOfTurn case.
+    state.turn_number = 0;
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::RainDance,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Rain),
+            })],
+        ),
+        event(EventKind::EndOfTurn),
+    ];
+    let result = apply_ex(state, events, HashMap::new(), weather_move_dex());
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Possibly(vec![4, 7])),
+        "weather set and ended on the SAME real turn (turn_number entering as 0, \
+         but a genuine move was chosen — not a leads-only setup pass) must still \
+         decrement once at that turn's own end, got {:?}",
+        result.weather_turns
     );
 }
 

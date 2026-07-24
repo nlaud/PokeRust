@@ -22,6 +22,18 @@ export function norm(s: string): string {
     .join('')
 }
 
+/** Grammar tokens that are self-evidently complete the moment they parse as
+ * themselves — numeric HP specs (`50`, `50%`, `120/200`) — and so are never
+ * looked up in a word pool. `completionsAt` has no candidate list to check
+ * these against (no species/move/item name starts with a digit), and without
+ * this check `rank`'s "autocorrect to the closest word" fallback (which never
+ * returns an empty list for a non-empty partial) would keep surfacing a full
+ * word list against a perfectly valid numeric token. Checked ahead of
+ * `completionsAt`'s normal candidate lookup, not as a replacement for it. */
+export function isSelfCompleteToken(partial: string): boolean {
+  return /^\d+%?$/.test(partial) || /^\d+\/\d+$/.test(partial)
+}
+
 /** Per-match name pools an autocomplete session needs: species/moves/
  * abilities come from `GET /api/tracker/{id}/completions` (scoped to the
  * Pokemon actually in this match — see that endpoint's doc comment in
@@ -457,6 +469,11 @@ export function completionsAt(
   partial: string,
   pools: CompletionPools,
 ): string[] {
+  // A numeric/percent/fraction token (HP specs like `50%`, `120/200`) is
+  // already complete — no word pool has anything to suggest for it, and
+  // returning early here (rather than falling into `rank`'s edit-distance
+  // fallback) avoids dumping an unrelated word list against it.
+  if (isSelfCompleteToken(partial)) return []
   const style = styleFromTokens(tokens, pools)
   const recased = recasePools(pools, style)
   const position = classifyPosition(tokens, cursorIndex)

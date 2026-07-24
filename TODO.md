@@ -1,9 +1,8 @@
 # TODO: Always remove items from here when they are completed :)
 
 ### Fixes
-- Already a valid token checking for not displaying suggestions does not work for like hp percents and stuff like that
-- Shift escape should not restart the turn, it should reset you to editing the end of the last turn.
-- Also the behavior for submitting an event that is not the last event should be changed so it adds a new event after the one you were editing
+Tracker improvements:
+- Defiant (and likely other stat-drop-triggered reactive-boost abilities, e.g. Competitive) has no guaranteed-reaction synthesis in `tracker_effects.rs`'s ability table — a Defiant mon's own +2 Atk after being Intimidated never gets synthesized, causing a tracker round-trip mismatch. Found via the tracker subset-oracle fuzzer with real teams (first repro: seed 100004+, `POKERUST_TRACKER_FUZZ_REAL_TEAMS=1`).
 
 ### New features
 

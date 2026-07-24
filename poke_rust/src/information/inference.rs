@@ -2431,7 +2431,7 @@ fn pass1_apply_event(
             // A self-switch move with no viable replacement (or one that failed its
             // trigger condition) never enters the simulator's replacement phase.
             state.self_switch_pending = None;
-            apply_end_of_turn(state, event);
+            apply_end_of_turn(state, event, ctx);
             pass_eot_heal(state, event, ctx);
             pass_eot_sand_immunity(state, event, ctx);
             pass_eot_self_status(state, event, ctx);
@@ -2970,6 +2970,15 @@ fn pass1_apply_event(
                     // IllusionEnded handler's overwrite pattern.
                     mon.possible_species = Unknown::Known(into.clone());
                     mon.is_mega = true;
+                    // The pending Mega Stone target is consumed the instant Mega
+                    // Evolution actually happens — mirrors `try_mega_evolution`'s own
+                    // `mon.mega_species = None;` (`state/battle.rs:719`). Before this
+                    // fix a fully-`Known` belief (the tracker's own side) kept
+                    // claiming `Known(Some(mega_forme))` forever after the mega
+                    // already occurred — a real, if narrow, soundness gap masked
+                    // everywhere else by fog-of-war opponent beliefs seeding this
+                    // field `Not(vec![])` (already admits `None`).
+                    mon.mega_species = Unknown::Known(None);
                     // Update types, ability set, and weight from the mega species dex entry.
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
@@ -5525,7 +5534,7 @@ fn emit_extension_item_if_collapsed(
 /// `decrement_effect_timers` in `simulator/helpers.rs`. Visible EOT effects (weather
 /// chip, heal, etc.) are handled by the event walk visiting `EndOfTurn::reactions`;
 /// this function handles the invisible internal state.
-fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
+fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent, ctx: &BattleContext) {
     // The team-preview → first-turn transition (a tracker session's `leads` turn,
     // or battle mode's own team-preview-to-battle step) mirrors the real engine's
     // `is_battle_start_setup` pass (`simulator::helpers::end_turn`'s doc comment
@@ -5543,7 +5552,29 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
     // a Possibly-collapse CNF pair, since a `Possibly` set merely being one off
     // was never checked directly against ground truth (only the CNF predicate
     // literals are — see `subset_check.rs`'s `Statement::WeatherTurns` arm).
-    let is_battle_start_setup = state.turn_number == 0;
+    //
+    // `turn_number == 0` ALONE is not a sound proxy for "this is that free pass":
+    // it only holds for tracker sessions, where `leads` is syntactically its own
+    // turn (a separate `apply_information` call with its own `EndOfTurn` and
+    // nothing else, so `turn_number` is still 0 the one time this fires with no
+    // real action taken). Battle mode's own harness (`random_battle_tests.rs`,
+    // and by extension the real server/CLI battle path) folds the leads reveal
+    // into the SAME event batch as the battle's first genuine move-choice turn —
+    // there is no separate "leads-only" `apply_end_of_turn` call to consume the
+    // turn_number==0 case, so the battle's true FIRST decrementing turn also
+    // reads turn_number==0 here, and this guard alone would wrongly skip its
+    // decrement too (a genuine, fuzz-caught regression: a same-turn weather/
+    // terrain/screen set via a move or entry ability on turn 1 of a real battle
+    // silently gained one extra turn of belief-side duration, confirmed via
+    // `random_doubles_beliefs_stay_sound_subset`'s `Statement::WeatherTurns`
+    // violations). Gate on `ctx.move_users_this_turn` too — populated by every
+    // `MoveUsed`/`Cant`/`MustRecharge`/`ChargingMove`/`SingleMoveOrTurn` this
+    // same turn segment, cleared only AFTER this same `EndOfTurn` event finishes
+    // processing (see `process_battle_event`) — so it still reflects the whole
+    // turn's actions at this point. A tracker `leads`-only turn genuinely commits
+    // no move action, so it stays empty; a battle's real first turn (even at
+    // turn_number==0) never does.
+    let is_battle_start_setup = state.turn_number == 0 && ctx.move_users_this_turn.is_empty();
 
     // ── Decrement field timers and detect Possibly→Known collapses (I-A) ─────
     //

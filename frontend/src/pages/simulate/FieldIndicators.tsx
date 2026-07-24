@@ -22,14 +22,16 @@ const EFFECT_COLORS: Record<string, string> = {
   Tailwind: 'bg-teal-500/70 text-white',
 }
 
-/** "(5)" once collapsed to an exact value, "(5-8)" while fog-of-war still
+/** "(5)" once collapsed to an exact value, "(5 or 8)" while fog-of-war still
  * leaves the effect's setter's item (an extension rock or not) unrevealed —
  * never narrower than the belief's actual candidate range, see
- * `NamedTurns`'s doc comment. */
+ * `NamedTurns`'s doc comment. Exactly two discrete possibilities, not a
+ * continuous span, so "5 or 8" reads correctly where "5-8" would wrongly
+ * imply every value in between is also possible. */
 function turnsLabel(effect: NamedTurns): string {
   if (effect.turns === undefined) return ''
   if (effect.turnsMax !== undefined && effect.turnsMax !== effect.turns) {
-    return ` (${effect.turns}-${effect.turnsMax})`
+    return ` (${effect.turns} or ${effect.turnsMax})`
   }
   return ` (${effect.turns})`
 }

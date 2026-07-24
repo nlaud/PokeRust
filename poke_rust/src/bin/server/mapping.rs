@@ -490,8 +490,23 @@ pub fn battle_view_from_belief(
     brought_per_side: u8,
     legal_items: Option<&HashSet<Item>>,
 ) -> BattleView {
+    // Tracker mode has no engine driving turns to completion, so nothing else
+    // ever flips `phase`/`winner` to a terminal state the way `MatchState`'s
+    // own `GameOverState` variant does in battle mode — this belief-only
+    // check (`tracker::side_eliminated`, sound under fog: a still-possible
+    // unrevealed reserve keeps a side "not eliminated") is what makes a
+    // tracker session actually end when one side is wiped out. A double
+    // knockout (both sides eliminated the same turn) has no sound winner to
+    // report, so it falls back to `Normal` rather than guess.
+    let p1_eliminated = crate::tracker::side_eliminated(belief, Player::P1, active_per_side);
+    let p2_eliminated = crate::tracker::side_eliminated(belief, Player::P2, active_per_side);
+    let (phase, winner) = match (p1_eliminated, p2_eliminated) {
+        (true, false) => (PhaseDto::GameOver, Some(player_dto(Player::P2))),
+        (false, true) => (PhaseDto::GameOver, Some(player_dto(Player::P1))),
+        _ => (PhaseDto::Normal, None),
+    };
     BattleView {
-        phase: PhaseDto::Normal,
+        phase,
         turn_number: belief.turn_number,
         active_per_side,
         brought_per_side,
@@ -500,7 +515,7 @@ pub fn battle_view_from_belief(
         p2: Some(side_view_from_belief(belief, Player::P2, legal_items)),
         field: Some(field_view_from_belief(belief)),
         self_switch: None,
-        winner: None,
+        winner,
         belief: Some(BeliefView {
             clauses: belief
                 .predicates

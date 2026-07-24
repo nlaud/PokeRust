@@ -42,6 +42,19 @@ interface TrackerStore {
   /** The in-progress turn's parsed events, for rendering "in progress" log
    * lines the same way a committed turn's events render. */
   previewEvents: EventNode[]
+  /** Non-blocking (yellow) advisory: set when the most recent `previewDraft`
+   * call left the rendered event tree structurally UNCHANGED from before it —
+   * i.e. the line just committed/edited had no observable effect (a
+   * synthesis "already active" no-op, a redundant re-statement of something
+   * already true, …). Deliberately a whole-tree comparison rather than
+   * attempting to attribute "no effect" to one specific source line: folding
+   * (`leads`, an ability reveal right after a switch) can legitimately merge
+   * two lines' worth of content into one event, so a per-line event COUNT
+   * would false-positive on the earlier of the two merged lines — comparing
+   * the actual rendered result sidesteps that entirely. `null` when the last
+   * change did visibly register, or there's nothing to compare yet. This is
+   * advisory only — it never blocks a submission the way `error` does. */
+  lastLineWarning: string | null
   /** Set from a failed submission — either a parse error (`errorLine` set)
    * or an inference contradiction / network failure (`errorLine` null). */
   error: string | null
@@ -75,6 +88,18 @@ interface TrackerStore {
    * comment on the Rust side for why a full rebuild (not a targeted patch) is
    * required. Returns `true` on success. */
   editCommitted: (turnIndex: number, lineIndex: number, newText: string) => Promise<boolean>
+  /** "Reopen the last committed turn" (Shift+Escape): actually rebuilds the
+   * session via `PUT /history` with that turn dropped from the script — not a
+   * local-only pop — so `session.belief` (and therefore live `previewDraft`
+   * calls while the user re-edits those lines) genuinely reflects the state
+   * BEFORE that turn, instead of double-applying it. `rebuild_tracker_history`
+   * explicitly documents an empty/truncated script as a valid end state, so
+   * abandoning the reopened turn without recommitting it (e.g. leaving the
+   * page) just leaves the session one turn shorter — never lost mid-state.
+   * Returns the popped turn's content lines (for loading into the draft) or
+   * `null` if there was nothing committed to reopen, or on failure (`error`/
+   * `errorLine` set the same way `endTurn`/`editCommitted` do). */
+  popLastCommittedTurn: () => Promise<string[] | null>
   clearError: () => void
 }
 
@@ -107,6 +132,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
   completions: { species: [], moves: [], abilities: [], items: ITEM_LABELS },
   previewView: null,
   previewEvents: [],
+  lastLineWarning: null,
   error: null,
   errorLine: null,
   busy: false,
@@ -126,6 +152,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         completions,
         previewView: null,
         previewEvents: [],
+        lastLineWarning: null,
         busy: false,
       })
     } catch (err) {
@@ -159,6 +186,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
       committedTurns: [],
       previewView: null,
       previewEvents: [],
+      lastLineWarning: null,
       error: null,
       errorLine: null,
     })
@@ -186,14 +214,27 @@ export const useTracker = create<TrackerStore>((set, get) => ({
   },
 
   previewDraft: async (lines) => {
-    const { trackerId } = get()
+    const { trackerId, previewEvents: eventsBefore } = get()
     if (!trackerId || lines.length === 0) {
-      set({ previewView: null, previewEvents: [] })
+      set({ previewView: null, previewEvents: [], lastLineWarning: null })
       return
     }
     try {
       const response = await api.previewTrackerEvents(trackerId, { text: lines.join('\n') })
-      set({ previewView: response.state, previewEvents: response.events })
+      // Advisory-only "did that line actually do anything" check: if the
+      // rendered event tree is byte-for-byte identical to what it was before
+      // this call, whatever changed in the draft (a new line, an edit) had no
+      // observable effect — a synthesis "already active" no-op, or a
+      // re-statement of something already true. Compared as serialized JSON
+      // rather than per-source-line, since folding (`leads`, an ability
+      // reveal right after a switch) can legitimately merge two lines into
+      // one event — a per-line count would misfire on the earlier of the two.
+      const unchanged = JSON.stringify(response.events) === JSON.stringify(eventsBefore)
+      set({
+        previewView: response.state,
+        previewEvents: response.events,
+        lastLineWarning: unchanged ? 'That line had no visible effect.' : null,
+      })
     } catch {
       // A partial, still-being-typed line can easily fail to parse mid-word —
       // that's expected and not an error worth surfacing; just hold the last
@@ -201,7 +242,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
     }
   },
 
-  clearPreview: () => set({ previewView: null, previewEvents: [] }),
+  clearPreview: () => set({ previewView: null, previewEvents: [], lastLineWarning: null }),
 
   endTurn: async (lines) => {
     const { trackerId, committedTurns } = get()
@@ -218,6 +259,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         committedTurns: splitScriptIntoTurns(response.script),
         previewView: null,
         previewEvents: [],
+        lastLineWarning: null,
         busy: false,
       })
       return true
@@ -243,6 +285,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         committedTurns: splitScriptIntoTurns(response.script),
         previewView: null,
         previewEvents: [],
+        lastLineWarning: null,
         busy: false,
       })
       return true
@@ -250,6 +293,32 @@ export const useTracker = create<TrackerStore>((set, get) => ({
       const line = err instanceof TrackerParseApiError ? err.line : null
       set({ error: err instanceof Error ? err.message : String(err), errorLine: line, busy: false })
       return false
+    }
+  },
+
+  popLastCommittedTurn: async () => {
+    const { trackerId, committedTurns } = get()
+    if (!trackerId || committedTurns.length === 0) return null
+    const popped = committedTurns[committedTurns.length - 1]
+    const remaining = committedTurns.slice(0, -1)
+    set({ busy: true, error: null, errorLine: null })
+    try {
+      const response = await api.rebuildTrackerHistory(trackerId, { text: remaining.join('\n') })
+      preloadTrackerSprites(response.state)
+      set({
+        view: response.state,
+        log: response.log,
+        committedTurns: splitScriptIntoTurns(response.script),
+        previewView: null,
+        previewEvents: [],
+        lastLineWarning: null,
+        busy: false,
+      })
+      return contentLinesOf(popped)
+    } catch (err) {
+      const line = err instanceof TrackerParseApiError ? err.line : null
+      set({ error: err instanceof Error ? err.message : String(err), errorLine: line, busy: false })
+      return null
     }
   },
 

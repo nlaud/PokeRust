@@ -1392,9 +1392,24 @@ mod tests {
         // already-burned target). It deliberately suppresses augmentation but
         // is not a simulator observation in that case, so remove precisely
         // those renderer-introduced markers from the semantic comparison.
+        //
+        // Must thread a turn-scoped `scratch` belief through `original` in
+        // order, exactly like `render_turn` does (see its doc comment) —
+        // `belief` alone is the PRE-turn belief, so a target that switched in
+        // earlier the SAME turn (not yet live in `belief`) would wrongly be
+        // treated as not-yet-live here too, and `missing_guaranteed_status_
+        // blockers` would return nothing for it even though the renderer (which
+        // DOES thread scratch) correctly emitted the marker. Compute each
+        // event's markers against scratch-so-far, THEN fold that event in —
+        // same order `render_turn` uses — so the two stay in lockstep.
+        let mut scratch = belief.clone();
         for event in original {
+            if matches!(event.kind, EventKind::EndOfTurn) {
+                fold_event_into_synthesis_scratch(&mut scratch, event, pokemon_dex());
+                continue;
+            }
             for (target, _) in
-                missing_guaranteed_status_blockers(event, belief, move_dex(), pokemon_dex())
+                missing_guaranteed_status_blockers(event, &scratch, move_dex(), pokemon_dex())
             {
                 let signature = format!("Blocked {{ target: {target:?} }}");
                 let position = actual
@@ -1405,6 +1420,7 @@ mod tests {
                     });
                 actual.remove(position);
             }
+            fold_event_into_synthesis_scratch(&mut scratch, event, pokemon_dex());
         }
         assert_eq!(
             actual, expected,
