@@ -439,3 +439,16 @@ export interface TrackerCompletionsDto {
   moves: string[]
   abilities: string[]
 }
+
+/** `GET /api/dex/species` response — every teamsheet-legal species,
+ * alphabetically, as display names.
+ *
+ * Session-free, unlike `TrackerCompletionsDto`: this backs the tracker SETUP
+ * form's opponent picker, which runs before any session exists. It's also the
+ * one place a full dex dump is correct — the user is naming arbitrary
+ * opponents, not picking from a known roster. Battle-only formes (Mega, Primal,
+ * Ash-Greninja, …) are filtered server-side, since they can never appear on a
+ * sheet. */
+export interface SpeciesListDto {
+  species: string[]
+}

@@ -507,6 +507,22 @@ fn handle_semi_invulnerable_first_turn(
         }
     }
 
+    // Same event `handle_charging_first_turn` emits for the pure-charge family
+    // (Solar Beam, Meteor Beam, Skull Bash, …). This path used to emit nothing at
+    // all, so an observer saw a bare `MoveUsed { Fly }` with no reactions and had no
+    // way to tell a takeoff from a landing — a blind spot across all seven
+    // semi-invulnerable moves (Bounce, Dig, Dive, Fly, Phantom Force, Shadow Force,
+    // Sky Drop), and the reason tracker text could never agree with a battle log for
+    // half the two-turn moves. Inference treats it idempotently: it only reveals the
+    // move on the mon, which the enclosing `MoveUsed` already did.
+    simulator_helpers::emit(
+        next_state,
+        EventKind::ChargingMove {
+            user: action.user_slot,
+            move_used: action.move_name.clone(),
+        },
+    );
+
     Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)])
 }
 

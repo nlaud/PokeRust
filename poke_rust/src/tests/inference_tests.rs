@@ -10159,6 +10159,78 @@ fn test_tailwind_timer_is_known_4() {
     );
 }
 
+/// A second/third layer of Spikes must update the belief's existing entry in
+/// place, not stack a duplicate row.
+///
+/// `helpers::add_side_condition` used to return a bare bool and emit
+/// `SideConditionStart` only for the FIRST layer, so the belief stayed pinned at
+/// `Spikes(1)` however many the opponent stacked — and `materialize` copies
+/// `pN_side_conditions` verbatim into the concrete state the damage calc runs on,
+/// so switch-in hazard damage was under-predicted. It now emits the post-increment
+/// value, which means this handler has to match by discriminant and overwrite.
+#[test]
+fn test_spikes_layers_update_belief_in_place() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::SideConditionStart {
+                side: Player::P2,
+                condition: SideCondition::Spikes(1),
+            }),
+            event(EventKind::SideConditionStart {
+                side: Player::P2,
+                condition: SideCondition::Spikes(2),
+            }),
+        ],
+    );
+    assert_eq!(
+        result.p2_side_conditions,
+        vec![SideCondition::Spikes(2)],
+        "a second Spikes must overwrite the existing entry, not push a duplicate"
+    );
+    assert_eq!(
+        result.p2_side_condition_turns.len(),
+        1,
+        "the parallel turns vec must stay in lockstep with the conditions vec"
+    );
+}
+
+/// Clearing entry hazards must remove them from the belief even though the clear
+/// event carries a placeholder layer count.
+///
+/// `helpers::remove_side_condition` removes by discriminant but emits the CALLER's
+/// value, and every hazard-clear site passes a placeholder (`Spikes(0)` for Rapid
+/// Spin / Defog / Court Change). The handler used to remove by exact equality, so
+/// `Spikes(0)` never matched the stored `Spikes(1..=3)` and the belief kept a
+/// phantom hazard stack forever.
+#[test]
+fn test_hazard_clear_removes_spikes_despite_placeholder_layer_count() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::SideConditionStart {
+                side: Player::P2,
+                condition: SideCondition::Spikes(1),
+            }),
+            event(EventKind::SideConditionEnd {
+                side: Player::P2,
+                condition: SideCondition::Spikes(0),
+            }),
+        ],
+    );
+    assert!(
+        result.p2_side_conditions.is_empty(),
+        "spun-away Spikes must leave the belief; got {:?}",
+        result.p2_side_conditions
+    );
+    assert!(
+        result.p2_side_condition_turns.is_empty(),
+        "the parallel turns vec must be popped alongside the condition"
+    );
+}
+
 /// Trick Room must be modelled as exactly 5 turns.
 #[test]
 fn test_trick_room_timer_is_known_5() {

@@ -7561,7 +7561,17 @@ pub fn add_side_condition(
 ) {
     // Use a block scope so that the mutable borrows of the per-side vecs are
     // released before calling `emit`, which also needs `&mut state`.
-    let added = {
+    //
+    // `Some(c)` = emit `SideConditionStart` for `c`. For a layered hazard `c` is the
+    // condition at its NEW layer count (`Spikes(2)`, not the `Spikes(1)` that was
+    // passed in), because a second Spikes is every bit as observable as the first and
+    // the fog-of-war belief has no other way to learn the layer went up — it folds the
+    // event's own payload straight into `UnknownBattleState::pN_side_conditions`
+    // (`inference.rs`), which `materialize.rs` then copies into the concrete state the
+    // damage calc runs on. While this returned a bare bool, layers 2 and 3 were silent
+    // and the belief stayed pinned at one layer forever, under-predicting switch-in
+    // hazard damage.
+    let emitted: Option<SideCondition> = {
         let (conditions, turns) = match player {
             Player::P1 => (
                 &mut state.p1_side_conditions,
@@ -7585,14 +7595,21 @@ pub fn add_side_condition(
                 .iter_mut()
                 .find(|sc| std::mem::discriminant(*sc) == std::mem::discriminant(&condition))
             {
-                if let SideCondition::Spikes(n) | SideCondition::ToxicSpikes(n) = existing {
-                    *n = (*n + 1).min(cap);
+                // Incremented an existing layer. Already at the cap means the move
+                // failed and nothing changed — stay silent there, so a capped repeat
+                // never emits a no-op `SideConditionStart`.
+                if let SideCondition::Spikes(n) | SideCondition::ToxicSpikes(n) = existing
+                    && *n < cap
+                {
+                    *n += 1;
+                    Some(existing.clone())
+                } else {
+                    None
                 }
-                false // incremented existing layer — not a new entry
             } else {
                 conditions.push(condition.clone());
                 turns.push(duration);
-                true // new entry
+                Some(condition.clone()) // new entry
             }
         } else {
             // Single-layer conditions: reject duplicates by discriminant.
@@ -7600,16 +7617,16 @@ pub fn add_side_condition(
                 .iter()
                 .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
             {
-                false // duplicate — not added
+                None // duplicate — not added
             } else {
                 conditions.push(condition.clone());
                 turns.push(duration);
-                true // new entry
+                Some(condition.clone()) // new entry
             }
         }
     }; // per-side borrows dropped here
 
-    if added {
+    if let Some(condition) = emitted {
         emit(
             state,
             EventKind::SideConditionStart {
@@ -8470,6 +8487,13 @@ fn get_side_condition_duration(condition: &SideCondition) -> u8 {
         | SideCondition::StealthRock
         | SideCondition::StickyWeb(_)
         | SideCondition::ToxicSpikes(_) => 0,
+        // Tailwind lasts 4 turns (Gen V+), including the turn it is used — it is NOT
+        // extended by Light Clay (that item only touches Reflect / Light Screen /
+        // Aurora Veil), so 4 is flat and fully known to both players. Must stay in
+        // sync with `information::inference::side_condition_timer`'s
+        // `TailWind => Known(4)`; without this arm Tailwind fell through to the
+        // 5-turn default below and the engine disagreed with its own belief.
+        SideCondition::TailWind => 4,
         // Default duration (5 turns): Reflect, Light Screen, Aurora Veil, Safeguard, Mist, etc.
         _ => 5,
     }

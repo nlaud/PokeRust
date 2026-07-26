@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { listSpecies } from '../../api/client'
 import Select from '../../components/common/Select'
 import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadFormats, loadTeams, type StoredFormat } from '../../lib/storage'
 import { useTracker } from '../../store/trackerStore'
+import SpeciesPicker from './SpeciesPicker'
 
 /** Mirrors `pages/simulate/SetupPanel.tsx`'s `legalItemsFor`. */
 function legalItemsFor(format: StoredFormat): string[] {
@@ -22,7 +24,7 @@ type TrackerInfoMode = (typeof INFO_MODE_OPTIONS)[number]['value']
  * matches what the selected mode can actually see. */
 const OPPONENT_HINT: Record<TrackerInfoMode, string> = {
   closedSheet:
-    'Just species — paste 6 comma-separated names (e.g. Garchomp, Landorus, Incineroar, ...) or a teamsheet; item/ability/moves/nature are hidden either way.',
+    "Just species — pick or paste the opponent's roster; item/ability/moves/nature stay hidden either way.",
   openSheet:
     'A full teamsheet: species @ item, ability, and moves are visible under Open Team Sheet — nature and EVs/IVs stay hidden.',
   openSheetNatures:
@@ -59,17 +61,53 @@ export default function TrackerSetupPanel() {
   const [teamId, setTeamId] = useState(sortedTeams[0]?.id ?? '')
   const [informationMode, setInformationMode] = useState<TrackerInfoMode>('closedSheet')
   const [opponent, setOpponent] = useState('')
+  // Closed sheet only ever names species, so it gets a validated chip picker
+  // instead of the textarea (see `SpeciesPicker`). Kept as separate state from
+  // `opponent` so switching modes back and forth doesn't destroy either one.
+  const [opponentSpecies, setOpponentSpecies] = useState<string[]>([])
+  const [speciesCatalog, setSpeciesCatalog] = useState<string[]>([])
+  const [speciesLoading, setSpeciesLoading] = useState(true)
+
+  // One fetch for the whole page — the list is static dex data, and the picker
+  // is unusable without it.
+  useEffect(() => {
+    let cancelled = false
+    listSpecies()
+      .then((res) => {
+        if (!cancelled) setSpeciesCatalog(res.species)
+      })
+      .catch(() => {
+        // Non-fatal: the picker degrades to accepting nothing, and the user can
+        // switch to a sheet mode. The real failure surfaces on submit.
+      })
+      .finally(() => {
+        if (!cancelled) setSpeciesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const format = formats.find((f) => f.id === formatId)
   const team = teams.find((t) => t.id === teamId)
-  const ready = format && team && opponent.trim().length > 0
+  const usesPicker = informationMode === 'closedSheet'
+  // The server requires at least `broughtPerSide` parseable Pokemon
+  // (`tracker.rs::create_tracker`), so gate on exactly that rather than a fixed
+  // 6 — a real closed sheet shows the whole roster, but a Bo3 game 2 might not.
+  const minSpecies = format?.broughtPokemon ?? 0
+  const opponentReady = usesPicker
+    ? opponentSpecies.length >= minSpecies && minSpecies > 0
+    : opponent.trim().length > 0
+  const ready = format && team && opponentReady
 
   const start = () => {
     if (!ready || !format || !team) return
     clearError()
     void create({
       myTeam: team.sheet,
-      opponent,
+      // `normalize_opponent_text` already splits a single comma-separated line
+      // into per-mon blocks, so the picker needs no API change of its own.
+      opponent: usesPicker ? opponentSpecies.join(', ') : opponent,
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
       forceMaxIvs: format.forceMaxIvs,
@@ -105,18 +143,28 @@ export default function TrackerSetupPanel() {
           />
         </label>
 
-        <label className="mb-6 block text-sm">
+        <div className="mb-6 block text-sm">
           <span className="mb-1 block font-medium">Opponent</span>
-          <textarea
-            value={opponent}
-            onChange={(e) => setOpponent(e.target.value)}
-            rows={7}
-            spellCheck={false}
-            placeholder={OPPONENT_PLACEHOLDER[informationMode]}
-            className="w-full resize-none rounded-card border border-subtle bg-card px-3 py-2 font-mono text-xs"
-          />
+          {usesPicker ? (
+            <SpeciesPicker
+              value={opponentSpecies}
+              catalog={speciesCatalog}
+              minCount={minSpecies}
+              loading={speciesLoading}
+              onChange={setOpponentSpecies}
+            />
+          ) : (
+            <textarea
+              value={opponent}
+              onChange={(e) => setOpponent(e.target.value)}
+              rows={7}
+              spellCheck={false}
+              placeholder={OPPONENT_PLACEHOLDER[informationMode]}
+              className="w-full resize-none rounded-card border border-subtle bg-card px-3 py-2 font-mono text-xs"
+            />
+          )}
           <span className="mt-1 block text-[11px] text-ink-muted">{OPPONENT_HINT[informationMode]}</span>
-        </label>
+        </div>
 
         {teams.length === 0 && (
           <p className="mb-4 text-sm text-warning">

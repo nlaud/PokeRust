@@ -668,12 +668,43 @@ fn augment_with_live_slots(
             move_used,
             targets,
         } => {
-            if let Some(md) = move_dex.get(move_used)
+            // A charge turn does none of the move's real work: Geomancy's
+            // +2/+2/+2, Sky Attack's flinch, Solar Beam's damage all land on the
+            // RELEASE turn. Synthesizing them here fabricated them a turn early and
+            // then again on release, double-counting.
+            //
+            // The trigger is the user having explicitly typed `charging`, NOT the
+            // move carrying a `charge` flag — which is what makes this correct for
+            // free in every skip-the-charge case: sun skips Solar Beam's charge, rain
+            // skips Electro Shot's, and Power Herb skips all but Sky Drop. Those are
+            // typed as ordinary one-turn move lines with no `charging` marker, so
+            // they keep synthesizing normally and the tracker needs no weather or
+            // item modelling of its own.
+            if is_charge_turn(&event.reactions, *user) {
+                // What the charge turn DOES do: the handful of moves that boost while
+                // winding up. Mirrors `simulator/mod.rs`'s
+                // `handle_charging_and_semi_invulnerability`, including its
+                // suppress-when-already-capped behaviour (via `adjusted_boost_delta`).
+                // Geomancy is deliberately absent — its boosts are the release turn's
+                // `self_boost`.
+                if let Some((boost_idx, stages)) = charge_turn_boost(move_used) {
+                    let delta = adjusted_boost_delta(belief, *user, boost_idx, stages);
+                    if delta != 0 {
+                        event.reactions.push(leaf(EventKind::BoostChanged {
+                            target: *user,
+                            boost_idx,
+                            stages: delta,
+                        }));
+                    }
+                }
+            } else if let Some(md) = move_dex.get(move_used)
                 && !move_failed_at_all(&event.reactions)
             {
                 let connected_somewhere = targets.is_empty()
                     || targets.iter().any(|target| {
-                        live_slots.contains(target) && !target_has_failed(&event.reactions, *target)
+                        live_slots.contains(target)
+                            && !target_has_failed(&event.reactions, *target)
+                            && !is_semi_invulnerable(belief, *target)
                     });
                 if connected_somewhere {
                     for (idx, &delta) in md.self_boost.iter().enumerate() {
@@ -735,6 +766,7 @@ fn augment_with_live_slots(
                     for &target in secondary_targets {
                         if live_slots.contains(&target)
                             && !target_has_failed(&event.reactions, target)
+                            && !is_semi_invulnerable(belief, target)
                         {
                             synthesize_per_mon_effects(
                                 &mut event.reactions,
@@ -791,6 +823,61 @@ fn move_failed_at_all(reactions: &[InformationEvent]) -> bool {
     reactions
         .iter()
         .any(|r| matches!(r.kind, EventKind::MoveFailed { .. }))
+}
+
+/// Is this `MoveUsed` the CHARGE turn of a two-turn move — i.e. did the user
+/// explicitly type `charging` for this slot?
+///
+/// Deliberately keyed on the typed marker rather than on the move carrying a
+/// `charge` flag. Every skip-the-charge case then falls out for free: harsh sun
+/// skips Solar Beam's and Solar Blade's charge, rain skips Electro Shot's, and
+/// Power Herb skips all of them except Sky Drop. Those are typed as ordinary
+/// one-turn move lines with no `charging` token, so they still synthesize the
+/// move's real effects — and the tracker needs no weather or item modelling to
+/// get that right.
+///
+/// Presence-checked rather than slot-matched in the same spirit as
+/// `move_failed_at_all`, but scoped to the user: `charging` is only ever
+/// meaningful for the mon using the move.
+fn is_charge_turn(reactions: &[InformationEvent], user: FieldSlot) -> bool {
+    reactions
+        .iter()
+        .any(|r| matches!(r.kind, EventKind::ChargingMove { user: u, .. } if u == user))
+}
+
+/// The stat boost a move grants on its CHARGE turn (not its release turn), as
+/// `(boost_idx, stages)`.
+///
+/// Mirrors `simulator/mod.rs::handle_charging_and_semi_invulnerability`. Geomancy is
+/// deliberately absent: it charges silently and its +2 SpA/SpD/Spe is the release
+/// turn's ordinary `self_boost`, which the normal synthesis path already handles.
+fn charge_turn_boost(move_used: &PokemonMove) -> Option<(usize, i8)> {
+    match move_used {
+        // boosts[2] = Special Attack.
+        PokemonMove::ElectroShot | PokemonMove::MeteorBeam => Some((2, 1)),
+        // boosts[1] = Defense.
+        PokemonMove::SkullBash => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// Is `slot` currently off the field mid-charge (Fly, Dig, Dive, Bounce, Phantom
+/// Force, Shadow Force, Sky Drop)? Nothing aimed at it connects, so no guaranteed
+/// on-hit effect should be synthesized against it.
+///
+/// The volatile is put on the belief by the inference engine's `ChargingMove`
+/// handler and taken off by the matching release `MoveUsed`, so this stays correct
+/// across the turn boundary — the takeoff and the landing are different turns, and a
+/// per-turn scratch flag could only ever have covered one of them.
+fn is_semi_invulnerable(belief: &UnknownBattleState, slot: FieldSlot) -> bool {
+    mon_at(belief, slot).is_some_and(|mon| {
+        mon.volatiles.iter().any(|v| {
+            matches!(
+                v,
+                VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
+            )
+        })
+    })
 }
 
 /// True if `target` already has a recorded `Missed`/`Immune`/`Blocked` among

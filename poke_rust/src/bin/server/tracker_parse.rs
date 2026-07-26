@@ -16,7 +16,11 @@
 //!   this stays sound; it is just less legible than simulator output would be.
 //! - **Explicit targets required.** Every targeted move must name its
 //!   target slot(s) explicitly (matches every example in the design doc); no
-//!   singles auto-target inference.
+//!   singles auto-target inference. The one exception is a **charge turn**
+//!   (`o1 solarbeam charging`): the charge step frequently reveals no target at
+//!   all — "Charizard flew up high!" names nobody — so `charging` lines are
+//!   allowed to carry an empty target list, and the release turn a turn later
+//!   records the target normally. A target may still be given if it IS known.
 //! - **Leads are an event, not a pre-game pick.**
 //!   `leads [p|o] <species>... [p|o] <species>...` sends out one or both
 //!   sides' opening (or simultaneous post-faint replacement) leads together
@@ -1072,6 +1076,22 @@ fn parse_line(
         }));
     }
 
+    // `[slot] charging <move>` — an INPUT ALIAS, kept because it reads naturally and
+    // predates the canonical form. It desugars to the same tree the canonical
+    // `[slot] <move> charging` produces (see `parse_move_line`'s `charging` arm): a
+    // `MoveUsed` wrapping a `ChargingMove` reaction. That shape is not cosmetic — it
+    // is exactly what the engine emits, because `execute_action` folds everything a
+    // move emitted into `MoveUsed.reactions`, so a top-level bare `ChargingMove` can
+    // never occur in a battle-mode log. Keeping one canonical tree is what lets
+    // `tracker_render.rs` render a charge turn back to text at all (a top-level
+    // `ChargingMove` has no renderer) and lets tracker text round-trip with a real
+    // battle log.
+    //
+    // `targets` is deliberately empty: on a charge turn you usually cannot tell what
+    // the opponent aimed at — "Charizard flew up high!" names no target — and the
+    // release turn reveals it. Inference is fine with that; the structural pass
+    // ignores `MoveUsed`'s targets and the damage->stat-bounds pass only engages when
+    // there is damage, which a charge turn has none of.
     if action_n == "charging" {
         let move_tok = tokens
             .get(2)
@@ -1081,11 +1101,15 @@ fn parse_line(
             return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
         }
         return Ok(TrackerLine::Event(InformationEvent {
-            kind: EventKind::ChargingMove {
+            kind: EventKind::MoveUsed {
+                user: slot,
+                move_used: move_used.clone(),
+                targets: Vec::new(),
+            },
+            reactions: vec![leaf(EventKind::ChargingMove {
                 user: slot,
                 move_used,
-            },
-            reactions: Vec::new(),
+            })],
         }));
     }
 
@@ -1313,6 +1337,7 @@ fn parse_line(
             line_no,
             belief,
             hp_readings,
+            move_dex,
         );
     }
 
@@ -1465,6 +1490,7 @@ fn parse_move_line(
     line_no: usize,
     belief: &UnknownBattleState,
     hp_readings: &mut HashMap<FieldSlot, PokemonHP>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Result<TrackerLine, ParseError> {
     let mut targets: Vec<FieldSlot> = Vec::new();
     let mut children: Vec<InformationEvent> = Vec::new();
@@ -1512,17 +1538,36 @@ fn parse_move_line(
         } else if n == "mustrecharge" {
             children.push(leaf(EventKind::MustRecharge { slot: current }));
         } else if n == "charging" {
-            i += 1;
-            let move_tok = rest
-                .get(i)
-                .ok_or_else(|| err(line_no, format!("'{tok}' requires a move name")))?;
-            let charging_move = PokemonMove::from_str(move_tok);
-            if matches!(charging_move, PokemonMove::Unknown(_)) {
-                return Err(err(line_no, format!("unrecognized move '{move_tok}'")));
+            // The move name is OPTIONAL here — `o1 solarbeam charging` is the
+            // canonical form. A charge turn's `ChargingMove` always names the same
+            // move as its enclosing `MoveUsed` (see `handle_charging_first_turn` in
+            // `simulator/mod.rs`, which emits `action.move_name` verbatim), so
+            // repeating it carries no information. The redundant spelling
+            // `o1 solarbeam charging solarbeam` is still accepted, both for
+            // backwards compatibility and because it's what a naive reading of the
+            // grammar suggests.
+            //
+            // Only consume the next token when it names THIS line's move: anything
+            // else there is a following effect token (`p2`, `crit`, …) that the main
+            // loop must still see. A different real move name is a typo, not a
+            // second charge, so it's rejected outright rather than silently ignored.
+            if let Some(next) = rest.get(i + 1) {
+                let next_move = PokemonMove::from_str(next);
+                if next_move == move_used {
+                    i += 1;
+                } else if move_dex.contains_key(&next_move) {
+                    return Err(err(
+                        line_no,
+                        format!(
+                            "'charging {next}' does not match this line's move \
+                             '{move_used:?}' — a charge turn always charges the move being used"
+                        ),
+                    ));
+                }
             }
             children.push(leaf(EventKind::ChargingMove {
                 user: current,
-                move_used: charging_move,
+                move_used: move_used.clone(),
             }));
         } else if n == "illusion" || n == "illusionended" {
             i += 1;
@@ -2020,6 +2065,151 @@ mod tests {
         assert_eq!(targets, &[o1()]);
     }
 
+    /// Every spelling of a charge turn must land on ONE canonical tree: a
+    /// `MoveUsed` wrapping a `ChargingMove`, with NO targets.
+    ///
+    /// The shape matters because it's what the engine itself emits —
+    /// `execute_action` folds everything a move emitted into `MoveUsed.reactions`,
+    /// so a top-level bare `ChargingMove` never occurs in a battle log and has no
+    /// renderer. The empty target list is the user-facing point: on the charge turn
+    /// you often can't tell what they aimed at ("Charizard flew up high!" names no
+    /// target), so the grammar must not demand one.
+    #[test]
+    fn charging_spellings_all_produce_one_canonical_tree() {
+        let belief = test_belief();
+
+        for text in [
+            "o1 solarbeam charging",          // canonical: bare qualifier, no target
+            "o1 solarbeam charging solarbeam", // redundant but accepted
+            "o1 charging solarbeam",          // standalone alias, desugared
+        ] {
+            let lines = parse_tracker_text(text, &belief, move_dex(), pokemon_dex())
+                .unwrap_or_else(|e| panic!("{text:?} should parse: {e:?}"));
+            assert_eq!(lines.len(), 1, "{text:?}");
+            let TrackerLine::Event(ev) = &lines[0] else {
+                panic!("{text:?}: expected an event line")
+            };
+            let EventKind::MoveUsed {
+                user,
+                move_used,
+                targets,
+            } = &ev.kind
+            else {
+                panic!("{text:?}: expected MoveUsed, got {:?}", ev.kind)
+            };
+            assert_eq!(*user, o1(), "{text:?}");
+            assert_eq!(*move_used, PokemonMove::SolarBeam, "{text:?}");
+            assert!(
+                targets.is_empty(),
+                "{text:?}: a charge turn must not claim a target, got {targets:?}"
+            );
+            assert!(
+                matches!(
+                    ev.reactions.as_slice(),
+                    [
+                        InformationEvent {
+                            kind: EventKind::ChargingMove {
+                                move_used: PokemonMove::SolarBeam,
+                                ..
+                            },
+                            ..
+                        }
+                    ]
+                ),
+                "{text:?}: expected exactly one ChargingMove reaction, got {:?}",
+                ev.reactions
+            );
+        }
+    }
+
+    /// A charge turn must survive parse -> render -> parse unchanged.
+    ///
+    /// This is what `PUT /api/tracker/{id}/history` does on every edit: it re-renders
+    /// the committed events back to text and replays them. Before the canonical
+    /// `MoveUsed`-wrapping-`ChargingMove` shape existed, `o1 charging solarbeam`
+    /// parsed to a bare top-level `ChargingMove`, which has no top-level renderer —
+    /// so authoring a charge turn and then editing any earlier turn hard-failed the
+    /// rebuild.
+    #[test]
+    fn charge_turn_round_trips_through_the_renderer() {
+        let belief = test_belief();
+        let lines = parse_tracker_text("o1 solarbeam charging", &belief, move_dex(), pokemon_dex())
+            .unwrap();
+        let TrackerLine::Event(original) = lines.into_iter().next().unwrap() else {
+            panic!()
+        };
+
+        let text = crate::tracker_render::render_turn(
+            std::slice::from_ref(&original),
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .expect("a charge turn must be renderable");
+
+        let reparsed = parse_tracker_text(&text, &belief, move_dex(), pokemon_dex())
+            .unwrap_or_else(|e| panic!("re-parsing {text:?} failed: {e:?}"));
+        let TrackerLine::Event(decoded) = &reparsed[0] else {
+            panic!("expected an event line from {text:?}")
+        };
+        assert_eq!(
+            format!("{:?}", decoded.kind),
+            format!("{:?}", original.kind),
+            "rendered as {text:?}"
+        );
+        assert!(
+            matches!(
+                decoded.reactions.as_slice(),
+                [
+                    InformationEvent {
+                        kind: EventKind::ChargingMove {
+                            move_used: PokemonMove::SolarBeam,
+                            ..
+                        },
+                        ..
+                    }
+                ]
+            ),
+            "rendered as {text:?}, decoded reactions = {:?}",
+            decoded.reactions
+        );
+    }
+
+    /// A charge turn where the target IS known (singles, or the release was
+    /// obvious) still records it — `charging` is a qualifier, not a target ban.
+    #[test]
+    fn charging_still_accepts_an_explicit_target() {
+        let belief = test_belief();
+        let lines =
+            parse_tracker_text("p1 fly o1 charging", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = &lines[0] else {
+            panic!("expected an event line")
+        };
+        let EventKind::MoveUsed { targets, .. } = &ev.kind else {
+            panic!("expected MoveUsed, got {:?}", ev.kind)
+        };
+        assert_eq!(targets, &[o1()]);
+    }
+
+    /// `charging` naming a DIFFERENT real move is a typo, not a second charge —
+    /// a charge turn always charges the move being used, so this is rejected
+    /// rather than silently recorded as charging something else.
+    #[test]
+    fn charging_rejects_a_move_that_is_not_this_lines_move() {
+        let belief = test_belief();
+        let error = parse_tracker_text(
+            "o1 solarbeam charging razorwind",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("does not match this line's move"),
+            "expected a mismatch error, got {error:?}"
+        );
+    }
+
     #[test]
     fn switch_and_ability_and_item_lines() {
         let belief = test_belief();
@@ -2453,6 +2643,152 @@ mod tests {
                 stages,
             } if target == p1() && stages > 0
         )));
+    }
+
+    /// A charge turn must not fabricate the RELEASE turn's effects.
+    ///
+    /// Geomancy is the sharpest case: its +2 SpA/SpD/Spe is the move's ordinary
+    /// `self_boost`, which lands when it fires on turn two. Synthesis used to emit it
+    /// on the charge turn as well, so a tracked Geomancy user ended up +4/+4/+4.
+    #[test]
+    fn charge_turn_does_not_synthesize_the_release_turns_self_boost() {
+        let belief = test_belief();
+        let lines =
+            parse_tracker_text("p1 geomancy charging", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let augmented = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
+        assert!(
+            !augmented
+                .reactions
+                .iter()
+                .any(|r| matches!(r.kind, EventKind::BoostChanged { .. })),
+            "Geomancy charges silently — its boosts belong to the release turn; got {:?}",
+            augmented.reactions
+        );
+
+        // ...and the release turn (no `charging` marker) still gets them.
+        let lines = parse_tracker_text("p1 geomancy", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let released = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
+        assert!(
+            released
+                .reactions
+                .iter()
+                .filter(|r| matches!(r.kind, EventKind::BoostChanged { stages, .. } if stages > 0))
+                .count()
+                >= 3,
+            "Geomancy's release turn must still synthesize +SpA/+SpD/+Spe; got {:?}",
+            released.reactions
+        );
+    }
+
+    /// The moves that DO boost while winding up must have exactly that boost
+    /// synthesized — Meteor Beam / Electro Shot +1 SpA, Skull Bash +1 Def — mirroring
+    /// `simulator/mod.rs::handle_charging_and_semi_invulnerability`.
+    #[test]
+    fn charge_turn_synthesizes_the_charge_turn_boost() {
+        let belief = test_belief();
+        for (text, boost_idx) in [
+            ("p1 meteorbeam charging", 2usize),
+            ("p1 electroshot charging", 2),
+            ("p1 skullbash charging", 1),
+        ] {
+            let lines = parse_tracker_text(text, &belief, move_dex(), pokemon_dex())
+                .unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+            let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
+                panic!()
+            };
+            let augmented = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
+            let boosts: Vec<_> = augmented
+                .reactions
+                .iter()
+                .filter_map(|r| match r.kind {
+                    EventKind::BoostChanged {
+                        target,
+                        boost_idx: i,
+                        stages,
+                    } => Some((target, i, stages)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                boosts,
+                vec![(p1(), boost_idx, 1)],
+                "{text:?}: expected exactly one +1 charge-turn boost"
+            );
+        }
+    }
+
+    /// The suppression keys on the typed `charging` marker, NOT on the move carrying a
+    /// `charge` flag — which is what makes every skip-the-charge case fall out for
+    /// free, with no weather or item modelling in the tracker at all. Power Herb skips
+    /// the charge for every two-turn move but Sky Drop, harsh sun skips Solar
+    /// Beam's/Solar Blade's, rain skips Electro Shot's; all of them are typed as
+    /// ordinary one-turn move lines, so they must still synthesize normally.
+    ///
+    /// Power Herb Geomancy is the canonical case, and the one where getting this wrong
+    /// would hurt most: a suppressed +2/+2/+2 leaves the belief four stages of Speed
+    /// behind what's actually on the field.
+    #[test]
+    fn power_herb_one_turn_use_without_the_marker_still_synthesizes_normally() {
+        let belief = test_belief();
+        let lines = parse_tracker_text("p1 geomancy", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let augmented = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
+        let raised: Vec<_> = augmented
+            .reactions
+            .iter()
+            .filter_map(|r| match r.kind {
+                EventKind::BoostChanged {
+                    boost_idx, stages, ..
+                } if stages > 0 => Some(boost_idx),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            raised.len(),
+            3,
+            "Power Herb Geomancy resolves in one turn and must still get its \
+             +SpA/+SpD/+Spe; got {:?}",
+            augmented.reactions
+        );
+    }
+
+    /// Known limitation, pinned so it's a deliberate choice rather than a surprise:
+    /// the three moves whose charge-turn boost is hardcoded in the engine rather than
+    /// carried in the dex (Meteor Beam / Electro Shot +1 SpA, Skull Bash +1 Def — the
+    /// dex file expresses them in `onTryMove` JS, which `parse_move_entry` doesn't
+    /// read) get that boost synthesized ONLY when `charging` is typed.
+    ///
+    /// A Power Herb one-turn Meteor Beam does raise SpA in the real engine, but from
+    /// the tracker's side there is nothing to distinguish it from the release half of
+    /// a charge that was recorded a turn earlier — both are a bare `p1 meteorbeam o1`
+    /// — and synthesizing a boost that didn't happen is worse than omitting one the
+    /// user can type as `p1 meteorbeam o1 spa+1`.
+    #[test]
+    fn hardcoded_charge_boost_is_not_synthesized_without_the_marker() {
+        let belief = test_belief();
+        let lines =
+            parse_tracker_text("p1 meteorbeam o1", &belief, move_dex(), pokemon_dex()).unwrap();
+        let TrackerLine::Event(ev) = lines.into_iter().next().unwrap() else {
+            panic!()
+        };
+        let augmented = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
+        assert!(
+            !augmented
+                .reactions
+                .iter()
+                .any(|r| matches!(r.kind, EventKind::BoostChanged { .. })),
+            "without the marker this is indistinguishable from a release turn, so no \
+             boost is invented; got {:?}",
+            augmented.reactions
+        );
     }
 
     /// Regression for the "volatiles should use default time amounts, AND be

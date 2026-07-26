@@ -36682,6 +36682,55 @@ mod side_and_field_condition_moves {
         );
     }
 
+    /// Tailwind is a flat 4 turns (Gen V+) and is NOT extended by Light Clay —
+    /// that item only touches Reflect / Light Screen / Aurora Veil.
+    ///
+    /// Regression: `get_side_condition_duration` had no `TailWind` arm, so it fell
+    /// through to the `_ => 5` default meant for the screens/Safeguard/Mist family
+    /// and Tailwind was seeded at 5. That silently disagreed with the fog-of-war
+    /// belief's own table (`inference::side_condition_timer`'s `TailWind => Known(4)`),
+    /// which is why tracker mode showed the correct countdown and battle mode did
+    /// not. The subset-check oracle could never catch it: `Statement::SideConditionTurns`
+    /// is only ever minted for screens (gated on a `Possibly` timer), so Tailwind's
+    /// `Known(4)` was never compared against ground truth. Every pre-existing test
+    /// passed a duration to `add_side_condition` explicitly, so nothing exercised
+    /// the default either — hence going through a real move here.
+    #[test]
+    fn tailwind_lasts_four_turns_and_ignores_light_clay() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        for (item, label) in [(Item::None, "no item"), (Item::LightClay, "Light Clay")] {
+            let user = mon_with(
+                Species::Talonflame,
+                PokemonMove::Tailwind,
+                Ability::None,
+                item.clone(),
+            );
+            let state = battle_state_from_lists(vec![user], vec![], vec![bulky()], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                mdex,
+                pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let idx = bs
+                .p1_side_conditions
+                .iter()
+                .position(|c| matches!(c, SideCondition::TailWind));
+            let turns = idx.map(|i| bs.p1_side_condition_turns[i]);
+            // Seeded at 4; the setting turn's own end-of-turn decrement takes it to 3.
+            assert_eq!(
+                turns,
+                Some(3),
+                "{label}: Tailwind should have 3 turns remaining after the turn it was used \
+                 (starts at 4, one turn elapsed)"
+            );
+        }
+    }
+
     // ── Brick Break / Psychic Fangs / Raging Bull ─────────────────────────────
 
     #[test]
@@ -36945,6 +36994,63 @@ mod side_and_field_condition_moves {
             "Earthquake should not damage Flying-type without Gravity (hit={:.2})",
             hit_ng
         );
+    }
+
+    /// Both two-turn families must announce their charge turn to the observer.
+    ///
+    /// `handle_charging_first_turn` (Solar Beam, Meteor Beam, Skull Bash, …) always
+    /// emitted `ChargingMove`, but `handle_semi_invulnerable_first_turn` (Fly, Bounce,
+    /// Dig, Dive, Phantom Force, Shadow Force, Sky Drop) emitted nothing at all — so
+    /// an observer saw a bare `MoveUsed { Fly }` with no reactions and had no way to
+    /// tell a takeoff from a landing. That also made it impossible for tracker text to
+    /// ever agree with a battle log on half the two-turn moves.
+    #[test]
+    fn charge_turn_emits_charging_move_for_both_two_turn_families() {
+        use crate::information::information::EventKind;
+        use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        for (species, charging_move) in [
+            (Species::Pidgeot, PokemonMove::Fly), // semi-invulnerable family
+            (Species::Venusaur, PokemonMove::SolarBeam), // pure-charge family
+        ] {
+            let state =
+                battle_state_from_lists(vec![mon(species, charging_move.clone())], vec![], vec![bulky()], vec![]);
+            let outcomes = run_single_turn_with_events(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                mdex,
+                pdex,
+                Player::P2, // the OPPONENT is the one who must be able to see it
+            );
+            let events = outcomes
+                .into_iter()
+                .next()
+                .expect("one branch")
+                .1
+                .expect("observer set — events must be Some");
+
+            // Must be nested under the move's own `MoveUsed`, not a top-level sibling:
+            // `execute_action` folds everything a move emitted into `MoveUsed.reactions`,
+            // and tracker mode's grammar mirrors exactly that shape.
+            let charging_nested = events.iter().any(|e| {
+                matches!(&e.kind, EventKind::MoveUsed { move_used, .. } if *move_used == charging_move)
+                    && e.reactions.iter().any(|r| {
+                        matches!(
+                            &r.kind,
+                            EventKind::ChargingMove { move_used: m, .. } if *m == charging_move
+                        )
+                    })
+            });
+            assert!(
+                charging_nested,
+                "{charging_move:?}'s charge turn must emit ChargingMove nested under its \
+                 MoveUsed; events = {events:?}"
+            );
+        }
     }
 
     #[test]

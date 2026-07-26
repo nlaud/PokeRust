@@ -269,6 +269,11 @@ const MOVE_EFFECT_WORDS: WordGroup[] = [
   group('immune'),
   group('blocked', 'block'),
   group('fail', 'failed'),
+  // The charge turn of a two-turn move (`o1 solarbeam charging`). Takes no
+  // argument — the move it charges is always the line's own move, so
+  // `tracker_parse.rs` treats a repeated name as optional and rejects a
+  // different one.
+  group('charging'),
 ]
 
 const SLOT_VERB_WORDS: WordGroup[] = [
@@ -278,6 +283,9 @@ const SLOT_VERB_WORDS: WordGroup[] = [
   group('mustrecharge'),
   group('pass'),
   group('hp'),
+  // Input alias `o1 charging <move>`, which the parser desugars to the
+  // canonical move-line form above.
+  group('charging'),
 ]
 
 // Champions' 18 damage types plus the Tera-only Stellar type (`tera <type>`
@@ -305,7 +313,13 @@ function canonicalsOf(groups: WordGroup[]): string[] {
 
 // ── Levenshtein autocorrect fallback ────────────────────────────────────────
 
-function levenshtein(a: string, b: string): number {
+/** Plain edit distance. Exported because the tracker setup form's species
+ * picker (`pages/tracker/SpeciesPicker.tsx`) needs the same "autocorrect to the
+ * closest possibility" fallback, but ranks its own hits alphabetically rather
+ * than by `stableHash` — a thousand-entry species list reads far better in
+ * alphabetical order than in the deliberately-scrambled order that suits these
+ * small, fixed keyword pools. */
+export function levenshtein(a: string, b: string): number {
   const dp: number[] = Array.from({ length: b.length + 1 }, (_, j) => j)
   for (let i = 1; i <= a.length; i++) {
     let prevDiag = dp[0]
@@ -414,6 +428,7 @@ export type LinePosition =
   | { kind: 'megaSpeciesOrDone' }
   | { kind: 'teraType' }
   | { kind: 'itemVerbItem' }
+  | { kind: 'chargingMove' }
   | { kind: 'moveBody' }
   | { kind: 'done' }
 
@@ -448,6 +463,13 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
     return cursorIndex === 2 ? { kind: 'teraType' } : { kind: 'done' }
   }
   if (action === 'mustrecharge' || action === 'pass') return { kind: 'done' }
+  // Standalone alias `o1 charging <move>` — the move name IS required in this
+  // spelling (it's the only thing naming the move). The canonical spelling,
+  // `o1 solarbeam charging`, has `charging` in the move body instead, where it
+  // takes no argument at all.
+  if (action === 'charging') {
+    return cursorIndex === 2 ? { kind: 'chargingMove' } : { kind: 'done' }
+  }
   if (action === 'hp') return { kind: 'done' } // numeric hpspec — nothing to suggest from a word list
   if (ITEM_VERB_WORDS.some((g) => g.aliases.includes(action))) {
     return cursorIndex === 2 ? { kind: 'itemVerbItem' } : { kind: 'done' }
@@ -513,6 +535,8 @@ export function completionsAt(
       return rank(canonicalsOf(TYPE_WORDS), partial)
     case 'itemVerbItem':
       return rank(recased.items, partial)
+    case 'chargingMove':
+      return rank(recased.moves, partial)
     case 'moveBody':
       return rank(
         [

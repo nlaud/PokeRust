@@ -743,6 +743,23 @@ pub struct TrackerCompletionsDto {
     pub abilities: Vec<String>,
 }
 
+/// `GET /api/dex/species` response — every species that can appear on a
+/// teamsheet, alphabetically, as display names.
+///
+/// Deliberately session-free, unlike `TrackerCompletionsDto`: this feeds the
+/// tracker SETUP form's opponent picker, which runs before any session exists.
+/// It is also the one place a full dex dump is the right answer — the user is
+/// naming arbitrary opponents, not picking from a known roster.
+///
+/// Battle-only formes (Mega, Primal, Ash-Greninja, …) are filtered out: they can
+/// never be written on a sheet, and listing them would offer "Charizard Mega X"
+/// as a lead.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeciesListDto {
+    pub species: Vec<String>,
+}
+
 // ── Benchmarking ─────────────────────────────────────────────────────────────
 // See `poke_rust::benchmarking` for the timing logic these DTOs wrap. The
 // sweep is always the full unbounded teamsheet-pairing grid (matching the

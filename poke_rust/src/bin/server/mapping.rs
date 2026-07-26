@@ -752,6 +752,60 @@ fn side_view(
         ),
     };
 
+    // Side/slot conditions must come from the SAME source as the mon rows above: the
+    // belief when masking, ground truth only for the viewer's own side. Reading them
+    // off `state` unconditionally leaked a screen's exact remaining turns — Light Clay
+    // extends Reflect / Light Screen / Aurora Veil from 5 to 8, so `Reflect (8)` vs
+    // `Reflect (5)` told the opponent outright whether the setter was holding it. The
+    // belief has always modelled this correctly (`inference::side_condition_timer`
+    // seeds screens as `Possibly([5, 8])` and the Light-Clay CNF pair collapses it only
+    // once genuinely known); `side_view` just never asked. `turn_range` +
+    // `named_turns_ranged` are the same pair `field_view_from_belief` uses for
+    // weather/terrain, and render as e.g. "Reflect (5 or 8)" on the frontend.
+    //
+    // Tailwind is deliberately NOT ambiguous here: Light Clay doesn't touch it, so its
+    // 4 turns are flat and both tables say `Known(4)`.
+    let (side_condition_views, slot_condition_views): (Vec<NamedTurnsDto>, Vec<Vec<String>>) =
+        match fog {
+            Some(fog) => {
+                let (fog_conditions, fog_turns, fog_slot_conditions) = match player {
+                    Player::P1 => (
+                        &fog.p1_side_conditions,
+                        &fog.p1_side_condition_turns,
+                        &fog.p1_slot_conditions,
+                    ),
+                    Player::P2 => (
+                        &fog.p2_side_conditions,
+                        &fog.p2_side_condition_turns,
+                        &fog.p2_slot_conditions,
+                    ),
+                };
+                (
+                    fog_conditions
+                        .iter()
+                        .zip(fog_turns.iter())
+                        .map(|(c, t)| named_turns_ranged(side_condition_name(c), turn_range(t)))
+                        .collect(),
+                    fog_slot_conditions
+                        .iter()
+                        .map(|conds| conds.iter().map(slot_condition_name).collect())
+                        .collect(),
+                )
+            }
+            // fog is None only when player == perspective — this IS the viewer's own side.
+            None => (
+                conditions
+                    .iter()
+                    .zip(condition_turns.iter())
+                    .map(|(c, t)| named_turns(side_condition_name(c), Some(*t)))
+                    .collect(),
+                slot_conditions
+                    .iter()
+                    .map(|conds| conds.iter().map(slot_condition_name).collect())
+                    .collect(),
+            ),
+        };
+
     SideView {
         active: active_views,
         back: back_views,
@@ -759,15 +813,8 @@ fn side_view(
         fainted: fainted_views,
         can_tera,
         can_mega,
-        side_conditions: conditions
-            .iter()
-            .zip(condition_turns.iter())
-            .map(|(c, t)| named_turns(side_condition_name(c), Some(*t)))
-            .collect(),
-        slot_conditions: slot_conditions
-            .iter()
-            .map(|conds| conds.iter().map(slot_condition_name).collect())
-            .collect(),
+        side_conditions: side_condition_views,
+        slot_conditions: slot_condition_views,
     }
 }
 
@@ -1677,6 +1724,157 @@ mod tests {
         assert!(
             view.fainted[0].fainted,
             "forwarded fainted-bucket entry must keep fainted: true"
+        );
+    }
+
+    /// Regression: `SideView.side_conditions` must be masked through the belief the
+    /// same way `FieldView`'s weather/terrain already are.
+    ///
+    /// `side_view` computed its `fog` binding and then built `side_conditions`
+    /// straight off `state.pN_side_condition_turns` anyway, so a Closed Team Sheet
+    /// viewer saw the opponent's screens with exact remaining turns. Light Clay
+    /// extends Reflect / Light Screen / Aurora Veil from 5 to 8, so `Reflect (5)` vs
+    /// `Reflect (8)` was a direct read on whether the setter held it. The earlier
+    /// `FieldView` fix (see `battle_view_masks_weather_turns_as_a_range_not_exact_ground_truth`)
+    /// missed this because side conditions live on `SideView`, not `FieldView`.
+    ///
+    /// Also pins the two things that must NOT become ranges: Tailwind (flat 4 turns —
+    /// Light Clay doesn't touch it) and layered hazards (no hidden duration at all,
+    /// but the layer count must survive the belief round-trip).
+    #[test]
+    fn side_view_masks_screen_turns_as_a_range_but_not_tailwind_or_hazards() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        let (next_state, _events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+            None,
+        );
+        let MatchState::BattleState(mut battle_state) = next_state else {
+            panic!("expected BattleState")
+        };
+
+        // Ground truth: the setter had no Light Clay, so Reflect really is 5. That's
+        // exactly the number a leak would show, and exactly what P1 must not learn.
+        battle_state.p2_side_conditions = vec![
+            SideCondition::Reflect,
+            SideCondition::TailWind,
+            SideCondition::Spikes(2),
+        ];
+        battle_state.p2_side_condition_turns = vec![5, 4, 0];
+        battle_state.p1_side_conditions = vec![SideCondition::Reflect];
+        battle_state.p1_side_condition_turns = vec![5];
+
+        let UnknownMatchState::TeamPreview(tp_belief_p1) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                Player::P1, &preview.p1_mons, &preview.p2_mons, &pokemon_dex, 1, 1, 50, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
+            Player::P1,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
+        );
+        // What the belief would hold after observing the three starts: an unresolved
+        // Light Clay on the screen, flat 4 on Tailwind, permanent-sentinel 0 on Spikes.
+        battle_belief_p1.p2_side_conditions = vec![
+            SideCondition::Reflect,
+            SideCondition::TailWind,
+            SideCondition::Spikes(2),
+        ];
+        battle_belief_p1.p2_side_condition_turns = vec![
+            Unknown::Possibly(vec![5, 8]),
+            Unknown::Known(4),
+            Unknown::Known(0),
+        ];
+        let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
+
+        let opponent = side_view(
+            &battle_state,
+            Player::P2,
+            Some(&belief_p1),
+            Player::P1,
+            None,
+        );
+        let by_name = |name: &str| {
+            opponent
+                .side_conditions
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| {
+                    let got: Vec<&str> =
+                        opponent.side_conditions.iter().map(|c| c.name.as_str()).collect();
+                    panic!("missing {name}; got {got:?}")
+                })
+        };
+
+        let reflect = by_name("Reflect");
+        assert_eq!(reflect.turns, Some(5), "lower bound is the base duration");
+        assert_eq!(
+            reflect.turns_max,
+            Some(8),
+            "P1 hasn't seen the setter's item — the upper bound must stay 8 rather than \
+             collapse to ground truth's exact 5 (the leak this test guards against)"
+        );
+
+        let tailwind = by_name("Tailwind");
+        assert_eq!(tailwind.turns, Some(4));
+        assert_eq!(
+            tailwind.turns_max, None,
+            "Tailwind is a flat 4 turns — Light Clay doesn't extend it, so it must stay exact"
+        );
+
+        let spikes = by_name("Spikes (2)");
+        assert_eq!(
+            spikes.turns,
+            Some(0),
+            "hazards keep the permanent sentinel; the layer count rides in the name"
+        );
+
+        // P1's own side is never masked — they know their own screen exactly.
+        let own = side_view(
+            &battle_state,
+            Player::P1,
+            Some(&belief_p1),
+            Player::P1,
+            None,
+        );
+        let own_reflect = own
+            .side_conditions
+            .iter()
+            .find(|c| c.name == "Reflect")
+            .expect("P1's own Reflect");
+        assert_eq!(own_reflect.turns, Some(5));
+        assert_eq!(
+            own_reflect.turns_max, None,
+            "the viewer's own side reads ground truth and must stay exact"
         );
     }
 

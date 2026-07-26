@@ -767,7 +767,10 @@ pub fn calc_stats_for_level(
     ]
 }
 
-fn is_mega_dex_entry(species_key: &Species, data: &PokemonData) -> bool {
+/// `pub` because the server's `GET /api/dex/species` needs the same notion of
+/// "this dex entry is a Mega forme" to keep Megas out of the teamsheet species
+/// picker — a Mega is reached by holding the stone, never written on a sheet.
+pub fn is_mega_dex_entry(species_key: &Species, data: &PokemonData) -> bool {
     let forme_is_mega = data
         .forme
         .as_ref()

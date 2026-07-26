@@ -365,8 +365,12 @@ fn validate_turn_completeness(
     active_per_side: u8,
 ) -> Result<(), String> {
     let has_regular_action = events.iter().any(|event| {
-        matches!(event.kind, EventKind::MoveUsed { .. } | EventKind::MustRecharge { .. })
-            || matches!(
+        matches!(
+            event.kind,
+            EventKind::MoveUsed { .. }
+                | EventKind::MustRecharge { .. }
+                | EventKind::ChargingMove { .. }
+        ) || matches!(
                 event.kind,
                 EventKind::Cant { ref reason, .. } if *reason != poke_rust::information::information::CantReason::Other
             )
@@ -499,6 +503,11 @@ fn slot_acted(events: &[InformationEvent], slot: FieldSlot) -> bool {
         EventKind::SimultaneousSwitch { switches } => switches.iter().any(|sw| sw.slot == slot),
         EventKind::Cant { slot: s, .. } => *s == slot,
         EventKind::MustRecharge { slot: s } => *s == slot,
+        // Spending the turn charging (Solar Beam, Fly, …) is acting. In practice the
+        // grammar always nests this under a `MoveUsed`, which the first arm already
+        // catches; this covers a hand-built or engine-sourced tree that carries a
+        // bare top-level one.
+        EventKind::ChargingMove { user, .. } => *user == slot,
         _ => false,
     })
 }

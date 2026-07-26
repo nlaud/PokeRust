@@ -178,8 +178,20 @@ pub enum EventKind {
     /// A Pokémon could not act this turn.
     Cant { slot: FieldSlot, reason: CantReason },
 
-    /// A charging move was declared. The target is *not* included because it is not
-    /// always revealed at the charge step (e.g. Fly, Dive, Phantom Force).
+    /// The first (charge) turn of a two-turn move. Emitted for BOTH families: the
+    /// pure-charge moves (Solar Beam, Meteor Beam, Skull Bash, Geomancy, …) and the
+    /// semi-invulnerable ones (Fly, Bounce, Dig, Dive, Phantom Force, Shadow Force,
+    /// Sky Drop). The latter used to emit nothing, which left an observer unable to
+    /// tell a takeoff from a landing.
+    ///
+    /// The target is deliberately *not* included: the charge step frequently reveals
+    /// no target at all ("Charizard flew up high!" names nobody), and that is true of
+    /// the pure-charge family too. It shows up on the enclosing `MoveUsed` if and when
+    /// it is actually known.
+    ///
+    /// Always appears nested under the `MoveUsed` for the same move — `execute_action`
+    /// folds everything a move emitted into `MoveUsed.reactions` — which is the tree
+    /// shape tracker mode's grammar mirrors (`bin/server/tracker_parse.rs`).
     ChargingMove {
         user: FieldSlot,
         move_used: PokemonMove,

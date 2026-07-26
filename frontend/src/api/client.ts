@@ -9,6 +9,7 @@ import type {
   GetTrackerResponse,
   LegalCommands,
   PlayerId,
+  SpeciesListDto,
   TrackerCompletionsDto,
   TrackerEventsRequest,
   TrackerEventsResponse,
@@ -149,6 +150,12 @@ export function rebuildTrackerHistory(
 
 export function getTrackerCompletions(trackerId: string): Promise<TrackerCompletionsDto> {
   return request(`/api/tracker/${trackerId}/completions`)
+}
+
+/** The full teamsheet-legal species list, for the tracker setup form's opponent
+ * picker. Session-free on purpose — see `SpeciesListDto`. */
+export function listSpecies(): Promise<SpeciesListDto> {
+  return request('/api/dex/species')
 }
 
 /** Consumes the `GET /api/benchmark` Server-Sent Events stream — a full,

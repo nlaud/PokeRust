@@ -336,6 +336,48 @@ pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+/// `GET /api/dex/species` — every teamsheet-legal species, alphabetically, as
+/// display names.
+///
+/// Session-free by necessity: this backs the tracker setup form's opponent
+/// picker, which runs before any session exists, so
+/// `GET /api/tracker/{id}/completions` (roster-scoped, and the right answer for
+/// the in-battle input bar) can't serve it. Mirrors that handler's humanization
+/// via `humanize_identifier`, so the names it returns round-trip back through
+/// `Species::from_str` when the picker submits them as a comma-separated list.
+///
+/// Three families of forme are excluded, because none of them can be written on
+/// a sheet: `battleOnly` formes (Ash-Greninja, Palafin-Hero, Aegislash-Blade —
+/// they only exist mid-battle), Mega formes (reached by holding the stone, so
+/// the sheet names the base species), and Gigantamax formes. Alternate formes
+/// that ARE sheet-legal stay in, including the item-bound ones — Arceus-Dragon,
+/// Silvally-Steel and Genesect-Douse all carry a `requiredItem` too, which is
+/// why that field is deliberately NOT the filter.
+pub async fn get_species_list(State(app): State<AppState>) -> Response {
+    let mut species: Vec<String> = app
+        .dexes
+        .pokemon_dex
+        .iter()
+        .filter(|(key, data)| {
+            data.battle_only.is_none()
+                && !poke_rust::state::pokemon::is_mega_dex_entry(key, data)
+                && !is_gigantamax_dex_entry(key)
+        })
+        .map(|(key, _)| poke_rust::user::humanize_identifier(format!("{key:?}")))
+        .collect();
+    species.sort();
+    species.dedup();
+    Json(SpeciesListDto { species }).into_response()
+}
+
+/// Gigantamax formes carry neither `battleOnly` nor `requiredItem` in the dex —
+/// only `forme: "Gmax"` and a `changesFrom` back-pointer the parser doesn't
+/// read — so they're identified by the enum variant's own name, the same way
+/// `is_mega_dex_entry` falls back to for Megas.
+fn is_gigantamax_dex_entry(species_key: &poke_rust::data::species::Species) -> bool {
+    format!("{species_key:?}").to_lowercase().ends_with("gmax")
+}
+
 /// Runs the full turn-resolution-speed + fog-of-war-inference-speed sweep
 /// (`poke_rust::benchmarking` — the unbounded grid, matching the offline
 /// `cargo bench` binaries) and streams progress over Server-Sent Events,

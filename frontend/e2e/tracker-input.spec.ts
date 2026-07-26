@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { seedTeam, startTrackerSession } from './helpers'
+import { pickSelectOption, seedTeam, startTrackerSession } from './helpers'
 
 // End-to-end coverage for the tracker mode input bar (TrackerInputBar.tsx):
 // autocomplete/ghost-text/suggestion ranking (including suppression once a
@@ -239,5 +239,69 @@ test.describe('Tracker input bar casing continuity', () => {
     await input.pressSequentially('p1 volt_switch o1 rough_sk', { delay: 15 })
     const top = page.getByTestId('tracker-suggestion-top')
     await expect(top).toHaveText('rough_skin')
+  })
+})
+
+// The tracker SETUP form's opponent field under Closed Team Sheet
+// (`SpeciesPicker.tsx`). Replaces the old free-text textarea, whose failure
+// mode was silent: the teamsheet parser drops an unrecognized species and the
+// only feedback is a generic "N Pokemon parsed but the format brings M" 422.
+// Backed by the real `GET /api/dex/species` catalog — no mocking.
+test.describe('Tracker setup species picker', () => {
+  test('filters, autocorrects, pastes, removes, and gates the start button', async ({ page }) => {
+    await seedTeam(page)
+    await page.goto('/tracker')
+    await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
+
+    const species = page.getByTestId('species-input')
+    const start = page.getByRole('button', { name: 'Start Tracking' })
+    const chips = page.getByTestId('species-chip')
+    const suggestions = page.getByTestId('species-suggestion')
+
+    // Nothing picked yet — Singles brings 3, so the button stays disabled.
+    await expect(start).toBeDisabled()
+    await expect(page.getByText('0 added — need at least 3')).toBeVisible()
+
+    // Prefix match, alphabetically ordered (unlike the tracker input bar's
+    // deliberately-scrambled stable-hash ranking, which suits small keyword
+    // pools but not a thousand-entry species list).
+    await species.pressSequentially('garch', { delay: 15 })
+    await expect(suggestions.first()).toHaveText('Garchomp')
+    await species.press('Enter')
+    await expect(chips).toHaveCount(1)
+    await expect(chips.first()).toContainText('Garchomp')
+
+    // Edit-distance autocorrect: a typo still surfaces the intended species
+    // instead of an empty list.
+    await species.pressSequentially('toxapx', { delay: 15 })
+    await expect(suggestions.first()).toHaveText('Toxapex')
+    await species.press('Tab')
+    await expect(chips).toHaveCount(2)
+
+    // Battle-only and Mega formes are filtered server-side — you can never
+    // put "Garchomp-Mega" on a teamsheet, so it must not be offered.
+    await species.pressSequentially('garchompmeg', { delay: 15 })
+    await expect(suggestions.filter({ hasText: 'Garchomp Mega' })).toHaveCount(0)
+    await species.press('Escape')
+
+    // Still one short.
+    await expect(start).toBeDisabled()
+
+    // Backspace on an empty query removes the last chip (standard chip-input
+    // behaviour), then re-add via paste of a comma-separated list.
+    await species.press('Backspace')
+    await expect(chips).toHaveCount(1)
+
+    await species.pressSequentially('toxapex', { delay: 15 })
+    await species.press('Enter')
+    await species.pressSequentially('rotomwash', { delay: 15 })
+    await species.press('Enter')
+    await expect(chips).toHaveCount(3)
+    await expect(start).toBeEnabled()
+
+    // The × on a chip removes just that one and re-disables the button.
+    await chips.first().getByRole('button').click()
+    await expect(chips).toHaveCount(2)
+    await expect(start).toBeDisabled()
   })
 })

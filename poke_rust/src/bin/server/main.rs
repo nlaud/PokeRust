@@ -106,6 +106,7 @@ async fn main() {
         .route("/api/tracker/{id}/preview", post(tracker::preview_tracker_events))
         .route("/api/tracker/{id}/history", put(tracker::rebuild_tracker_history))
         .route("/api/tracker/{id}/completions", get(tracker::get_tracker_completions))
+        .route("/api/dex/species", get(routes::get_species_list))
         .route("/api/benchmark", get(routes::run_benchmark))
         .route("/api/sprites", get(routes::get_sprite))
         .layer(CorsLayer::permissive())

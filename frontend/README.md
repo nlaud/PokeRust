@@ -192,6 +192,7 @@ also be omitted.
 | `[slot] hp <hpspec>` | Record HP outside a move line, usually residual damage or healing. |
 | `[slot] <cant-reason>` | Record why the slot could not act. This form must contain exactly two tokens. |
 | `[slot] mustrecharge` | Record the move-created must-recharge state. This is distinct from the `recharge` cant reason on the following turn. |
+| `[slot] charging <move>` | Record the charge turn of a two-turn move. Equivalent to the move line `[slot] <move> charging`, which is the preferred form; see “Charge turns” below. |
 | `[slot] pass` | Explicitly record no action, including a skipped action after the battle has already ended. |
 | `weather <weather>` | Set or clear the weather. |
 | `terrain <terrain>` | Set or clear the terrain. |
@@ -205,7 +206,8 @@ event, preserving entry-ability and ability-absence inference.
 #### Move lines
 
 A move line starts with its user and move. Every targeted move must name each
-target explicitly, even in singles:
+target explicitly, even in singles — the one exception being a charge turn,
+which may name none (see “Charge turns” below):
 
 ```text
 p1 thunderbolt o1 45% par
@@ -225,6 +227,7 @@ slot is allowed, which is how multi-hit HP readings are represented.
 | Immunity | `immune` |
 | Protection/block | `block`, `blocked` |
 | Whole-move failure | `fail`, `failed` |
+| Charge turn of a two-turn move | `charging` |
 | HP after the effect | `45%` for masked percent HP, or `97hp` for exact HP |
 | Stat change | `atk+1`, `+1atk`, `spe-2`, `-2spe`, and the stat aliases below |
 | Major status inflicted | Any status word below |
@@ -245,6 +248,44 @@ turns separately so the second parse sees the updated belief.
 target. `fail` suppresses guaranteed effects for the entire move. Chance-based
 effects must be typed when observed: for example, include `par` when
 Thunderbolt actually paralyzes, but omit it otherwise.
+
+#### Charge turns
+
+The first turn of a two-turn move is a normal move line with a `charging`
+token, and — unlike every other targeted move — it may name **no target at
+all**, because the charge step usually does not reveal one:
+
+```text
+o1 solarbeam charging
+p1 protect
+endofturn
+
+o1 solarbeam p2 45% crit
+p2 substitute
+endofturn
+```
+
+Give a target if you do know it. `charging` takes no argument: the move being
+charged is always the line's own move, so repeating it (`o1 solarbeam charging
+solarbeam`) is accepted but pointless, and naming a different move is an error.
+`o1 charging solarbeam` is also accepted and means the same thing.
+
+`charging` suppresses the move's own effects for that turn — they belong to the
+release turn — and adds the charge-turn boost for the moves that have one
+(Meteor Beam and Electro Shot raise Special Attack, Skull Bash raises Defense).
+Geomancy is not one of those: its boosts land when it fires.
+
+Because the suppression keys on the token rather than on the move, a use that
+skips the charge entirely needs no special handling — a Power Herb Geomancy,
+Solar Beam in harsh sun, or Electro Shot in rain is just an ordinary one-turn
+move line with no `charging` token. The one gap: for Meteor Beam, Electro Shot,
+and Skull Bash, a Power Herb one-turn use is indistinguishable from a release
+turn, so type the charge-turn boost yourself (`p1 meteorbeam o1 spa+1`).
+
+A slot that spent its turn charging counts as having acted, and a move aimed at
+a slot that is mid-Fly, Dig, Dive, Bounce, Phantom Force, Shadow Force, or Sky
+Drop has its guaranteed effects suppressed automatically — you do not need to
+type `miss`.
 
 #### Accepted words and aliases
 

@@ -61,8 +61,16 @@ export async function startTrackerSession(page: Page) {
   // simple to reason about — the default format is Doubles otherwise.
   await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
   // Same 3-brought minimum applies to the opponent side; only Garchomp is
-  // ever actually sent out.
-  await page.locator('textarea').fill('Garchomp, Toxapex, Rotom-Wash')
+  // ever actually sent out. Closed Team Sheet (the default mode) uses the
+  // validated chip picker rather than a free-text box, so each name is typed
+  // and committed against the real `GET /api/dex/species` catalog.
+  const species = page.getByTestId('species-input')
+  for (const name of ['Garchomp', 'Toxapex', 'Rotom-Wash']) {
+    await species.pressSequentially(name, { delay: 15 })
+    await expect(page.getByTestId('species-suggestion').first()).toBeVisible()
+    await species.press('Enter')
+  }
+  await expect(page.getByTestId('species-chip')).toHaveCount(3)
   await page.getByRole('button', { name: 'Start Tracking' }).click()
   await expect(page.getByTestId('tracker-input')).toBeVisible({ timeout: 10_000 })
 }

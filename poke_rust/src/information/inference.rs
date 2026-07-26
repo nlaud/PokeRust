@@ -2451,6 +2451,24 @@ fn pass1_apply_event(
             if *move_used == PokemonMove::Struggle {
                 return;
             }
+            // Coming back down: drop the `SemiInvulnerable` volatile the matching
+            // `ChargingMove` put on. Keyed on the same move, so an unrelated move can't
+            // ground a mon that's mid-Fly. On the CHARGE turn this runs first and finds
+            // nothing (parents are processed before their reactions — see
+            // `process_battle_event`), then the nested `ChargingMove` adds it; on the
+            // RELEASE turn there is no such reaction, so the removal sticks.
+            if crate::simulator::helpers::move_causes_invulnerability(move_used)
+                && let Some(idx) = mon_idx_for_active_slot(state, user)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.volatiles.retain(|v| {
+                    !matches!(
+                        v,
+                        VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _)
+                            if m == move_used
+                    )
+                });
+            }
             // Set when the move-legality mirroring below resolves this mon's Zoroark
             // hypothesis (the primary was infeasible, the hypothesis wasn't) — acted on
             // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
@@ -3231,7 +3249,18 @@ fn pass1_apply_event(
                     &mut state.p2_side_condition_setters,
                 ),
             };
-            if !conditions.contains(condition) {
+            // Match by DISCRIMINANT, not by value: a layered hazard's payload is its
+            // layer count, so a second Spikes arrives as `Spikes(2)` against a stored
+            // `Spikes(1)`. That must overwrite the existing entry in place — keeping
+            // its timer (hazards are permanent, `Known(0)`) and its setter — rather
+            // than push a duplicate row. A plain `contains` check did the latter and
+            // would have left two Spikes entries stacked on the same side.
+            let existing = conditions
+                .iter()
+                .position(|c| std::mem::discriminant(c) == std::mem::discriminant(condition));
+            if let Some(i) = existing {
+                conditions[i] = condition.clone();
+            } else {
                 conditions.push(condition.clone());
                 turns.push(side_condition_timer(condition));
                 setters.push(setter_idx);
@@ -3289,7 +3318,17 @@ fn pass1_apply_event(
                     &mut state.p2_side_condition_setters,
                 ),
             };
-            if let Some(pos) = conditions.iter().position(|c| c == condition) {
+            // Discriminant match, mirroring `helpers::remove_side_condition`, which
+            // also removes by discriminant but emits the CALLER's value in the event:
+            // hazard clears pass a placeholder payload (`SideCondition::Spikes(0)` at
+            // `helpers.rs`'s Rapid Spin / Defog / Court Change sites), which can never
+            // equal the stored `Spikes(1..=3)`. Under the old `c == condition` test a
+            // spun-away Spikes stack was therefore never removed from the belief, so
+            // `materialize` kept feeding phantom entry hazards to the damage calc.
+            if let Some(pos) = conditions
+                .iter()
+                .position(|c| std::mem::discriminant(c) == std::mem::discriminant(condition))
+            {
                 conditions.remove(pos);
                 turns.remove(pos);
                 if pos < setters.len() {
@@ -3365,6 +3404,31 @@ fn pass1_apply_event(
         }
 
         EventKind::ChargingMove { user, move_used } => {
+            // Mirror the engine's own charge-turn bookkeeping onto the belief: the
+            // semi-invulnerable family (Fly, Dig, Dive, Bounce, Phantom Force, Shadow
+            // Force, Sky Drop) leaves the field until it releases. Without this the
+            // belief thought a flying mon was a normal, hittable target, and
+            // `materialize` handed that to the damage calc. The matching removal lives
+            // in the `MoveUsed` arm — the release turn's `MoveUsed` fires before its
+            // own reactions, so a charge turn removes-then-re-adds and stays correct.
+            if crate::simulator::helpers::move_causes_invulnerability(move_used)
+                && let Some(idx) = mon_idx_for_active_slot(state, user)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                let already = mon.volatiles.iter().any(|v| {
+                    matches!(
+                        v,
+                        VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
+                    )
+                });
+                if !already {
+                    mon.volatiles.push(VolatileStatusState::MoveStatus(
+                        VolatileStatus::SemiInvulnerable(move_used.clone()),
+                        0,
+                    ));
+                }
+            }
+
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
             let mut resolved_species: Option<Species> = None;

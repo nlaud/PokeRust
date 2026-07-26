@@ -496,11 +496,14 @@ fn render_move_qualifier(
         EventKind::Blocked { target } => Ok(format!("{} blocked", slot_token(*target))),
         EventKind::MoveFailed { slot } => Ok(format!("{} fail", slot_token(*slot))),
         EventKind::MustRecharge { slot } => Ok(format!("{} mustrecharge", slot_token(*slot))),
-        EventKind::ChargingMove { user, move_used } => Ok(format!(
-            "{} charging {}",
-            slot_token(*user),
-            move_word(move_used)
-        )),
+        // Bare `charging`, no move name: it is always this line's own move (the
+        // parser rejects any other), so repeating it is noise. `move_used` is
+        // matched-and-ignored rather than `..`-ed so that a future variant change
+        // surfaces here as a compile error.
+        EventKind::ChargingMove {
+            user,
+            move_used: _,
+        } => Ok(format!("{} charging", slot_token(*user))),
         EventKind::IllusionEnded {
             slot,
             actual_species,
