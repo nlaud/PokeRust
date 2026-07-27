@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 pub mod benchmarking;
 pub mod data;
 pub mod information;
+pub mod meta;
 pub mod simulator;
 pub mod state;
 #[cfg(test)]

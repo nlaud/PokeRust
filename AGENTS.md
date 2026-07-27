@@ -136,12 +136,25 @@ information/              Fog-of-war inference engine (partial-information
   inference.rs             Six-pass engine; entry point apply_information
   inference/bcp.rs          Boolean constraint propagation pass
   materialize.rs            Turns a fog-of-war hypothesis back into a concrete
-                          PokemonState/BattleState for the damage calc to use
+                          PokemonState/BattleState for the damage calc to use.
+                          NOT simulator-runnable — see determinize.rs
+  determinize.rs            Collapses a belief into ONE complete, playable
+                          BattleState, sampling hidden attributes from meta/
+  cps.rs                    Conditional-Poisson fixed-size subset sampler
+                          (move sets from marginals; bench selection)
+  compositions.rs           Uniform sampling of bounded integer compositions
+                          (the fallback EV spread generator)
   README.md                Full design doc for this module — read before touching it
+meta/                     Competitive usage statistics (championsbattledata.com)
+  names.rs                 Champions name -> enum resolution; the species
+                          override table. Unresolvable species are a HARD ERROR
+  schema.rs                Drift-tolerant serde types for the raw JSON
+  dex.rs                   MetaDex: load, lookup, renormalization, priors
 tests/
   simulator_tests.rs        Main battle-mechanics test suite (~33,700 lines)
   inference_tests.rs         Inference-engine regression tests, named
                           test_s<NN>_*/roundtrip_s<NN>_* after the soundness finding
+  determinize_tests.rs       Determinizer soundness, runnability and fidelity
   simuilator_test_helpers.rs Test builders/helpers (battle builders, damage
                           helpers, assert functions)
 helper_scripts/            Python scripts to regenerate data/ enums from Showdown source files
@@ -229,6 +242,54 @@ modifying this module**, in the same spirit as the Bulbapedia research rule
 above. There is no separate audit log — soundness-bug history lives in inline
 comments, regression tests (`test_s<NN>_*`/`roundtrip_s<NN>_*` in
 `inference_tests.rs`), and git log.
+
+### Meta-driven determinizer (`meta/` + `information/determinize.rs`)
+
+A belief is *bounds*, but `simulate_turn` needs an actual team. The determinizer
+collapses an `UnknownBattleState` into one concrete, playable `BattleState`,
+sampling everything hidden from the competitive usage cache in `meta_scraper/`.
+
+```rust
+determinize_seeded(seed, belief, meta_dex, pokemon_dex, move_dex, cfg)
+    -> Result<Determinized, DeterminizeError>
+```
+
+**Sample-only, deliberately.** Per Pokemon the cache admits ~750k builds and four
+opponents cross-multiply past 10^23, so there is no enumerate mode. `probability`
+on the result is the joint probability of the draw sequence — a lower bound on the
+state's probability, comparable only between draws from the same belief (the same
+contract `sample_turn` carries).
+
+Things worth knowing before touching it:
+
+- **`materialize.rs` is not an alternative.** Its output is a damage-oracle
+  skeleton: empty benches (every switch illegal), 0-PP move slots (every move
+  illegal), a flat `0.5*max_hp` HP sentinel, and `evs`/`ivs` hardcoded beside an
+  unrelated `stats` override. Its approximations are load-bearing for Pass 3 —
+  don't "fix" them. `determinize.rs` builds through `build_pokemon_state` instead.
+- **Stat points vs EVs.** The meta gives 0–32 authoring points;
+  `build_pokemon_state` applies `ev = max(0, 8p − 4)` itself when `use_stat_points`
+  is set; `PokemonState.evs` and the belief's `min_evs`/`max_evs` are both already
+  scaled. Four encodings of one quantity — variables are named `raw_points` vs
+  scaled `evs` throughout, and passing the wrong one applies the formula twice.
+- **Move percentages are marginals, not a distribution.** They sum to ~350, not
+  400; the shortfall is real mass on moves outside the top-10 list. `cps.rs` models
+  it with explicit residual slots rather than normalizing it away — normalizing
+  would inflate every rate ~3% and force any move above ~97%.
+- **The observer's own side is never sampled**, only copied. For an opponent a
+  `None` move slot means "unrevealed"; for your own Pokemon it means "this Pokemon
+  has three moves".
+- **Soundness is checked with the existing oracle.** `determinize` redraws until
+  `subset_check::collect_true_state_subset_violations` is clean (or the budget
+  runs out, then warns). `check_determinization` covers that oracle's three
+  documented blind spots: EVs/IVs, HP, and revealed move slots.
+- **An unresolvable species name is a hard error**, never a fallback:
+  `Species::from_str` returns `Species::Unknown(_)`, which `build_pokemon_state`
+  gives `[100; 6]` base stats — a plausible-looking, wholly wrong Pokemon. Expect
+  to maintain `meta/names.rs`'s override table as the site renames formes.
+
+Tests that assert cache *contents* will break on every scraper run; the suite
+asserts invariants and reads its fidelity targets from the loaded dex instead.
 
 ### Global configuration
 

@@ -576,7 +576,15 @@ pub(crate) fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -
 }
 
 /// Scale EVs from Showdown stat-points format (0–252) to internal (0–252).
-fn scale_evs_for_stat_points(mut evs: [u8; 6]) -> [u8; 6] {
+///
+/// Callers outside this module (the meta determinizer) need this to compare a
+/// usage-data spread, which is authored in 0–32 points, against the inference
+/// engine's EV bounds, which are already scaled. Re-deriving `8p − 4` at the
+/// call site would be a silent divergence waiting to happen.
+///
+/// Note the `as u8`: a point value above 32 wraps rather than erroring
+/// (`p = 33` yields `260`, which truncates to `4`). Callers must clamp first.
+pub(crate) fn scale_evs_for_stat_points(mut evs: [u8; 6]) -> [u8; 6] {
     for ev in &mut evs {
         *ev = ((i16::from(*ev) * 8) - 4).max(0) as u8;
     }

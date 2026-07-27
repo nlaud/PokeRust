@@ -9,9 +9,26 @@ Tracker improvements:
 - `frontend/src/lib/trackerGrammar.ts` has drifted from `tracker_parse.rs`: `SLOT_VERB_WORDS`/`MOVE_EFFECT_WORDS` are missing `illusion`, `damage`/`heal`/`sethp`, `status`, `cure`, `volatileend`, `encoremove`, `disablemove`, `stockpilelevel`, `copyboosts`, `invertboosts`, `Nhits`; `FIELD_LINE_WORDS` is missing the `side` and `field`/`pseudoweather` line-start keywords; `VOLATILE_WORDS` stops at `forestscurse` (Rust also takes `throatchop`, `mustrecharge`/`recharging`, `substitute`/`sub`, `encore`, `disable`); and nothing knows about `@slot`. Completion-only, so nothing is unparseable — just undiscoverable.
 
 ### New features
+- Meta Team Generator: Added as a setting for either players' team in simulate
+  - Choose a pokemon by usage, then choose a random set for that pokemon by set usages
+  - Then for the rest of the pokemon on the team, combine the teammate pokemon %'s for all of the mons on your team, choose a mon from that distribution, then choose a random set for that pokemon by its usages.
+Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
+cache and `information/determinize.rs` samples a complete, playable `BattleState`
+from a belief. What is left is all fidelity, not correctness; every item below
+produces worlds that are legal but less plausible than they could be.
 
-- Test the meta sampler & make sure a chunk of the data looks good...
-  - Now on the Rust end, create a determinizer that takes in the meta state (we will need a parser for this) + an unknownbattlestate, then, like the simulator, has modes for giving a single random sample state or giving every possible state with probability (This should not consider "other" options, just the normal ones, it should force based on the meta percent and known information items, moves, etc.). It should output complete full states though that should just be able to be put in the simulator and work!
-    - If all meta combinations are impossible, it should just choose uniformly at random for EV distribution, moves, etc.
-- Eventually create nash solver and recursive evaluation (When both players have perfect information)
+- `nature_spread_coherence` ships at `1.0` (off), so nature and spread are drawn
+  independently and incoherent builds (Bold with 32 Atk points) do occur. The data
+  carries the signal to fix it — `stat_up`/`stat_down` on every nature row — so try
+  `0.15` and confirm `sampled_builds_follow_the_usage_data` still passes.
+- `pre_transform` / `illusion_disguise` / `rest_sleep` are dropped when building a
+  concrete Pokémon, and the belief's `possible_illusion_state` is never consumed —
+  so a determinized world can't represent an active Transform or Illusion.
+- Bench invention is the biggest source of implausible-but-legal worlds and is
+  invisible to the subset oracle (an invented Pokémon contradicts nothing). It is
+  warned on every occurrence; a better prior than teammate-rank would help.
+
+- Now that determinization exists, create the nash solver and recursive evaluation
+  (when both players have perfect information) — determinized worlds are the leaves
+  it evaluates.
   - [ ] Then move on to actual bot creation, battle and mentor pages (Could make these an option in the simulate / tracker page?).
