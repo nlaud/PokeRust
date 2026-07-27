@@ -83,8 +83,12 @@ pub fn render_turn(
     let mut scratch = belief.clone();
     for event in events {
         if matches!(event.kind, EventKind::EndOfTurn) {
+            let mut reaction_lines = Vec::new();
             for reaction in &event.reactions {
-                render_standalone_tree(reaction, &scratch, &mut lines)?;
+                render_standalone_tree(reaction, &scratch, &mut reaction_lines)?;
+            }
+            for line in reaction_lines {
+                lines.push(format!("eot {line}"));
             }
             fold_event_into_synthesis_scratch(&mut scratch, event, pokemon_dex);
             continue; // the sentinel itself is added once below.
@@ -278,6 +282,12 @@ fn render_top_level_event(
                 {
                     render_standalone_tree(child, &after_switch, &mut out)?;
                 }
+                // Entry abilities are ordered siblings. Thread each one's
+                // actual reactions into the scratch state before diffing the
+                // next (for example Drizzle followed by Sand Stream); otherwise
+                // the second ability is compared against the pre-entry weather
+                // and its guaranteed override is rendered a second time.
+                fold_event_into_synthesis_scratch(&mut after_switch, r, pokemon_dex);
             }
             Ok(Some(out.join("\n")))
         }
@@ -617,8 +627,12 @@ fn render_move_qualifier(
         // standalone-style word appended inline; the target-agnostic ones
         // (weather/terrain) don't need a slot prefix on a move line since
         // they're global/side-scoped, not per-mon.
-        EventKind::WeatherChanged { weather: Some(w) } => Ok(weather_word(w).to_string()),
-        EventKind::TerrainChanged { terrain: Some(t) } => Ok(terrain_word(t).to_string()),
+        EventKind::WeatherChanged { weather: Some(w) } => {
+            Ok(format!("weather {}", weather_word(w)))
+        }
+        EventKind::TerrainChanged { terrain: Some(t) } => {
+            Ok(format!("terrain {}", terrain_word(t)))
+        }
         other => {
             return Err(unsupported(format!(
                 "{other:?} has no inline move-qualifier tracker grammar yet"
@@ -689,6 +703,7 @@ fn reactions_requiring_explicit_render<'a>(
                 _ => false,
             })
         {
+            explicit.extend(r.reactions.iter());
             continue;
         }
         if matches!(r.kind, EventKind::Faint { .. })
@@ -706,6 +721,7 @@ fn reactions_requiring_explicit_render<'a>(
                 }
             )
         {
+            explicit.extend(r.reactions.iter());
             continue;
         }
         // Protect-style resolution emits this bookkeeping child even
@@ -948,11 +964,16 @@ fn side_condition_word(condition: &poke_rust::state::dex_data::SideCondition) ->
         Mist => "mist",
         QuickGuard => "quickguard",
         SafeGuard => "safeguard",
-        Spikes(_) => "spikes",
+        Spikes(0) => "spikes0",
+        Spikes(1) => "spikes",
+        Spikes(2) => "spikes2",
+        Spikes(_) => "spikes3",
         StealthRock => "stealthrock",
         StickyWeb(_) => "stickyweb",
         TailWind => "tailwind",
-        ToxicSpikes(_) => "toxicspikes",
+        ToxicSpikes(0) => "toxicspikes0",
+        ToxicSpikes(1) => "toxicspikes",
+        ToxicSpikes(_) => "toxicspikes2",
         WideGuard => "wideguard",
     }
 }
@@ -1171,7 +1192,9 @@ mod tests {
             unreachable!()
         };
         let all_p1: Vec<usize> = (0..preview.p1_mons.len()).collect();
-        let belief = team_preview_belief.into_battle_state(Player::P1, &[], &all_p1, &[], &[]);
+        let mut belief =
+            team_preview_belief.into_battle_state(Player::P1, &[], &all_p1, &[], &[]);
+        belief.back_mons_per_side = 2;
         let mut roster_species: Vec<Species> = Vec::new();
         for mon in preview.p1_mons.iter().chain(preview.p2_mons.iter()) {
             if !roster_species.contains(&mon.species) {
@@ -1269,12 +1292,16 @@ mod tests {
             )
         });
         let mut events = Vec::new();
+        let mut end_of_turn_reactions = Vec::new();
         for line in lines {
             match line {
                 crate::tracker_parse::TrackerLine::Event(event) => events.push(event),
+                crate::tracker_parse::TrackerLine::EndOfTurnReaction(event) => {
+                    end_of_turn_reactions.push(event)
+                }
                 crate::tracker_parse::TrackerLine::EndOfTurn => events.push(InformationEvent {
                     kind: EventKind::EndOfTurn,
-                    reactions: Vec::new(),
+                    reactions: std::mem::take(&mut end_of_turn_reactions),
                 }),
             }
         }
@@ -1462,13 +1489,17 @@ mod tests {
                 });
 
         let mut turn_events = Vec::new();
+        let mut end_of_turn_reactions = Vec::new();
         for line in lines {
             match line {
                 crate::tracker_parse::TrackerLine::Event(ev) => turn_events.push(ev),
+                crate::tracker_parse::TrackerLine::EndOfTurnReaction(ev) => {
+                    end_of_turn_reactions.push(ev)
+                }
                 crate::tracker_parse::TrackerLine::EndOfTurn => {
                     turn_events.push(InformationEvent {
                         kind: EventKind::EndOfTurn,
-                        reactions: Vec::new(),
+                        reactions: std::mem::take(&mut end_of_turn_reactions),
                     })
                 }
             }
@@ -1646,8 +1677,11 @@ mod tests {
         let max_turns = fuzz_env_u64("POKERUST_TRACKER_FUZZ_MAX_TURNS", 150) as usize;
         let replay = fuzz_env_bool("POKERUST_TRACKER_FUZZ_REPLAY");
         let real_teams = fuzz_env_bool("POKERUST_TRACKER_FUZZ_REAL_TEAMS");
+        let continue_on_failure = fuzz_env_bool("POKERUST_TRACKER_FUZZ_CONTINUE");
+        let mut failed_seeds = Vec::new();
 
         for iter in seed_start..seed_start.saturating_add(iterations) {
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut rng = StdRng::seed_from_u64(iter);
             let (preview, matchup) = if real_teams {
                 let p1_path = REAL_FUZZ_TEAMSHEETS[rng.gen_range(0..REAL_FUZZ_TEAMSHEETS.len())];
@@ -1834,6 +1868,19 @@ mod tests {
                     break;
                 }
             }
+            }));
+            if let Err(payload) = run {
+                if continue_on_failure {
+                    failed_seeds.push(iter);
+                    continue;
+                }
+                std::panic::resume_unwind(payload);
+            }
+        }
+        if !failed_seeds.is_empty() {
+            panic!(
+                "tracker fuzz completed the requested range with failing seeds: {failed_seeds:?}"
+            );
         }
     }
 }

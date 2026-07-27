@@ -255,8 +255,14 @@ pub async fn create_tracker(
     // "back" (none "active") does the identical thing for their own side —
     // fully `Known`, just not on the field yet.
     let all_p1_indices: Vec<usize> = (0..preview.p1_mons.len()).collect();
-    let battle_belief =
+    let mut battle_belief =
         team_preview_belief.into_battle_state(Player::P1, &[], &all_p1_indices, &[], &[]);
+    // `into_battle_state` normally receives the selected team and therefore
+    // derives this from that roster. Tracker setup deliberately passes the
+    // full six-mon sheet so leads can be entered later, so restore the
+    // format's actual bench size explicitly.
+    battle_belief.back_mons_per_side =
+        req.brought_per_side.saturating_sub(req.active_per_side);
 
     let mut roster_species: Vec<Species> = Vec::new();
     for mon in preview.p1_mons.iter().chain(preview.p2_mons.iter()) {
@@ -325,22 +331,24 @@ pub async fn delete_tracker(State(app): State<AppState>, Path(id): Path<String>)
 fn split_into_turns(lines: Vec<TrackerLine>) -> Result<Vec<Vec<InformationEvent>>, String> {
     let mut turns = Vec::new();
     let mut current: Vec<InformationEvent> = Vec::new();
+    let mut end_of_turn_reactions: Vec<InformationEvent> = Vec::new();
     for line in lines {
         match line {
             TrackerLine::Event(ev) => current.push(ev),
+            TrackerLine::EndOfTurnReaction(ev) => end_of_turn_reactions.push(ev),
             TrackerLine::EndOfTurn => {
                 current.push(InformationEvent {
                     kind: EventKind::EndOfTurn,
-                    reactions: Vec::new(),
+                    reactions: std::mem::take(&mut end_of_turn_reactions),
                 });
                 turns.push(std::mem::take(&mut current));
             }
         }
     }
-    if !current.is_empty() {
+    if !current.is_empty() || !end_of_turn_reactions.is_empty() {
         return Err(format!(
             "{} event(s) after the last 'endofturn' — every turn must end with an explicit endofturn line",
-            current.len()
+            current.len() + end_of_turn_reactions.len()
         ));
     }
     if turns.is_empty() {
@@ -727,7 +735,7 @@ pub async fn preview_tracker_events(
         .into_iter()
         .filter_map(|line| match line {
             TrackerLine::Event(ev) => Some(ev),
-            TrackerLine::EndOfTurn => None,
+            TrackerLine::EndOfTurn | TrackerLine::EndOfTurnReaction(_) => None,
         })
         .collect();
     let events = fold_leads_and_entry_abilities(events);

@@ -110,6 +110,15 @@ pub fn augment_turn(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<InformationEvent> {
     let mut scratch = belief.clone();
+    // Mirror Armor changes where Intimidate's guaranteed drop lands. Tracker
+    // text flattens its reveal into a later line, so make that reveal visible
+    // before augmenting the earlier Intimidate event. Unlike Defiant or
+    // Competitive, this does not synthesize the explicitly typed reaction;
+    // it only suppresses the incorrect direct drop.
+    let mut mirror_armor_slots = HashSet::new();
+    for event in &events {
+        collect_mirror_armor_reveals(event, &mut mirror_armor_slots);
+    }
     let mut live_slots: HashSet<FieldSlot> = [Player::P1, Player::P2]
         .into_iter()
         .flat_map(|player| {
@@ -129,6 +138,11 @@ pub fn augment_turn(
     events
         .into_iter()
         .flat_map(|e| {
+            for slot in &mirror_armor_slots {
+                if let Some(mon) = active_mon_mut(&mut scratch, *slot) {
+                    mon.possible_abilities = Unknown::Known(Ability::MirrorArmor);
+                }
+            }
             match &e.kind {
                 EventKind::Switch(sw) => {
                     if !is_zero_hp(&sw.hp) {
@@ -183,15 +197,29 @@ pub fn augment_turn(
             // still tick, on an ordinary "fainted but a reserve is waiting"
             // turn — see the wide unit tests below distinguishing the two.
             let side_ambiguously_wiped = |player: Player| -> bool {
-                let (active, known_back) = match player {
-                    Player::P1 => (&scratch.p1_active_mons, &scratch.p1_known_back_mons),
-                    Player::P2 => (&scratch.p2_active_mons, &scratch.p2_known_back_mons),
+                let (active, known_back, fainted) = match player {
+                    Player::P1 => (
+                        &scratch.p1_active_mons,
+                        &scratch.p1_known_back_mons,
+                        &scratch.p1_fainted_mons,
+                    ),
+                    Player::P2 => (
+                        &scratch.p2_active_mons,
+                        &scratch.p2_known_back_mons,
+                        &scratch.p2_fainted_mons,
+                    ),
                 };
+                // Closed-sheet setup retains unbrought roster candidates.
+                // Once every actual bench slot is represented in the fainted
+                // bucket, those extras cannot be reserves in this battle.
+                let bench_slots_exhausted =
+                    fainted.len() >= scratch.back_mons_per_side as usize;
                 !active.is_empty()
                     && active.iter().all(|mon| mon.fainted || is_zero_hp(&mon.hp))
-                    && !known_back
-                        .iter()
-                        .any(|mon| !mon.fainted && !is_zero_hp(&mon.hp))
+                    && (bench_slots_exhausted
+                        || !known_back
+                            .iter()
+                            .any(|mon| !mon.fainted && !is_zero_hp(&mon.hp)))
             };
             let game_might_already_be_over = matches!(augmented.kind, EventKind::EndOfTurn)
                 && (side_ambiguously_wiped(Player::P1) || side_ambiguously_wiped(Player::P2));
@@ -220,6 +248,22 @@ pub fn augment_turn(
             out
         })
         .collect()
+}
+
+fn collect_mirror_armor_reveals(
+    event: &InformationEvent,
+    slots: &mut HashSet<FieldSlot>,
+) {
+    if let EventKind::AbilityRevealed {
+        slot,
+        ability: Ability::MirrorArmor,
+    } = &event.kind
+    {
+        slots.insert(*slot);
+    }
+    for reaction in &event.reactions {
+        collect_mirror_armor_reveals(reaction, slots);
+    }
 }
 
 fn remove_fainted_slots(event: &InformationEvent, live_slots: &mut HashSet<FieldSlot>) {
@@ -619,25 +663,59 @@ fn augment_with_live_slots(
     // A switch/mega parent establishes the entering identity before its
     // nested ability reactions fire.
     fold_event_kind_into_synthesis_scratch(&mut reaction_scratch, &event.kind, pokemon_dex);
+    // A simultaneous lead event may carry Intimidate and the target's Mirror
+    // Armor as sibling reactions. The switch fold above installs the entering
+    // identities, so apply all nested Mirror Armor reveals now, before walking
+    // the ordered siblings and synthesizing Intimidate's targets.
+    let mut nested_mirror_armor_slots = HashSet::new();
+    collect_mirror_armor_reveals(&event, &mut nested_mirror_armor_slots);
+    for slot in nested_mirror_armor_slots {
+        if let Some(mon) = active_mon_mut(&mut reaction_scratch, slot) {
+            mon.possible_abilities = Unknown::Known(Ability::MirrorArmor);
+        }
+    }
     let child_allows_entry_ability = matches!(
         event.kind,
         EventKind::Switch(_)
             | EventKind::SimultaneousSwitch { .. }
             | EventKind::MegaEvolution { .. }
     );
+    // Forced switches are flattened by tracker move qualifiers as sibling
+    // reactions (`Switch`, then `AbilityRevealed`) rather than preserving the
+    // engine's nested Switch->Ability tree. Remember those entering slots
+    // while walking siblings so their immediately-following ability reveal
+    // still receives entry-effect synthesis.
+    let mut sibling_entered_slots = HashSet::new();
     event.reactions = event
         .reactions
         .into_iter()
         .map(|reaction| {
+            let sibling_entry_ability = matches!(
+                &reaction.kind,
+                EventKind::AbilityRevealed { slot, .. }
+                    if sibling_entered_slots.contains(slot)
+            );
             let augmented = augment_with_live_slots(
                 reaction,
                 &reaction_scratch,
                 move_dex,
                 pokemon_dex,
                 live_slots,
-                child_allows_entry_ability,
+                child_allows_entry_ability || sibling_entry_ability,
             );
             fold_event_into_synthesis_scratch(&mut reaction_scratch, &augmented, pokemon_dex);
+            match &augmented.kind {
+                EventKind::Switch(sw) => {
+                    sibling_entered_slots.insert(sw.slot);
+                }
+                EventKind::SimultaneousSwitch { switches } => {
+                    sibling_entered_slots.extend(switches.iter().map(|sw| sw.slot));
+                }
+                EventKind::AbilityRevealed { slot, .. } => {
+                    sibling_entered_slots.remove(slot);
+                }
+                _ => {}
+            }
             augmented
         })
         .collect();
@@ -1022,12 +1100,39 @@ fn synthesize_per_mon_effects(
             VolatileStatus::Encore(_)
             | VolatileStatus::Disable(_)
             | VolatileStatus::Stockpile(_) => None,
+            VolatileStatus::Substitute(_) => {
+                let definitely_affordable = mon_at(belief, target).is_some_and(|mon| match mon.hp {
+                    PokemonHP::Percent(percent) => percent > 25,
+                    PokemonHP::Number(hp) if mon.min_stats[0] == mon.max_stats[0] => {
+                        hp > mon.max_stats[0] / 4
+                    }
+                    _ => false,
+                });
+                let already_active = mon_at(belief, target).is_some_and(|mon| {
+                    mon.volatiles.iter().any(|state| {
+                        matches!(
+                            state,
+                            VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                                | VolatileStatusState::MoveStatus(
+                                    VolatileStatus::Substitute(_),
+                                    _
+                                )
+                        )
+                    })
+                });
+                (definitely_affordable && !already_active)
+                    .then_some(VolatileStatus::Substitute(0))
+            }
             VolatileStatus::LeechSeed => {
                 let definitely_seedable = mon_at(belief, target).is_some_and(|mon| {
                     matches!(
                         &mon.possible_types,
                         Unknown::Known(types) if !types.contains(&PokemonType::Grass)
-                    )
+                    ) && !mon.volatiles.iter().any(|state| matches!(
+                        state,
+                        VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _)
+                            | VolatileStatusState::MoveStatus(VolatileStatus::LeechSeed, _)
+                    ))
                 });
                 definitely_seedable.then_some(VolatileStatus::LeechSeed)
             }
@@ -1179,6 +1284,12 @@ fn adjusted_boost_delta(
 /// `Faint` sibling — see this module's doc comment for why this can't be left
 /// to Pass 1's belt-and-braces alone.
 fn synthesize_guaranteed_faints(reactions: &mut Vec<InformationEvent>) {
+    let mut existing: HashMap<FieldSlot, usize> = HashMap::new();
+    for reaction in reactions.iter() {
+        if let EventKind::Faint { slot } = reaction.kind {
+            *existing.entry(slot).or_default() += 1;
+        }
+    }
     let mut faint_slots: Vec<FieldSlot> = Vec::new();
     for r in reactions.iter() {
         let zeroed = match &r.kind {
@@ -1187,13 +1298,17 @@ fn synthesize_guaranteed_faints(reactions: &mut Vec<InformationEvent>) {
             | EventKind::SetHp { target, new_hp, .. } => is_zero_hp(new_hp).then_some(*target),
             _ => None,
         };
-        if let Some(target) = zeroed
-            && !faint_slots.contains(&target)
-            && !reactions
-                .iter()
-                .any(|r2| matches!(&r2.kind, EventKind::Faint { slot } if *slot == target))
-        {
-            faint_slots.push(target);
+        if let Some(target) = zeroed {
+            if let Some(count) = existing.get_mut(&target)
+                && *count > 0
+            {
+                *count -= 1;
+            } else {
+                // Preserve one Faint per zero-HP event. The simulator can emit
+                // two when separate same-action effects both land on zero
+                // (for example Rough Skin followed by recoil).
+                faint_slots.push(target);
+            }
         }
     }
     for slot in faint_slots {
@@ -2007,6 +2122,7 @@ mod tests {
         // still fire normally here. Guards against over-restricting the
         // feature for the common case while fixing the ambiguous-wipe one.
         let mut belief = test_belief();
+        belief.back_mons_per_side = 1;
         belief.weather = Some(Weather::Sandstorm);
         belief.weather_turns = Some(Unknown::Known(1));
         belief
@@ -2133,7 +2249,7 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),

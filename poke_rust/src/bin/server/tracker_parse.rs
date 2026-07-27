@@ -71,6 +71,8 @@ pub struct ParseError {
 #[derive(Debug)]
 pub enum TrackerLine {
     Event(InformationEvent),
+    /// A reaction belonging to the terminal `EndOfTurn` node.
+    EndOfTurnReaction(InformationEvent),
     EndOfTurn,
 }
 
@@ -679,11 +681,16 @@ fn side_condition_from_word(word: &str) -> Option<SideCondition> {
         "mist" => Some(SideCondition::Mist),
         "quickguard" => Some(SideCondition::QuickGuard),
         "safeguard" => Some(SideCondition::SafeGuard),
-        "spikes" => Some(SideCondition::Spikes(1)),
+        "spikes0" => Some(SideCondition::Spikes(0)),
+        "spikes" | "spikes1" => Some(SideCondition::Spikes(1)),
+        "spikes2" => Some(SideCondition::Spikes(2)),
+        "spikes3" => Some(SideCondition::Spikes(3)),
         "stealthrock" => Some(SideCondition::StealthRock),
         "stickyweb" => Some(SideCondition::StickyWeb(None)),
         "tailwind" => Some(SideCondition::TailWind),
-        "toxicspikes" => Some(SideCondition::ToxicSpikes(1)),
+        "toxicspikes0" => Some(SideCondition::ToxicSpikes(0)),
+        "toxicspikes" | "toxicspikes1" => Some(SideCondition::ToxicSpikes(1)),
+        "toxicspikes2" => Some(SideCondition::ToxicSpikes(2)),
         "wideguard" => Some(SideCondition::WideGuard),
         _ => None,
     }
@@ -786,7 +793,23 @@ fn parse_line(
     slot_species: &mut HashMap<FieldSlot, Species>,
 ) -> Result<TrackerLine, ParseError> {
     if norm(tokens[0]) == "endofturn" || norm(tokens[0]) == "eot" {
-        return Ok(TrackerLine::EndOfTurn);
+        if tokens.len() == 1 {
+            return Ok(TrackerLine::EndOfTurn);
+        }
+        return match parse_line(
+            &tokens[1..],
+            line_no,
+            belief,
+            move_dex,
+            pokemon_dex,
+            hp_readings,
+            slot_species,
+        )? {
+            TrackerLine::Event(event) => Ok(TrackerLine::EndOfTurnReaction(event)),
+            TrackerLine::EndOfTurn | TrackerLine::EndOfTurnReaction(_) => {
+                Err(err(line_no, "invalid nested end-of-turn marker"))
+            }
+        };
     }
     // Standalone field-effect lines: `weather rain`, `terrain electric`.
     match norm(tokens[0]).as_str() {
@@ -1707,6 +1730,34 @@ fn parse_move_line(
                 target: current,
                 volatile: VolatileStatus::Stockpile(level),
             }));
+        } else if n == "weather" {
+            i += 1;
+            let weather_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, "weather requires a name"))?;
+            let normalized = norm(weather_tok);
+            let weather = if normalized == "none" || normalized == "clear" {
+                None
+            } else {
+                Some(weather_from_word(&normalized).ok_or_else(|| {
+                    err(line_no, format!("unrecognized weather '{weather_tok}'"))
+                })?)
+            };
+            children.push(leaf(EventKind::WeatherChanged { weather }));
+        } else if n == "terrain" {
+            i += 1;
+            let terrain_tok = rest
+                .get(i)
+                .ok_or_else(|| err(line_no, "terrain requires a name"))?;
+            let normalized = norm(terrain_tok);
+            let terrain = if normalized == "none" || normalized == "clear" {
+                None
+            } else {
+                Some(terrain_from_word(&normalized).ok_or_else(|| {
+                    err(line_no, format!("unrecognized terrain '{terrain_tok}'"))
+                })?)
+            };
+            children.push(leaf(EventKind::TerrainChanged { terrain }));
         } else if n == "field" || n == "pseudoweather" {
             let effect_tok = rest
                 .get(i + 1)
@@ -2026,6 +2077,26 @@ mod tests {
             assert_eq!(lines.len(), 1);
             assert!(matches!(lines[0], TrackerLine::EndOfTurn));
         }
+    }
+
+    #[test]
+    fn eot_prefixed_event_retains_end_of_turn_parentage() {
+        let belief = test_belief();
+        let lines =
+            parse_tracker_text("eot p1 damage 50hp\nendofturn", &belief, move_dex(), pokemon_dex())
+                .unwrap();
+        assert!(matches!(
+            &lines[0],
+            TrackerLine::EndOfTurnReaction(InformationEvent {
+                kind: EventKind::DamageDealt {
+                    target,
+                    new_hp: PokemonHP::Number(50),
+                    ..
+                },
+                ..
+            }) if *target == p1()
+        ));
+        assert!(matches!(lines[1], TrackerLine::EndOfTurn));
     }
 
     /// Regression: several `cant_reason_from_word` words (Taunt, Disable,
@@ -2363,7 +2434,7 @@ mod tests {
         let events: Vec<InformationEvent> = lines
             .into_iter()
             .map(|l| match l {
-                TrackerLine::Event(ev) => ev,
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => ev,
                 TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
             })
             .collect();
@@ -2426,7 +2497,7 @@ mod tests {
         let events: Vec<InformationEvent> = lines
             .into_iter()
             .map(|l| match l {
-                TrackerLine::Event(ev) => ev,
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => ev,
                 TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
             })
             .collect();
@@ -2477,7 +2548,7 @@ mod tests {
         let mut turn_events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => turn_events.push(ev),
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => turn_events.push(ev),
                 TrackerLine::EndOfTurn => turn_events.push(leaf(EventKind::EndOfTurn)),
             }
         }
@@ -2809,7 +2880,7 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),
@@ -2884,7 +2955,7 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),
@@ -2919,7 +2990,7 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),

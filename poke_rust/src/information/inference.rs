@@ -2431,9 +2431,18 @@ fn pass1_apply_event(
             // A self-switch move with no viable replacement (or one that failed its
             // trigger condition) never enters the simulator's replacement phase.
             state.self_switch_pending = None;
+            // Tracker mode represents the team-preview -> battle setup as a
+            // leads-only, EndOfTurn-terminated batch. The simulator deliberately
+            // applies no residual effects during that setup pass, so the absence
+            // of sand chip is not immunity evidence. Capture this before
+            // `apply_end_of_turn` advances `turn_number`.
+            let is_battle_start_setup =
+                state.turn_number == 0 && ctx.move_users_this_turn.is_empty();
             apply_end_of_turn(state, event, ctx);
             pass_eot_heal(state, event, ctx);
-            pass_eot_sand_immunity(state, event, ctx);
+            if !is_battle_start_setup {
+                pass_eot_sand_immunity(state, event, ctx);
+            }
             pass_eot_self_status(state, event, ctx);
         }
 

@@ -3,6 +3,25 @@
 ### Fixes
 Tracker improvements:
 
+- [ ] Eliminate the remaining tracker-fuzz Illusion identity self-heals. In
+  real-team round trips, a physical slot can transiently be promoted to
+  `ZoroarkHisui`; later moves that only the disguise species learns trigger
+  caught `species cannot learn revealed move` contradictions before the
+  conservative recovery path widens the belief. The pipeline now completes,
+  but these panic-hook diagnostics show avoidable identity churn. Reproduce with
+  `POKERUST_TRACKER_FUZZ_REAL_TEAMS=1`,
+  `POKERUST_TRACKER_FUZZ_SEED_START=110018`, and
+  `POKERUST_TRACKER_FUZZ_ITERS=1`. The fix must preserve the newest-generation
+  rule that direct move damage ends Illusion while indirect damage does not.
+- [ ] Make tracker guaranteed-entry-effect synthesis robust to boost-state
+  uncertainty. If the concrete target is already at the -6 floor but the
+  belief has lost/widened that boost history, a bare Intimidate reveal invents
+  an extra `BoostChanged`; the symmetric +6 ceiling can affect reactive boosts.
+  Representative seeds from the 110000..120000 real-team sweep are `110143`,
+  `110204`, and `119973`. Either retain exact observable boost history across
+  every switch/forced-switch shape or extend tracker syntax so an explicitly
+  observed no-effect/target list suppresses belief-derived extras.
+
 ### New features
 Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
 cache and `information/determinize.rs` samples a complete, playable `BattleState`
