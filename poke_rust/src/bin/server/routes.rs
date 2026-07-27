@@ -21,15 +21,19 @@ use poke_rust::benchmarking;
 use poke_rust::data::item::Item;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
+use poke_rust::meta::MetaFormat;
 use poke_rust::simulator;
 use poke_rust::state::battle::Player;
 
 use crate::dto::*;
-use crate::session::{self, BattleSession, Dexes, SessionConfig};
+use crate::session::{self, BattleSession, Dexes, MetaDexes, SessionConfig};
 
 #[derive(Clone)]
 pub struct AppState {
     pub dexes: Arc<Dexes>,
+    /// Meta Team Generator usage-stats caches — see `MetaDexes`'s doc comment
+    /// for why a missing cache is not fatal to the server itself.
+    pub meta: Arc<MetaDexes>,
     pub sessions: Arc<Mutex<HashMap<String, BattleSession>>>,
     /// Tracker-mode sessions — a separate map from `sessions` since a tracker
     /// session has no opponent-simulating `MatchState` (see `crate::tracker`'s
@@ -74,6 +78,45 @@ fn lock_sessions(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, Ba
     app.sessions.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Resolve one side's teamsheet text for `create_battle`.
+///
+/// `mode` is `CreateBattleRequest.p1TeamMode`/`p2TeamMode`: `"sheet"` (the
+/// default) passes `sheet` through unchanged; `"meta"` ignores it and
+/// synthesizes a fresh teamsheet from usage data instead
+/// (`meta::generate_meta_team` + `meta::render_teamsheet`). Rendering back to
+/// text rather than building a `TeamPreviewState` directly means a generated
+/// side is validated by the exact same parse path
+/// (`simulator::team_preview_state_from_team_strings`) and the roster checks
+/// right after it in `create_battle` that a pasted team already goes through.
+fn resolve_team_text(
+    label: &str,
+    mode: &str,
+    sheet: &str,
+    app: &AppState,
+    format: MetaFormat,
+    brought_per_side: u8,
+    seed: u64,
+) -> Result<String, String> {
+    if mode != "meta" {
+        return Ok(sheet.to_string());
+    }
+    let Some(meta_dex) = app.meta.for_format(format) else {
+        return Err(format!(
+            "{label}: meta team requested but usage data is unavailable for this format \
+             (see meta_scraper/README.md to populate it)"
+        ));
+    };
+    let team = poke_rust::meta::generate_meta_team(
+        meta_dex,
+        &app.dexes.pokemon_dex,
+        &app.dexes.learnset_dex,
+        brought_per_side as usize,
+        seed,
+    )
+    .map_err(|e| format!("{label}: {e}"))?;
+    Ok(poke_rust::meta::render_teamsheet(&team))
+}
+
 pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
@@ -104,9 +147,42 @@ pub async fn create_battle(
         Some(set)
     };
 
-    let preview = simulator::team_preview_state_from_team_strings(
+    // Synthesize a teamsheet from usage data for any side whose `TeamMode` asks
+    // for one, then fall through the exact same parse path a pasted team takes —
+    // see `resolve_team_text`'s doc comment.
+    let format = MetaFormat::from_active_per_side(req.active_per_side);
+    let meta_seed = req.meta_seed.unwrap_or_else(rand::random::<u64>);
+    let p1_team = match resolve_team_text(
+        "p1Team",
+        &req.p1_team_mode,
         &req.p1_team,
+        &app,
+        format,
+        req.brought_per_side,
+        meta_seed,
+    ) {
+        Ok(text) => text,
+        Err(msg) => return unprocessable(msg),
+    };
+    let p2_team = match resolve_team_text(
+        "p2Team",
+        &req.p2_team_mode,
         &req.p2_team,
+        &app,
+        format,
+        req.brought_per_side,
+        // Distinct from p1's seed so two "meta" sides in one request don't
+        // draw the same team; `StdRng` decorrelates adjacent seeds fine, no
+        // fancier mixing needed.
+        meta_seed.wrapping_add(1),
+    ) {
+        Ok(text) => text,
+        Err(msg) => return unprocessable(msg),
+    };
+
+    let preview = simulator::team_preview_state_from_team_strings(
+        &p1_team,
+        &p2_team,
         &app.dexes.pokemon_dex,
         &app.dexes.move_dex,
         req.active_per_side,

@@ -21,7 +21,7 @@ use clap::Parser;
 use tower_http::cors::CorsLayer;
 
 use routes::AppState;
-use session::Dexes;
+use session::{Dexes, MetaDexes};
 
 #[derive(Parser, Debug)]
 #[command(about = "PokeRust web API server")]
@@ -51,6 +51,14 @@ struct Args {
     /// Directory for the on-disk sprite cache (gitignored; created if missing)
     #[arg(long, default_value = "../sprite_cache")]
     sprite_cache_dir: PathBuf,
+
+    /// Root of the cached Champions usage-stats scrape (see
+    /// `meta_scraper/README.md`), used by the Meta Team Generator
+    /// (`CreateBattleRequest.p1TeamMode`/`p2TeamMode == "meta"`). Missing or
+    /// unloadable is non-fatal — logged at startup, and only a request that
+    /// actually asks for a meta team fails (422), not the whole server.
+    #[arg(long, default_value = "../meta_scraper/data")]
+    meta_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -81,8 +89,11 @@ async fn main() {
         .canonicalize()
         .expect("failed to resolve sprite cache directory");
 
+    let meta = Arc::new(load_meta_dexes(&args.meta_dir));
+
     let state = AppState {
         dexes,
+        meta,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         tracker_sessions: Arc::new(Mutex::new(HashMap::new())),
         sprite_cache_dir,
@@ -118,4 +129,44 @@ async fn main() {
         .await
         .expect("failed to bind port");
     axum::serve(listener, app).await.expect("server error");
+}
+
+/// Load both formats' usage-stats caches for the Meta Team Generator.
+///
+/// Best-effort: `meta_scraper/data` is gitignored and regenerable (see its
+/// README), so a fresh clone or an environment that never ran the scraper is
+/// expected to be missing it entirely. Logging and continuing with `None`
+/// keeps that the server's problem to report per-request (422 on an actual
+/// `"meta"` team-mode request), not a reason to refuse to start.
+fn load_meta_dexes(root: &std::path::Path) -> MetaDexes {
+    let mut dexes = MetaDexes::default();
+    for (format, slot) in [
+        (
+            poke_rust::meta::MetaFormat::Singles,
+            &mut dexes.singles,
+        ),
+        (
+            poke_rust::meta::MetaFormat::Doubles,
+            &mut dexes.doubles,
+        ),
+    ] {
+        match poke_rust::meta::MetaDex::load(root, None, format) {
+            Ok(dex) => {
+                println!(
+                    "Loaded {} meta {:?} species (season {})",
+                    dex.len(),
+                    format,
+                    dex.season()
+                );
+                *slot = Some(dex);
+            }
+            Err(e) => {
+                println!(
+                    "Meta Team Generator: no usage data for {format:?} ({e}); \
+                     meta team requests for this format will 422"
+                );
+            }
+        }
+    }
+    dexes
 }

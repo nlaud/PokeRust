@@ -530,8 +530,20 @@ pub struct TurnLogEntry {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBattleRequest {
+    /// Ignored when the matching `TeamMode` is `"meta"` — send `""`.
     pub p1_team: String,
     pub p2_team: String,
+    /// `"sheet"` (default): use `p1_team` as pasted. `"meta"`: ignore
+    /// `p1_team` and generate a fresh team from Champions usage stats
+    /// instead (`meta::generate_meta_team`) — see `routes::resolve_team_text`.
+    #[serde(default = "default_team_mode")]
+    pub p1_team_mode: String,
+    #[serde(default = "default_team_mode")]
+    pub p2_team_mode: String,
+    /// Seeds the Meta Team Generator's draw for reproducibility. `None` picks
+    /// a fresh random seed per request. Unused when both `TeamMode`s are
+    /// `"sheet"`.
+    pub meta_seed: Option<u64>,
     pub active_per_side: u8,
     pub brought_per_side: u8,
     #[serde(default = "default_true")]
@@ -567,6 +579,10 @@ fn default_true() -> bool {
 
 fn default_damage_rolls() -> u8 {
     16
+}
+
+fn default_team_mode() -> String {
+    "sheet".to_string()
 }
 
 fn default_info_mode() -> String {

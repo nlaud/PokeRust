@@ -9,9 +9,6 @@ Tracker improvements:
 - `frontend/src/lib/trackerGrammar.ts` has drifted from `tracker_parse.rs`: `SLOT_VERB_WORDS`/`MOVE_EFFECT_WORDS` are missing `illusion`, `damage`/`heal`/`sethp`, `status`, `cure`, `volatileend`, `encoremove`, `disablemove`, `stockpilelevel`, `copyboosts`, `invertboosts`, `Nhits`; `FIELD_LINE_WORDS` is missing the `side` and `field`/`pseudoweather` line-start keywords; `VOLATILE_WORDS` stops at `forestscurse` (Rust also takes `throatchop`, `mustrecharge`/`recharging`, `substitute`/`sub`, `encore`, `disable`); and nothing knows about `@slot`. Completion-only, so nothing is unparseable — just undiscoverable.
 
 ### New features
-- Meta Team Generator: Added as a setting for either players' team in simulate
-  - Choose a pokemon by usage, then choose a random set for that pokemon by set usages
-  - Then for the rest of the pokemon on the team, combine the teammate pokemon %'s for all of the mons on your team, choose a mon from that distribution, then choose a random set for that pokemon by its usages.
 Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
 cache and `information/determinize.rs` samples a complete, playable `BattleState`
 from a belief. What is left is all fidelity, not correctness; every item below

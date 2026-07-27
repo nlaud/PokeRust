@@ -249,9 +249,21 @@ export interface TurnLogEntry {
  * team preview. */
 export type InformationMode = 'closedSheet' | 'perfect' | 'openSheet' | 'openSheetNatures'
 
+/** `'sheet'` (default): use the matching `p1Team`/`p2Team` text as pasted.
+ * `'meta'`: ignore that text and have the server generate a fresh team from
+ * Champions usage stats instead (the Meta Team Generator). Mirrors
+ * `CreateBattleRequest.p1_team_mode`/`p2_team_mode` in `dto.rs`. */
+export type TeamMode = 'sheet' | 'meta'
+
 export interface CreateBattleRequest {
+  /** Ignored when the matching `TeamMode` is `'meta'` — send `''`. */
   p1Team: string
   p2Team: string
+  p1TeamMode?: TeamMode
+  p2TeamMode?: TeamMode
+  /** Seeds the Meta Team Generator's draw for reproducibility. Omitted picks a
+   * fresh random seed per request. Unused when both `TeamMode`s are `'sheet'`. */
+  metaSeed?: number
   activePerSide: number
   broughtPerSide: number
   statPoints?: boolean

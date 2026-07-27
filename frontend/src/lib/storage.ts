@@ -106,6 +106,11 @@ export interface BattleSetup {
   team1Id: string
   team2Id: string
   informationMode?: 'closedSheet' | 'perfect' | 'openSheet' | 'openSheetNatures'
+  /** `'saved'` (default): use the matching `teamNId`. `'meta'`: ignore it and
+   * have the server generate a team from usage stats instead. Optional so
+   * setups saved before the Meta Team Generator existed still parse. */
+  team1Source?: 'saved' | 'meta'
+  team2Source?: 'saved' | 'meta'
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

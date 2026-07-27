@@ -19,6 +19,13 @@ const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
   { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
 ]
 
+type TeamSource = 'saved' | 'meta'
+
+const TEAM_SOURCE_OPTIONS: { value: TeamSource; label: string }[] = [
+  { value: 'saved', label: 'Saved team' },
+  { value: 'meta', label: 'Generate from meta' },
+]
+
 export default function SetupPanel() {
   const [teams] = useState(loadTeams)
   const [formats] = useState(loadFormats)
@@ -41,18 +48,22 @@ export default function SetupPanel() {
   const [team2Id, setTeam2Id] = useState(
     savedTeam2?.id ?? sortedTeams[1]?.id ?? sortedTeams[0]?.id ?? '',
   )
+  const [team1Source, setTeam1Source] = useState<TeamSource>(saved?.team1Source ?? 'saved')
+  const [team2Source, setTeam2Source] = useState<TeamSource>(saved?.team2Source ?? 'saved')
   const [informationMode, setInformationMode] = useState<InformationMode>(
     saved?.informationMode ?? 'closedSheet',
   )
 
   useEffect(() => {
-    saveBattleSetup({ formatId, team1Id, team2Id, informationMode })
-  }, [formatId, team1Id, team2Id, informationMode])
+    saveBattleSetup({ formatId, team1Id, team2Id, team1Source, team2Source, informationMode })
+  }, [formatId, team1Id, team2Id, team1Source, team2Source, informationMode])
 
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
   const team2 = teams.find((t) => t.id === team2Id)
-  const ready = format && team1 && team2
+  // A "meta" side generates its own team server-side, so it never needs a
+  // saved team selected — only a "saved" side does.
+  const ready = format && (team1Source === 'meta' || team1) && (team2Source === 'meta' || team2)
 
   const start = () => {
     if (!ready) return
@@ -61,8 +72,10 @@ export default function SetupPanel() {
     // the full outcome tree), so full damage-roll granularity is cheap in any
     // format.
     void createBattle({
-      p1Team: team1.sheet,
-      p2Team: team2.sheet,
+      p1Team: team1Source === 'saved' ? (team1?.sheet ?? '') : '',
+      p2Team: team2Source === 'saved' ? (team2?.sheet ?? '') : '',
+      p1TeamMode: team1Source === 'meta' ? 'meta' : 'sheet',
+      p2TeamMode: team2Source === 'meta' ? 'meta' : 'sheet',
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
       forceMaxIvs: format.forceMaxIvs,
@@ -88,15 +101,33 @@ export default function SetupPanel() {
           <Select value={formatId} options={formatOptions} onChange={setFormatId} />
         </label>
 
-        <label className="mb-4 block text-sm">
-          <span className="mb-1 block font-medium">Player 1 team</span>
-          <Select value={team1Id} options={teamOptions} onChange={setTeam1Id} />
-        </label>
+        <div className="mb-4">
+          <span className="mb-1 block text-sm font-medium">Player 1 team</span>
+          <div className="mb-2">
+            <Select
+              value={team1Source}
+              options={TEAM_SOURCE_OPTIONS}
+              onChange={(v) => setTeam1Source(v as TeamSource)}
+            />
+          </div>
+          {team1Source === 'saved' && (
+            <Select value={team1Id} options={teamOptions} onChange={setTeam1Id} />
+          )}
+        </div>
 
-        <label className="mb-4 block text-sm">
-          <span className="mb-1 block font-medium">Player 2 team</span>
-          <Select value={team2Id} options={teamOptions} onChange={setTeam2Id} />
-        </label>
+        <div className="mb-4">
+          <span className="mb-1 block text-sm font-medium">Player 2 team</span>
+          <div className="mb-2">
+            <Select
+              value={team2Source}
+              options={TEAM_SOURCE_OPTIONS}
+              onChange={(v) => setTeam2Source(v as TeamSource)}
+            />
+          </div>
+          {team2Source === 'saved' && (
+            <Select value={team2Id} options={teamOptions} onChange={setTeam2Id} />
+          )}
+        </div>
 
         <label className="mb-6 block text-sm">
           <span className="mb-1 block font-medium">Information mode</span>
@@ -107,9 +138,10 @@ export default function SetupPanel() {
           />
         </label>
 
-        {teams.length === 0 && (
+        {teams.length === 0 && (team1Source === 'saved' || team2Source === 'saved') && (
           <p className="mb-4 text-sm text-warning">
-            No teams yet — create one on the Teams page first.
+            No teams yet — create one on the Teams page, or switch a side to
+            &ldquo;Generate from meta&rdquo;.
           </p>
         )}
         {error && <p className="mb-4 text-sm text-danger">{error}</p>}

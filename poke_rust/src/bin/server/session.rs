@@ -11,6 +11,7 @@ use poke_rust::data::species::Species;
 use poke_rust::information::inference::{InferenceConfig, apply_information};
 use poke_rust::information::information::{InformationEvent, mask_events_for};
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
+use poke_rust::meta::{MetaDex, MetaFormat};
 use poke_rust::simulator;
 use poke_rust::state::battle::{
     BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
@@ -31,6 +32,27 @@ pub struct Dexes {
     /// Used by the inference engine for Illusion narrowing under non-Perfect
     /// information modes; unused (and fine to be empty) otherwise.
     pub learnset_dex: HashMap<Species, HashSet<PokemonMove>>,
+}
+
+/// The usage-stats caches the Meta Team Generator samples from, one per
+/// format. Loading either is best-effort: a missing/corrupt `meta_scraper/data`
+/// directory must not stop the server from serving ordinary pasted-team
+/// battles, so a load failure is logged at startup and leaves that format
+/// `None` — `create_battle` turns that into a 422 only for a request that
+/// actually asks for a meta team.
+#[derive(Default)]
+pub struct MetaDexes {
+    pub singles: Option<MetaDex>,
+    pub doubles: Option<MetaDex>,
+}
+
+impl MetaDexes {
+    pub fn for_format(&self, format: MetaFormat) -> Option<&MetaDex> {
+        match format {
+            MetaFormat::Singles => self.singles.as_ref(),
+            MetaFormat::Doubles => self.doubles.as_ref(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

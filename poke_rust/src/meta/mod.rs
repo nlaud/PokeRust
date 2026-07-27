@@ -13,8 +13,10 @@
 pub mod dex;
 pub mod names;
 pub mod schema;
+pub mod team_gen;
 
 pub use dex::{MetaDex, MetaError, MetaWarning, SpeciesMeta, StatPoints, Weighted};
+pub use team_gen::{GeneratedSet, TeamGenError, generate_meta_team, render_teamsheet};
 
 /// Which of the site's two per-format tables to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
