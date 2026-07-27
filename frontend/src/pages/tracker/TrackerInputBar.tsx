@@ -71,15 +71,11 @@ function applyTopSuggestion(
  * rebuilding the whole script so inference recomputes for real; `Backspace`
  * on an already-empty existing line deletes it the same way Enter does;
  * `Escape` discards the current line's unsaved edits without jumping anywhere
- * new-content-wise; `Shift+Escape` reopens the last COMMITTED turn for editing
- * (discarding whatever's in the current in-progress draft first) — this
- * actually rolls the session back one turn via `popLastCommittedTurn` (a real
- * `PUT /history` rebuild, not a local-only pop), so live preview against the
- * reopened lines is accurate and abandoning the edit without recommitting
- * just leaves the session one turn shorter rather than losing anything
- * silently. A second Shift+Escape while already mid-reopen does not cascade
- * into popping yet another turn (that would merge two turns' lines into one
- * draft) — it's just a non-destructive jump to the end of what's loaded.
+ * new-content-wise; `Shift+Escape` first discards the whole in-progress draft.
+ * When the draft is already empty it reopens the last COMMITTED turn for
+ * editing by actually rolling the session back through `popLastCommittedTurn`
+ * (a real `PUT /history` rebuild, not a local-only pop). Pressing it again
+ * abandons that reopened draft without cascading into another rollback.
  */
 export default function TrackerInputBar() {
   const {
@@ -102,8 +98,7 @@ export default function TrackerInputBar() {
   const [caretPos, setCaretPos] = useState(0)
   const [historyIndex, setHistoryIndex] = useState(0)
   // Set while the draft holds a committed turn popped back open by
-  // Shift+Escape (see that handler) — guards against a second Shift+Escape
-  // cascading into another rollback and merging two turns' lines together.
+  // Shift+Escape; the next press abandons it instead of cascading.
   const [reopenedCommittedTurn, setReopenedCommittedTurn] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -265,12 +260,13 @@ export default function TrackerInputBar() {
   }
 
   async function handleShiftEscape() {
-    if (reopenedCommittedTurn) {
-      // Already mid-edit of a reopened turn — don't cascade into rolling
-      // back yet another committed turn (that would merge two turns' worth
-      // of lines into a single draft, changing turn boundaries on commit).
-      // Just a non-destructive jump to the end of what's already loaded.
-      jumpToAppend(draftLines)
+    if (draftLines.length > 0 || text.trim() !== '' || reopenedCommittedTurn) {
+      // The first Shift+Escape always abandons the current draft. In
+      // particular, don't pop a committed turn while unsaved lines exist.
+      clearPreview()
+      setDraftLines([])
+      setReopenedCommittedTurn(false)
+      jumpToAppend([])
       return
     }
     const popped = await popLastCommittedTurn()
@@ -421,7 +417,7 @@ export default function TrackerInputBar() {
 
       <div className="flex items-center justify-between px-3 pb-1 pt-1">
         <span className="text-[11px] text-ink-muted">
-          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: reopen last turn
+          Enter: save · Shift+Enter: end turn · Esc: cancel · Shift+Esc: clear draft / reopen last turn
         </span>
         {previewEvents.length > 0 && (
           <span className="text-[11px] text-ink-muted">

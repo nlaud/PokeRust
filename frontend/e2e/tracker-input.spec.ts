@@ -153,6 +153,14 @@ test.describe('Tracker input bar', () => {
     await page.keyboard.press('Shift+Escape')
     await expect(input).toHaveValue('')
     await expect(lineNumber).toHaveText('1')
+
+    // With no draft left, the next Shift+Escape reopens the last committed
+    // turn; one more abandons that reopened draft without cascading.
+    await page.keyboard.press('Shift+Escape')
+    await expect(lineNumber).toHaveText('3')
+    await page.keyboard.press('Shift+Escape')
+    await expect(input).toHaveValue('')
+    await expect(lineNumber).toHaveText('1')
   })
 })
 

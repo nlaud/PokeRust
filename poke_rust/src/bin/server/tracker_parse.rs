@@ -2760,19 +2760,11 @@ mod tests {
         );
     }
 
-    /// Known limitation, pinned so it's a deliberate choice rather than a surprise:
-    /// the three moves whose charge-turn boost is hardcoded in the engine rather than
-    /// carried in the dex (Meteor Beam / Electro Shot +1 SpA, Skull Bash +1 Def — the
-    /// dex file expresses them in `onTryMove` JS, which `parse_move_entry` doesn't
-    /// read) get that boost synthesized ONLY when `charging` is typed.
-    ///
-    /// A Power Herb one-turn Meteor Beam does raise SpA in the real engine, but from
-    /// the tracker's side there is nothing to distinguish it from the release half of
-    /// a charge that was recorded a turn earlier — both are a bare `p1 meteorbeam o1`
-    /// — and synthesizing a boost that didn't happen is worse than omitting one the
-    /// user can type as `p1 meteorbeam o1 spa+1`.
+    /// Meteor Beam's hardcoded charge boost still occurs when Power Herb makes
+    /// it a one-turn move. Pure charge turns are now recorded on the belief, so
+    /// a later release can be distinguished and will not synthesize it twice.
     #[test]
-    fn hardcoded_charge_boost_is_not_synthesized_without_the_marker() {
+    fn hardcoded_charge_boost_is_synthesized_for_a_one_turn_use() {
         let belief = test_belief();
         let lines =
             parse_tracker_text("p1 meteorbeam o1", &belief, move_dex(), pokemon_dex()).unwrap();
@@ -2781,12 +2773,15 @@ mod tests {
         };
         let augmented = augment_with_guaranteed_effects(ev, &belief, move_dex(), pokemon_dex());
         assert!(
-            !augmented
-                .reactions
-                .iter()
-                .any(|r| matches!(r.kind, EventKind::BoostChanged { .. })),
-            "without the marker this is indistinguishable from a release turn, so no \
-             boost is invented; got {:?}",
+            augmented.reactions.iter().any(|r| matches!(
+                r.kind,
+                EventKind::BoostChanged {
+                    target,
+                    boost_idx: 2,
+                    stages: 1
+                } if target == p1()
+            )),
+            "one-turn Meteor Beam should retain its charge boost; got {:?}",
             augmented.reactions
         );
     }

@@ -133,8 +133,10 @@ Two commit tiers, matching the inference engine's own turn-atomic design (see
   pipeline. This one endpoint uniformly handles ending a turn, correcting a
   past event (`ArrowUp` navigates the flat history — every line ever typed,
   committed or still-drafted — for in-place editing), and popping the current
-  draft back via `Shift+Escape`, since none of those are actually different
-  operations from the belief's point of view.
+  last committed turn back via `Shift+Escape` when the current draft is empty,
+  since none of those are actually different operations from the belief's
+  point of view. If a draft is already in progress, `Shift+Escape` clears it
+  first.
 
 `tracker_parse.rs`'s module doc lists the current grammar's scope and known
 simplifications (e.g. every targeted move needs an explicit target slot;
@@ -278,9 +280,10 @@ Geomancy is not one of those: its boosts land when it fires.
 Because the suppression keys on the token rather than on the move, a use that
 skips the charge entirely needs no special handling — a Power Herb Geomancy,
 Solar Beam in harsh sun, or Electro Shot in rain is just an ordinary one-turn
-move line with no `charging` token. The one gap: for Meteor Beam, Electro Shot,
-and Skull Bash, a Power Herb one-turn use is indistinguishable from a release
-turn, so type the charge-turn boost yourself (`p1 meteorbeam o1 spa+1`).
+move line with no `charging` token. Meteor Beam, Electro Shot, and Skull Bash
+retain their charge-turn boost when Power Herb (or rain for Electro Shot)
+makes them one-turn moves. The tracker records pure charge state in the belief,
+so it adds that boost to a one-turn line but not again on the later release.
 
 A slot that spent its turn charging counts as having acted, and a move aimed at
 a slot that is mid-Fly, Dig, Dive, Bounce, Phantom Force, Shadow Force, or Sky
@@ -339,8 +342,10 @@ type `miss`.
   `ragepowder`, `followme`, `magiccoat`, `snatch`, `laserfocus`,
   `miracleeye`, `foresight`, `octolock`, `noretreat`, `gastroacid`,
   `sparklingaria`, `glaiverush`, `charge`/`charged`,
-  `defensecurl`/`defensecurled`, `helpinghand`, `powertrick`, and
-  `forestscurse`.
+  `defensecurl`/`defensecurled`, `helpinghand`, `powertrick`,
+  `forestscurse`, `throatchop`/`throatchopped`,
+  `mustrecharge`/`recharging`, `substitute`/`sub`, `encore`/`encored`, and
+  `disable`/`disabled`.
 
 #### Effects filled in automatically
 
@@ -349,9 +354,10 @@ those observations:
 
 - A revealed supported entry ability adds its deterministic reaction:
   Intimidate, weather/terrain setters, Intrepid Sword, Dauntless Shield,
-  unambiguous Download, and unambiguous Trace. The ordinary ability reveal
-  itself must still be typed. Mega Evolution automatically reveals its Mega
-  form's fixed ability and applies the same reactions.
+  unambiguous Download, unambiguous Trace, and known Defiant/Competitive
+  reactions to opposing stat drops. The ordinary ability reveal itself must
+  still be typed. Mega Evolution automatically reveals its Mega form's fixed
+  ability and applies the same reactions.
 - A move adds its always-on self boost and all structured 100%-chance move-dex
   effects, including guaranteed boosts, status, weather, terrain, and side
   conditions. Random secondaries are never guessed.
@@ -362,13 +368,14 @@ that are not guaranteed by the structured move data must be written explicitly.
 
 #### Phase-1 limits
 
-The grammar currently represents starts of payload-free volatiles only. It
-cannot directly express payload-bearing volatiles such as Disable/Locked Move/
-Choice Lock with their move, or Substitute with its HP. Slot-condition payloads
-such as Wish, Future Sight, and Doom Desire are not synthesized. There are also
-no general-purpose forms yet for curing statuses, ending volatiles or side
-conditions, form changes, Transform, or Illusion ending. Unrecognized input is
-rejected rather than guessed.
+The grammar has dedicated forms for status cures, volatile endings,
+Encore/Disable move payloads, Stockpile levels, side conditions,
+pseudo-weather, boost copying/inversion, Illusion ending, hit counts, and
+explicit `@slot` targets. It still cannot represent every payload-bearing
+volatile (such as Choice Lock or Substitute HP), and slot-condition payloads
+such as Wish, Future Sight, and Doom Desire are not synthesized. Form changes
+other than Mega/Tera/Illusion and Transform remain unsupported. Unrecognized
+input is rejected rather than guessed.
 
 Tracker fuzz coverage lives in the server binary tests. The default sweep runs
 deterministic full battles through simulator events -> tracker text -> parser ->

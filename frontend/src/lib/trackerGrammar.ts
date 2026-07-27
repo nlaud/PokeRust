@@ -31,7 +31,7 @@ export function norm(s: string): string {
  * word list against a perfectly valid numeric token. Checked ahead of
  * `completionsAt`'s normal candidate lookup, not as a replacement for it. */
 export function isSelfCompleteToken(partial: string): boolean {
-  return /^\d+%?$/.test(partial) || /^\d+\/\d+$/.test(partial)
+  return /^\d+%?$/.test(partial) || /^\d+\/\d+$/.test(partial) || /^\d+hits?$/i.test(partial)
 }
 
 /** Per-match name pools an autocomplete session needs: species/moves/
@@ -169,9 +169,8 @@ const CANT_REASON_WORDS: WordGroup[] = [
   group('beakblast'),
 ]
 
-// Bare-word (no payload) volatiles only — mirrors `volatile_from_word` exactly,
-// including its documented gap (payload-bearing volatiles like `Disable(move)`
-// aren't reachable this way; see that function's doc comment).
+// Bare-word volatiles accepted by `volatile_from_word`. Payload-bearing
+// Encore/Disable/Stockpile use their dedicated keywords below.
 const VOLATILE_WORDS: WordGroup[] = [
   group('confusion', 'confused'),
   group('leechseed', 'seeded'),
@@ -226,6 +225,11 @@ const VOLATILE_WORDS: WordGroup[] = [
   group('helpinghand'),
   group('powertrick'),
   group('forestscurse'),
+  group('throatchop', 'throatchopped'),
+  group('mustrecharge', 'recharging'),
+  group('substitute', 'sub'),
+  group('encore', 'encored'),
+  group('disable', 'disabled'),
 ]
 
 const WEATHER_WORDS: WordGroup[] = [
@@ -274,6 +278,21 @@ const MOVE_EFFECT_WORDS: WordGroup[] = [
   // `tracker_parse.rs` treats a repeated name as optional and rejects a
   // different one.
   group('charging'),
+  group('illusion', 'illusionended'),
+  group('damage', 'damaged'),
+  group('heal', 'healed'),
+  group('sethp'),
+  group('status', 'statusinflicted'),
+  group('cure', 'statuscured'),
+  group('volatileend', 'endvolatile'),
+  group('encoremove'),
+  group('disablemove'),
+  group('stockpilelevel'),
+  group('copyboosts', 'boostscopied'),
+  group('invertboosts', 'boostsinverted'),
+  group('field', 'pseudoweather'),
+  group('side'),
+  group('2hits'),
 ]
 
 const SLOT_VERB_WORDS: WordGroup[] = [
@@ -283,6 +302,18 @@ const SLOT_VERB_WORDS: WordGroup[] = [
   group('mustrecharge'),
   group('pass'),
   group('hp'),
+  group('illusion', 'illusionended'),
+  group('damage', 'damaged'),
+  group('heal', 'healed'),
+  group('sethp'),
+  group('status', 'statusinflicted'),
+  group('cure', 'statuscured'),
+  group('volatileend', 'endvolatile'),
+  group('encoremove'),
+  group('disablemove'),
+  group('stockpilelevel'),
+  group('copyboosts', 'boostscopied'),
+  group('invertboosts', 'boostsinverted'),
   // Input alias `o1 charging <move>`, which the parser desugars to the
   // canonical move-line form above.
   group('charging'),
@@ -298,7 +329,28 @@ const TYPE_WORDS: WordGroup[] = [
 
 const SLOT_WORDS: WordGroup[] = [group('p'), group('p1'), group('p2'), group('o'), group('o1'), group('o2')]
 const END_OF_TURN_WORDS: WordGroup[] = [group('endofturn', 'eot')]
-const FIELD_LINE_WORDS: WordGroup[] = [group('weather'), group('terrain')]
+const FIELD_LINE_WORDS: WordGroup[] = [
+  group('weather'),
+  group('terrain'),
+  group('field', 'pseudoweather'),
+  group('side'),
+]
+const PSEUDO_WEATHER_WORDS: WordGroup[] = [
+  group('fairylock'), group('gravity'), group('iondeluge'), group('magicdeluge'),
+  group('mudsport'), group('trickroom'), group('watersport'), group('wonderroom'),
+]
+const SIDE_CONDITION_WORDS: WordGroup[] = [
+  group('auroraveil'), group('reflect'), group('craftyshield'), group('lightscreen'),
+  group('luckychant'), group('matblock'), group('mist'), group('quickguard'),
+  group('safeguard'), group('spikes'), group('stealthrock'), group('stickyweb'),
+  group('tailwind'), group('toxicspikes'), group('wideguard'),
+]
+const EFFECT_STATE_WORDS: WordGroup[] = [
+  group('start', 'started', 'on'),
+  group('end', 'ended', 'off'),
+]
+const SLOT_TARGET_WORDS = ['p1', 'p2', 'o1', 'o2']
+const EXPLICIT_SLOT_WORDS = ['@p1', '@p2', '@o1', '@o2']
 // `leads` is now its own line-start keyword (`leads p <sp>... o <sp>...`),
 // mirroring `tracker_parse.rs`'s standalone-keyword dispatch — not a
 // slot-addressed verb anymore (see `SLOT_VERB_WORDS`, which no longer lists
@@ -423,6 +475,15 @@ export type LinePosition =
   | { kind: 'action' }
   | { kind: 'weatherWord' }
   | { kind: 'terrainWord' }
+  | { kind: 'pseudoWeatherWord' }
+  | { kind: 'effectState' }
+  | { kind: 'sideMarker' }
+  | { kind: 'sideConditionWord' }
+  | { kind: 'statusWord' }
+  | { kind: 'volatileWord' }
+  | { kind: 'moveName' }
+  | { kind: 'slotSource' }
+  | { kind: 'stockpileLevel' }
   | { kind: 'switchSpecies' }
   | { kind: 'leadsSideOrSpecies' }
   | { kind: 'megaSpeciesOrDone' }
@@ -444,6 +505,15 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   const first = norm(tokens[0] ?? '')
   if (first === 'weather') return cursorIndex === 1 ? { kind: 'weatherWord' } : { kind: 'done' }
   if (first === 'terrain') return cursorIndex === 1 ? { kind: 'terrainWord' } : { kind: 'done' }
+  if (first === 'field' || first === 'pseudoweather') {
+    if (cursorIndex === 1) return { kind: 'pseudoWeatherWord' }
+    return cursorIndex === 2 ? { kind: 'effectState' } : { kind: 'done' }
+  }
+  if (first === 'side') {
+    if (cursorIndex === 1) return { kind: 'sideMarker' }
+    if (cursorIndex === 2) return { kind: 'sideConditionWord' }
+    return cursorIndex === 3 ? { kind: 'effectState' } : { kind: 'done' }
+  }
   if (first === 'endofturn' || first === 'eot') return { kind: 'done' }
   // `leads [p|o] <species>... [p|o] <species>...` — every position after the
   // keyword can be either a new side marker or another species of the
@@ -471,6 +541,26 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
     return cursorIndex === 2 ? { kind: 'chargingMove' } : { kind: 'done' }
   }
   if (action === 'hp') return { kind: 'done' } // numeric hpspec — nothing to suggest from a word list
+  if (action === 'illusion' || action === 'illusionended') {
+    return cursorIndex === 2 ? { kind: 'switchSpecies' } : { kind: 'done' }
+  }
+  if (['damage', 'damaged', 'heal', 'healed', 'sethp'].includes(action)) return { kind: 'done' }
+  if (action === 'status' || action === 'statusinflicted' || action === 'cure' || action === 'statuscured') {
+    return cursorIndex === 2 ? { kind: 'statusWord' } : { kind: 'done' }
+  }
+  if (action === 'volatileend' || action === 'endvolatile') {
+    return cursorIndex === 2 ? { kind: 'volatileWord' } : { kind: 'done' }
+  }
+  if (action === 'encoremove' || action === 'disablemove') {
+    return cursorIndex === 2 ? { kind: 'moveName' } : { kind: 'done' }
+  }
+  if (action === 'stockpilelevel') {
+    return cursorIndex === 2 ? { kind: 'stockpileLevel' } : { kind: 'done' }
+  }
+  if (action === 'copyboosts' || action === 'boostscopied') {
+    return cursorIndex === 2 ? { kind: 'slotSource' } : { kind: 'done' }
+  }
+  if (action === 'invertboosts' || action === 'boostsinverted') return { kind: 'done' }
   if (ITEM_VERB_WORDS.some((g) => g.aliases.includes(action))) {
     return cursorIndex === 2 ? { kind: 'itemVerbItem' } : { kind: 'done' }
   }
@@ -478,6 +568,23 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   // means `tokens[1]` was a MOVE (the same length-sensitive collision
   // `tracker_parse.rs:810-827` resolves) — the move-line body loop applies
   // for every token from index 2 onward, including inline item-verb targets.
+  const previous = norm(tokens[cursorIndex - 1] ?? '')
+  const twoBack = norm(tokens[cursorIndex - 2] ?? '')
+  const threeBack = norm(tokens[cursorIndex - 3] ?? '')
+  if (previous === 'illusion' || previous === 'illusionended') return { kind: 'switchSpecies' }
+  if (['damage', 'damaged', 'heal', 'healed', 'sethp'].includes(previous)) return { kind: 'done' }
+  if (previous === 'status' || previous === 'statusinflicted' || previous === 'cure' || previous === 'statuscured') {
+    return { kind: 'statusWord' }
+  }
+  if (previous === 'volatileend' || previous === 'endvolatile') return { kind: 'volatileWord' }
+  if (previous === 'encoremove' || previous === 'disablemove') return { kind: 'moveName' }
+  if (previous === 'stockpilelevel') return { kind: 'stockpileLevel' }
+  if (previous === 'copyboosts' || previous === 'boostscopied') return { kind: 'slotSource' }
+  if (previous === 'field' || previous === 'pseudoweather') return { kind: 'pseudoWeatherWord' }
+  if (twoBack === 'field' || twoBack === 'pseudoweather') return { kind: 'effectState' }
+  if (previous === 'side') return { kind: 'sideMarker' }
+  if (twoBack === 'side') return { kind: 'sideConditionWord' }
+  if (threeBack === 'side') return { kind: 'effectState' }
   return { kind: 'moveBody' }
 }
 
@@ -526,6 +633,24 @@ export function completionsAt(
       return rank(canonicalsOf(WEATHER_WORDS), partial)
     case 'terrainWord':
       return rank(canonicalsOf(TERRAIN_WORDS), partial)
+    case 'pseudoWeatherWord':
+      return rank(canonicalsOf(PSEUDO_WEATHER_WORDS), partial)
+    case 'effectState':
+      return rank(canonicalsOf(EFFECT_STATE_WORDS), partial)
+    case 'sideMarker':
+      return rank(['p', 'o'], partial)
+    case 'sideConditionWord':
+      return rank(canonicalsOf(SIDE_CONDITION_WORDS), partial)
+    case 'statusWord':
+      return rank(canonicalsOf(STATUS_WORDS), partial)
+    case 'volatileWord':
+      return rank(canonicalsOf(VOLATILE_WORDS), partial)
+    case 'moveName':
+      return rank(recased.moves, partial)
+    case 'slotSource':
+      return rank(SLOT_TARGET_WORDS, partial)
+    case 'stockpileLevel':
+      return rank(['1', '2', '3'], partial)
     case 'switchSpecies':
     case 'megaSpeciesOrDone':
       return rank(recased.species, partial)
@@ -540,7 +665,8 @@ export function completionsAt(
     case 'moveBody':
       return rank(
         [
-          ...SLOT_WORDS.filter((g) => g.canonical !== 'p' && g.canonical !== 'o').map((g) => g.canonical),
+          ...SLOT_TARGET_WORDS,
+          ...EXPLICIT_SLOT_WORDS,
           ...canonicalsOf(MOVE_EFFECT_WORDS),
           ...canonicalsOf(STAT_WORDS),
           ...canonicalsOf(STATUS_WORDS),

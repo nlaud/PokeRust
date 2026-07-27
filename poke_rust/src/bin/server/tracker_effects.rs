@@ -188,8 +188,10 @@ pub fn augment_turn(
                     Player::P2 => (&scratch.p2_active_mons, &scratch.p2_known_back_mons),
                 };
                 !active.is_empty()
-                    && active.iter().all(|mon| mon.fainted)
-                    && !known_back.iter().any(|mon| !mon.fainted)
+                    && active.iter().all(|mon| mon.fainted || is_zero_hp(&mon.hp))
+                    && !known_back
+                        .iter()
+                        .any(|mon| !mon.fainted && !is_zero_hp(&mon.hp))
             };
             let game_might_already_be_over = matches!(augmented.kind, EventKind::EndOfTurn)
                 && (side_ambiguously_wiped(Player::P1) || side_ambiguously_wiped(Player::P2));
@@ -284,14 +286,12 @@ fn synthesize_expiry_clears(
 ) -> Vec<InformationEvent> {
     let mut clears = Vec::new();
 
-    if scratch.weather == belief.weather
-        && matches!(belief.weather_turns, Some(Unknown::Known(1)))
+    if scratch.weather == belief.weather && matches!(belief.weather_turns, Some(Unknown::Known(1)))
     {
         clears.push(leaf(EventKind::WeatherChanged { weather: None }));
     }
 
-    if scratch.terrain == belief.terrain
-        && matches!(belief.terrain_turns, Some(Unknown::Known(1)))
+    if scratch.terrain == belief.terrain && matches!(belief.terrain_turns, Some(Unknown::Known(1)))
     {
         clears.push(leaf(EventKind::TerrainChanged { terrain: None }));
     }
@@ -402,13 +402,36 @@ fn fold_switch_into_synthesis_scratch(
     {
         incoming.possible_abilities = Unknown::Known(only.clone());
     }
-    let active = match sw.slot.player {
-        Player::P1 => &mut state.p1_active_mons,
-        Player::P2 => &mut state.p2_active_mons,
+    let (active, known_back, possible_back, fainted) = match sw.slot.player {
+        Player::P1 => (
+            &mut state.p1_active_mons,
+            &mut state.p1_known_back_mons,
+            &mut state.p1_possible_back_mons,
+            &mut state.p1_fainted_mons,
+        ),
+        Player::P2 => (
+            &mut state.p2_active_mons,
+            &mut state.p2_known_back_mons,
+            &mut state.p2_possible_back_mons,
+            &mut state.p2_fainted_mons,
+        ),
     };
+    let is_incoming = |mon: &UnknownPokemonState| matches!(&mon.possible_species, Unknown::Known(species) if species == &sw.species);
+    known_back.retain(|mon| !is_incoming(mon));
+    possible_back.retain(|mon| !is_incoming(mon));
+    fainted.retain(|mon| !is_incoming(mon));
     let index = sw.slot.slot_index as usize;
     if index < active.len() {
-        active[index] = incoming;
+        let outgoing = std::mem::replace(&mut active[index], incoming);
+        if !outgoing.fainted
+            && !is_zero_hp(&outgoing.hp)
+            && !matches!(
+                &outgoing.possible_species,
+                Unknown::Known(species) if species == &sw.species
+            )
+        {
+            known_back.push(outgoing);
+        }
     } else if index == active.len() {
         active.push(incoming);
     }
@@ -550,19 +573,6 @@ pub(crate) fn fold_event_into_synthesis_scratch(
     }
 }
 
-pub(crate) fn fold_ability_reveals_into_synthesis_scratch(
-    state: &mut UnknownBattleState,
-    event: &InformationEvent,
-    pokemon_dex: &HashMap<Species, PokemonData>,
-) {
-    if matches!(event.kind, EventKind::AbilityRevealed { .. }) {
-        fold_event_kind_into_synthesis_scratch(state, &event.kind, pokemon_dex);
-    }
-    for reaction in &event.reactions {
-        fold_ability_reveals_into_synthesis_scratch(state, reaction, pokemon_dex);
-    }
-}
-
 /// Walk `event`'s tree and append guaranteed reactions in place. `belief` is
 /// read-only — it reflects the state *before* this turn's lines are applied,
 /// which is all the synthesis below needs (none of it depends on anything
@@ -609,12 +619,6 @@ fn augment_with_live_slots(
     // A switch/mega parent establishes the entering identity before its
     // nested ability reactions fire.
     fold_event_kind_into_synthesis_scratch(&mut reaction_scratch, &event.kind, pokemon_dex);
-    // Flat tracker text may place an explicitly revealed reactive ability as
-    // a sibling rather than nesting it under the trigger. Make every such
-    // reveal visible to synthesis decisions before processing the siblings.
-    for reaction in &event.reactions {
-        fold_ability_reveals_into_synthesis_scratch(&mut reaction_scratch, reaction, pokemon_dex);
-    }
     let child_allows_entry_ability = matches!(
         event.kind,
         EventKind::Switch(_)
@@ -690,16 +694,37 @@ fn augment_with_live_slots(
                 if let Some((boost_idx, stages)) = charge_turn_boost(move_used) {
                     let delta = adjusted_boost_delta(belief, *user, boost_idx, stages);
                     if delta != 0 {
-                        event.reactions.push(leaf(EventKind::BoostChanged {
-                            target: *user,
-                            boost_idx,
-                            stages: delta,
-                        }));
+                        event.reactions.insert(
+                            0,
+                            leaf(EventKind::BoostChanged {
+                                target: *user,
+                                boost_idx,
+                                stages: delta,
+                            }),
+                        );
                     }
                 }
             } else if let Some(md) = move_dex.get(move_used)
                 && !move_failed_at_all(&event.reactions)
             {
+                // Power Herb, and Electro Shot in rain, skip the visible charge
+                // marker but still grant their charge-turn boost. A matching
+                // Charging volatile means this is instead the later release.
+                if !is_charge_release(belief, *user, move_used)
+                    && let Some((boost_idx, stages)) = charge_turn_boost(move_used)
+                {
+                    let delta = adjusted_boost_delta(belief, *user, boost_idx, stages);
+                    if delta != 0 {
+                        event.reactions.insert(
+                            0,
+                            leaf(EventKind::BoostChanged {
+                                target: *user,
+                                boost_idx,
+                                stages: delta,
+                            }),
+                        );
+                    }
+                }
                 let connected_somewhere = targets.is_empty()
                     || targets.iter().any(|target| {
                         live_slots.contains(target)
@@ -771,6 +796,7 @@ fn augment_with_live_slots(
                             synthesize_per_mon_effects(
                                 &mut event.reactions,
                                 &sec.effect,
+                                *user,
                                 target,
                                 belief,
                             );
@@ -787,6 +813,7 @@ fn augment_with_live_slots(
                             synthesize_per_mon_effects(
                                 &mut event.reactions,
                                 &sec.effect,
+                                *user,
                                 *user,
                                 belief,
                             );
@@ -859,6 +886,18 @@ fn charge_turn_boost(move_used: &PokemonMove) -> Option<(usize, i8)> {
         PokemonMove::SkullBash => Some((1, 1)),
         _ => None,
     }
+}
+
+fn is_charge_release(
+    belief: &UnknownBattleState,
+    user: FieldSlot,
+    move_used: &PokemonMove,
+) -> bool {
+    mon_at(belief, user).is_some_and(|mon| {
+        mon.volatiles.iter().any(
+            |volatile| matches!(volatile, VolatileStatusState::Charging(active, _) if active == move_used),
+        )
+    })
 }
 
 /// Is `slot` currently off the field mid-charge (Fly, Dig, Dive, Bounce, Phantom
@@ -961,6 +1000,7 @@ fn synthesize_field_effects(
 fn synthesize_per_mon_effects(
     reactions: &mut Vec<InformationEvent>,
     effect: &poke_rust::state::dex_data::HitEffect,
+    source: FieldSlot,
     target: FieldSlot,
     belief: &UnknownBattleState,
 ) {
@@ -1008,24 +1048,91 @@ fn synthesize_per_mon_effects(
             reactions.push(leaf(EventKind::VolatileStart { target, volatile }));
         }
     }
-    for (idx, &delta) in effect.boosts.iter().enumerate() {
-        if delta < 0
-            && matches!(
-                mon_at(belief, target).map(|mon| &mon.possible_abilities),
-                Some(Unknown::Known(Ability::MirrorArmor))
-            )
-        {
+    reactions.extend(synthesize_boost_changes(
+        &effect.boosts,
+        source,
+        target,
+        belief,
+    ));
+}
+
+/// Mirror the engine's opponent-stat-drop cascade, including one
+/// Defiant/Competitive activation for every distinct stat lowered.
+fn synthesize_boost_changes(
+    raw_boosts: &[i8; 7],
+    source: FieldSlot,
+    target: FieldSlot,
+    belief: &UnknownBattleState,
+) -> Vec<InformationEvent> {
+    let ability = mon_at(belief, target).and_then(|mon| match &mon.possible_abilities {
+        Unknown::Known(ability) => Some(ability),
+        _ => None,
+    });
+    let mirror_armor = matches!(ability, Some(Ability::MirrorArmor));
+    let mut actual = [0i8; 7];
+    for (idx, &raw) in raw_boosts.iter().enumerate() {
+        if mirror_armor && raw < 0 {
             continue;
         }
-        let delta = adjusted_boost_delta(belief, target, idx, delta);
-        if delta != 0 {
-            reactions.push(leaf(EventKind::BoostChanged {
-                target,
-                boost_idx: idx,
-                stages: delta,
-            }));
+        actual[idx] = adjusted_boost_delta(belief, target, idx, raw);
+    }
+
+    let lowered: Vec<usize> = actual
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, delta)| (*delta < 0).then_some(idx))
+        .collect();
+    let mut events: Vec<_> = actual
+        .iter()
+        .enumerate()
+        .filter_map(|(boost_idx, &stages)| {
+            (stages != 0).then(|| {
+                leaf(EventKind::BoostChanged {
+                    target,
+                    boost_idx,
+                    stages,
+                })
+            })
+        })
+        .collect();
+
+    if source.player != target.player
+        && !lowered.is_empty()
+        && let Some(reactive) = ability
+        && matches!(reactive, Ability::Defiant | Ability::Competitive)
+    {
+        let reaction_idx = if *reactive == Ability::Defiant { 0 } else { 2 };
+        let current = mon_at(belief, target)
+            .and_then(|mon| mon.boosts.get(reaction_idx))
+            .copied()
+            .unwrap_or(0);
+        let post_drop = (current + actual[reaction_idx]).clamp(-6, 6);
+        let requested = 2i8.saturating_mul(lowered.len() as i8);
+        let stages = (post_drop + requested).clamp(-6, 6) - post_drop;
+        if stages != 0 {
+            let trigger_idx = *lowered.last().expect("lowered is non-empty");
+            if let Some(trigger) = events.iter_mut().find(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::BoostChanged { boost_idx, stages, .. }
+                        if boost_idx == trigger_idx && stages < 0
+                )
+            }) {
+                trigger.reactions.push(InformationEvent {
+                    kind: EventKind::AbilityRevealed {
+                        slot: target,
+                        ability: reactive.clone(),
+                    },
+                    reactions: vec![leaf(EventKind::BoostChanged {
+                        target,
+                        boost_idx: reaction_idx,
+                        stages,
+                    })],
+                });
+            }
         }
     }
+    events
 }
 
 fn adjusted_boost_delta(
@@ -1136,25 +1243,8 @@ fn guaranteed_ability_reactions(
             .iter()
             .copied()
             .filter(|target| target.player != slot.player)
-            .filter_map(|target| {
-                if matches!(
-                    mon_at(belief, target).map(|mon| &mon.possible_abilities),
-                    Some(Unknown::Known(Ability::MirrorArmor))
-                ) {
-                    // Reflection is observable but not derivable from the
-                    // Intimidate line alone. The explicit Mirror Armor reveal
-                    // and reflected boost carry it; merely suppress the
-                    // incorrect direct drop here.
-                    return None;
-                }
-                let stages = adjusted_boost_delta(belief, target, 0, -1);
-                (stages != 0).then(|| {
-                    leaf(EventKind::BoostChanged {
-                        target,
-                        boost_idx: 0,
-                        stages,
-                    })
-                })
+            .flat_map(|target| {
+                synthesize_boost_changes(&[-1, 0, 0, 0, 0, 0, 0], slot, target, belief)
             })
             .collect(),
         Ability::Drizzle
@@ -1486,6 +1576,155 @@ mod tests {
     }
 
     #[test]
+    fn known_defiant_reacts_to_a_guaranteed_opponent_drop() {
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::Defiant);
+        let augmented = parse_and_augment("p1 leer o1", &belief);
+        let drop = augmented
+            .reactions
+            .iter()
+            .find(|reaction| {
+                matches!(
+                    reaction.kind,
+                    EventKind::BoostChanged {
+                        target,
+                        boost_idx: 1,
+                        stages: -1
+                    } if target == o1()
+                )
+            })
+            .expect("Leer should lower Defense");
+        let reveal = drop
+            .reactions
+            .iter()
+            .find(|reaction| {
+                matches!(
+                    reaction.kind,
+                    EventKind::AbilityRevealed {
+                        slot,
+                        ability: Ability::Defiant
+                    } if slot == o1()
+                )
+            })
+            .expect("Defiant should be nested beneath the triggering drop");
+        assert!(reveal.reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::BoostChanged {
+                target,
+                boost_idx: 0,
+                stages: 2
+            } if target == o1()
+        )));
+    }
+
+    #[test]
+    fn competitive_activates_once_for_each_distinct_stat_lowered() {
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::Competitive);
+        let events =
+            synthesize_boost_changes(&[-1, 0, -1, 0, 0, 0, 0], p1(), o1(), &belief);
+        let reveal = events
+            .iter()
+            .flat_map(|event| &event.reactions)
+            .find(|reaction| {
+                matches!(
+                    reaction.kind,
+                    EventKind::AbilityRevealed {
+                        ability: Ability::Competitive,
+                        ..
+                    }
+                )
+            })
+            .expect("Competitive should react to the two distinct drops");
+        assert!(reveal.reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::BoostChanged {
+                target,
+                boost_idx: 2,
+                stages: 4
+            } if target == o1()
+        )));
+    }
+
+    #[test]
+    fn one_turn_and_charge_turn_meteor_beam_boost_but_release_does_not() {
+        let belief = test_belief();
+        for line in ["p1 meteorbeam o1", "p1 meteorbeam charging @o1"] {
+            let augmented = parse_and_augment(line, &belief);
+            assert!(augmented.reactions.iter().any(|reaction| matches!(
+                reaction.kind,
+                EventKind::BoostChanged {
+                    target,
+                    boost_idx: 2,
+                    stages: 1
+                } if target == p1()
+            )));
+        }
+
+        let mut releasing = belief;
+        releasing.p1_active_mons[0]
+            .volatiles
+            .push(VolatileStatusState::Charging(
+                PokemonMove::MeteorBeam,
+                vec![o1()],
+            ));
+        let augmented = parse_and_augment("p1 meteorbeam o1", &releasing);
+        assert!(!augmented.reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::BoostChanged {
+                target,
+                boost_idx: 2,
+                stages: 1
+            } if target == p1()
+        )));
+    }
+
+    #[test]
+    fn inference_tracks_pure_charge_until_the_release_move() {
+        let mut belief = test_belief();
+        belief.p1_active_mons[0] = make_active(Species::Lunala, PokemonHP::Number(100));
+        let charge = parse_and_augment("p1 meteorbeam charging @o1", &belief);
+        let config = InferenceConfig::default();
+        let UnknownMatchState::Battle(next) = apply_information(
+            UnknownMatchState::Battle(belief),
+            &[charge],
+            false,
+            pokemon_dex(),
+            move_dex(),
+            ability_dex(),
+            &config,
+        ) else {
+            panic!("expected Battle variant")
+        };
+        belief = next;
+        assert!(belief.p1_active_mons[0].volatiles.iter().any(
+            |volatile| matches!(volatile, VolatileStatusState::Charging(PokemonMove::MeteorBeam, targets) if targets == &vec![o1()])
+        ), "{:?}", belief.p1_active_mons[0].volatiles);
+
+        let release = parse_and_augment("p1 meteorbeam o1", &belief);
+        let UnknownMatchState::Battle(next) = apply_information(
+            UnknownMatchState::Battle(belief),
+            &[release],
+            false,
+            pokemon_dex(),
+            move_dex(),
+            ability_dex(),
+            &config,
+        ) else {
+            panic!("expected Battle variant")
+        };
+        assert!(
+            !next.p1_active_mons[0]
+                .volatiles
+                .iter()
+                .any(|volatile| matches!(
+                    volatile,
+                    VolatileStatusState::Charging(PokemonMove::MeteorBeam, _)
+                ))
+        );
+    }
+
+    #[test]
     fn rain_dance_synthesizes_global_weather_with_no_target_token() {
         let belief = test_belief();
         let augmented = parse_and_augment("p1 raindance", &belief);
@@ -1709,7 +1948,12 @@ mod tests {
         let mut belief = test_belief();
         belief.weather = Some(Weather::Sandstorm);
         belief.weather_turns = Some(Unknown::Known(1));
-        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let eot = augmented.last().expect("expected the EndOfTurn event");
         assert!(matches!(eot.kind, EventKind::EndOfTurn));
         assert!(
@@ -1734,7 +1978,10 @@ mod tests {
         belief.weather_turns = Some(Unknown::Known(1));
         // No known/possible back mon for P2 — an ambiguous wipe once o1 faints.
         let augmented = augment_turn(
-            vec![leaf(EventKind::Faint { slot: o1() }), leaf(EventKind::EndOfTurn)],
+            vec![
+                leaf(EventKind::Faint { slot: o1() }),
+                leaf(EventKind::EndOfTurn),
+            ],
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -1766,7 +2013,10 @@ mod tests {
             .p2_known_back_mons
             .push(make_active(Species::Tyranitar, PokemonHP::Percent(100)));
         let augmented = augment_turn(
-            vec![leaf(EventKind::Faint { slot: o1() }), leaf(EventKind::EndOfTurn)],
+            vec![
+                leaf(EventKind::Faint { slot: o1() }),
+                leaf(EventKind::EndOfTurn),
+            ],
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -1790,7 +2040,12 @@ mod tests {
         let mut belief = test_belief();
         belief.weather = Some(Weather::Sandstorm);
         belief.weather_turns = Some(Unknown::Possibly(vec![5, 8]));
-        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let eot = &augmented[0];
         assert!(
             !eot.reactions
@@ -1828,7 +2083,12 @@ mod tests {
         let mut belief = test_belief();
         belief.p1_side_conditions = vec![poke_rust::state::dex_data::SideCondition::Reflect];
         belief.p1_side_condition_turns = vec![Unknown::Known(1)];
-        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let eot = &augmented[0];
         assert!(eot.reactions.iter().any(|r| matches!(
             &r.kind,
@@ -1844,7 +2104,12 @@ mod tests {
         let mut belief = test_belief();
         belief.pseudo_weathers = vec![poke_rust::state::dex_data::PseudoWeather::TrickRoom];
         belief.pseudo_weather_turns = vec![Unknown::Known(1)];
-        let augmented = augment_turn(vec![leaf(EventKind::EndOfTurn)], &belief, move_dex(), pokemon_dex());
+        let augmented = augment_turn(
+            vec![leaf(EventKind::EndOfTurn)],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
         let eot = &augmented[0];
         assert!(eot.reactions.iter().any(|r| matches!(
             &r.kind,

@@ -56,8 +56,7 @@ use poke_rust::state::dex_data::{
 };
 
 use crate::tracker_effects::{
-    augment_with_guaranteed_effects, fold_ability_reveals_into_synthesis_scratch,
-    fold_event_into_synthesis_scratch,
+    augment_with_guaranteed_effects, fold_event_into_synthesis_scratch,
 };
 
 /// A reaction/event this renderer has no tracker-grammar word for. Carries a
@@ -196,13 +195,6 @@ fn render_top_level_event(
                 },
                 pokemon_dex,
             );
-            for reaction in &event.reactions {
-                fold_ability_reveals_into_synthesis_scratch(
-                    &mut after_switch,
-                    reaction,
-                    pokemon_dex,
-                );
-            }
             for reaction in &explicit_reactions {
                 out.push(render_standalone_event(reaction, &after_switch)?);
                 for child in reactions_requiring_explicit_render(
@@ -236,13 +228,6 @@ fn render_top_level_event(
                 },
                 pokemon_dex,
             );
-            for reaction in &event.reactions {
-                fold_ability_reveals_into_synthesis_scratch(
-                    &mut after_switch,
-                    reaction,
-                    pokemon_dex,
-                );
-            }
             let mut leads_fragments: Vec<String> = Vec::new();
             let mut fallback_switch_lines: Vec<String> = Vec::new();
             for player in [Player::P1, Player::P2] {

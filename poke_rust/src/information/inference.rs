@@ -2457,16 +2457,18 @@ fn pass1_apply_event(
             // nothing (parents are processed before their reactions — see
             // `process_battle_event`), then the nested `ChargingMove` adds it; on the
             // RELEASE turn there is no such reaction, so the removal sticks.
-            if crate::simulator::helpers::move_causes_invulnerability(move_used)
-                && let Some(idx) = mon_idx_for_active_slot(state, user)
+            if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx)
             {
                 mon.volatiles.retain(|v| {
-                    !matches!(
-                        v,
-                        VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _)
-                            if m == move_used
-                    )
+                    !matches!(v, VolatileStatusState::Charging(m, _) if m == move_used)
+                        && !matches!(
+                            v,
+                            VolatileStatusState::MoveStatus(
+                                VolatileStatus::SemiInvulnerable(m),
+                                _
+                            ) if m == move_used
+                        )
                 });
             }
             // Set when the move-legality mirroring below resolves this mon's Zoroark
@@ -3426,6 +3428,23 @@ fn pass1_apply_event(
                         VolatileStatus::SemiInvulnerable(move_used.clone()),
                         0,
                     ));
+                }
+            } else if let Some(idx) = mon_idx_for_active_slot(state, user)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                let targets = ctx
+                    .move_context
+                    .as_ref()
+                    .filter(|context| {
+                        context.user_slot == *user && context.pokemon_move == *move_used
+                    })
+                    .map(|context| context.targets.clone())
+                    .unwrap_or_default();
+                if !mon.volatiles.iter().any(
+                    |volatile| matches!(volatile, VolatileStatusState::Charging(active, _) if active == move_used),
+                ) {
+                    mon.volatiles
+                        .push(VolatileStatusState::Charging(move_used.clone(), targets));
                 }
             }
 
