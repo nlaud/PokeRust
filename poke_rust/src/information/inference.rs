@@ -7434,8 +7434,8 @@ fn ability_grants_move_immunity(ability: &Ability, move_type: &PokemonType) -> b
 // ── Pass 2d: Powder-move immunity reveal ──────────────────────────────────────
 
 /// When a move with `MoveFlag::Powder` targets a **non-Grass** Pokémon and
-/// results in an `Immune` reaction, the only non-type-immunity explanation is
-/// Safety Goggles or Overcoat on the target.
+/// results in an `Immune` reaction, the non-type explanations include Safety
+/// Goggles, Overcoat, and (for status moves) Good as Gold.
 ///
 /// Only `Immune` is accepted — same guard as `pass2_prankster_immunity`.
 /// `MoveFailed`/`Blocked` also fire from an already-statused target, Substitute,
@@ -7499,6 +7499,16 @@ fn pass2_powder_immunity(
             clause.push(Statement::HasAbility {
                 mon_idx: target_idx,
                 ability: Ability::Overcoat,
+            });
+        }
+        if matches!(move_data.category, MoveCategory::Status)
+            && tm.is_none_or(|m| {
+                !unknown_is_excluded(&m.possible_abilities, &Ability::GoodasGold)
+            })
+        {
+            clause.push(Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: Ability::GoodasGold,
             });
         }
         if !clause.is_empty() {

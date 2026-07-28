@@ -7357,7 +7357,8 @@ fn powder_status_move(name: PokemonMove) -> MoveData {
     md
 }
 
-/// A powder move failing on a non-Grass target should reveal SafetyGoggles or Overcoat.
+/// A powder move failing on a non-Grass target should retain every live
+/// item/ability explanation.
 #[test]
 fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
     // p2 is a Normal-type (not Grass) — powder immunity must come from item/ability.
@@ -7388,7 +7389,8 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
     );
 
     let pred = &result.predicates;
-    // Clause should contain BOTH SafetyGoggles and Overcoat as a 2-element disjunction
+    // Clause should contain both Safety Goggles and Overcoat. Good as Gold is
+    // also retained because this deliberately-open ability domain permits it.
     // (mon_idx 0: battle_with_p2 has empty p1_active, so p2(0) is flat index 0).
     let has_sg_and_overcoat = pred.iter().any(|clause| {
         clause.contains(&Statement::HasItem {
@@ -7403,6 +7405,52 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
         has_sg_and_overcoat,
         "Should emit [SafetyGoggles ∨ Overcoat] clause on powder immunity"
     );
+}
+
+/// Good as Gold fully explains a powder status move's Immune event. It must
+/// prevent the powder pass from forcing Safety Goggles, so a later true item
+/// reveal remains consistent.
+#[test]
+fn test_powder_immunity_accepts_good_as_gold_before_item_reveal() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types =
+        Unknown::Known(vec![PokemonType::Steel, PokemonType::Ghost]);
+    p2_mon.possible_abilities = Unknown::Known(Ability::GoodasGold);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::SleepPowder,
+        powder_status_move(PokemonMove::SleepPowder),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::SleepPowder,
+                    targets: vec![p2(0)],
+                },
+                vec![
+                    event(EventKind::AbilityRevealed {
+                        slot: p2(0),
+                        ability: Ability::GoodasGold,
+                    }),
+                    event(EventKind::Immune { target: p2(0) }),
+                ],
+            ),
+            event(EventKind::ItemRevealed {
+                slot: p2(0),
+                item: Item::LifeOrb,
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::LifeOrb));
 }
 
 /// A powder move that `MoveFailed` (not `Immune`) must NOT emit a sand/powder-immunity

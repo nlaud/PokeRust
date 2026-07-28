@@ -24605,6 +24605,62 @@ mod priority_abilities {
     // ── Quick Draw ─────────────────────────────────────────────────────────
 
     #[test]
+    fn armor_tail_does_not_block_prankster_field_move() {
+        use crate::information::information::{EventKind, InformationEvent};
+        use crate::state::dex_data::Weather;
+        use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+        fn tree_contains(
+            events: &[InformationEvent],
+            pred: &impl Fn(&EventKind) -> bool,
+        ) -> bool {
+            events
+                .iter()
+                .any(|event| pred(&event.kind) || tree_contains(&event.reactions, pred))
+        }
+
+        let p1 = make_mon(
+            Species::Snorlax,
+            Ability::Prankster,
+            [Some(PokemonMove::RainDance), None, None, None],
+            None,
+        );
+        let p2 = make_mon(
+            Species::Snorlax,
+            Ability::ArmorTail,
+            [Some(PokemonMove::Splash), None, None, None],
+            None,
+        );
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn_with_events(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(),
+            pokemon_dex(),
+            Player::P1,
+        );
+
+        assert!(outcomes.iter().all(|(state, events, _)| {
+            let weather_set = matches!(
+                state,
+                MatchState::BattleState(bs) if bs.weather == Some(Weather::Rain)
+            );
+            let events = events.as_deref().unwrap_or_default();
+            weather_set
+                && !tree_contains(events, &|kind| {
+                    matches!(
+                        kind,
+                        EventKind::AbilityRevealed {
+                            ability: Ability::ArmorTail,
+                            ..
+                        } | EventKind::MoveFailed { .. }
+                    )
+                })
+        }));
+    }
+
+    #[test]
     fn quick_draw_activates_30_percent() {
         // Slow Quick Draw mon (P1, speed=1) vs fast mon (P2, speed=999), both at 1 HP.
         // Quick Draw fires 30% → P1 goes first → KOs P2 → P1 wins.

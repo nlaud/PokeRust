@@ -7560,6 +7560,12 @@ fn possible_damage_outcomes_for_move(
     // Calculate hit/miss and damage outcomes for each target independently.
     // For spread moves this creates independent miss branches per target.
     let mut per_target_outcomes: PerTargetOutcomes = Vec::new();
+    // A reflectable multi-target status move is handled per target: ordinary
+    // targets still receive their copy, while each Magic Bounce / Magic Coat
+    // target reflects its copy onto the original user. Defer applying those
+    // reflected copies until after this target-classification loop so their
+    // states can seed the normal per-target cartesian product below.
+    let mut reflected_status_targets: Vec<FieldSlot> = Vec::new();
 
     // Effective priority (base dex priority + Prankster / Gale Wings / Grassy Glide etc.
     // boosts) depends only on the attacker/move, not the target, so it's computed once and
@@ -7568,6 +7574,20 @@ fn possible_damage_outcomes_for_move(
     let effective_priority =
         simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
     let attacker_breaks_mold = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
+    // Field-wide moves are not stopped by Psychic Terrain or the side-wide
+    // priority-blocking abilities, with three documented exceptions.
+    let all_target_priority_blockable = !matches!(move_data.target, MoveTarget::All)
+        || matches!(
+            move_name,
+            PokemonMove::PerishSong | PokemonMove::FlowerShield | PokemonMove::Rototiller
+        );
+    // Prankster's Dark-type immunity has the same field-wide exemption except
+    // that Flower Shield is not one of its documented exceptions.
+    let all_target_prankster_blockable = !matches!(move_data.target, MoveTarget::All)
+        || matches!(
+            move_name,
+            PokemonMove::PerishSong | PokemonMove::Rototiller
+        );
 
     for target_slot in &target_slots {
         let mut outcomes_for_target: Vec<TargetHitOutcome> = Vec::new();
@@ -7583,6 +7603,7 @@ fn possible_damage_outcomes_for_move(
             check_invulnerability_status(&attacker, &target, &move_name);
 
         if effective_priority > 0
+            && all_target_priority_blockable
             && simulator_helpers::pokemon_is_on_terrain(
                 &next_state,
                 &target,
@@ -7608,6 +7629,7 @@ fn possible_damage_outcomes_for_move(
         // Rototiller are still blocked), not a general spread-move exemption.
         // Bypassed by Mold Breaker / Turboblaze / Teravolt (all three abilities are ignorable).
         let priority_blocker = if effective_priority > 0
+            && all_target_priority_blockable
             && action.user_slot.player != target_slot.player
             && !attacker_breaks_mold
         {
@@ -7665,6 +7687,7 @@ fn possible_damage_outcomes_for_move(
         if attacker.ability == Ability::Prankster
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
             && matches!(move_data.category, MoveCategory::Status)
+            && all_target_prankster_blockable
             && action.user_slot.player != target_slot.player
             && simulator_helpers::pokemon_has_type(&target, &PokemonType::Dark)
         {
@@ -8041,35 +8064,10 @@ fn possible_damage_outcomes_for_move(
                     |t| simulator_helpers::has_status_volatile(t, &VolatileStatus::MagicCoat),
                 );
             if target_has_mb || target_has_magic_coat {
-                // Bounce: apply the move's effects to the ATTACKER (user_slot) as if the
-                // target (defender) used them. Swap attacker ↔ target slots so that
-                // side-condition hazards land on the original attacker's side.
-                let bounce_branches = simulator_helpers::apply_secondary_effects(
-                    &next_state,
-                    *target_slot,
-                    action.user_slot,
-                    move_data,
-                );
-                decrement_move_pp(
-                    &mut next_state,
-                    action.user_slot,
-                    &action.move_name,
-                    Some(move_data),
-                );
-                let mut final_outcomes: Vec<(MatchState, f64)> = bounce_branches
-                    .into_iter()
-                    .map(|(bs, p)| (MatchState::BattleState(bs), p))
-                    .collect();
-                let has_confusion = confusion_self_hit_outcomes.is_some();
-                if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
-                    for (s, p) in confusion_outcomes {
-                        final_outcomes.push((s, p * (1.0 / 3.0)));
-                    }
-                    for (_, p) in &mut final_outcomes {
-                        *p *= if has_confusion { 2.0 / 3.0 } else { 1.0 };
-                    }
-                }
-                return simulator_helpers::coalesce_branches(final_outcomes);
+                reflected_status_targets.push(*target_slot);
+                outcomes_for_target.push((0, false, false, 1.0));
+                per_target_outcomes.push((*target_slot, outcomes_for_target));
+                continue;
             }
         }
 
@@ -8269,8 +8267,30 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Combine per-target outcomes via cartesian product
-    let mut all_outcomes: Vec<(MatchState, f64)> =
-        vec![(MatchState::BattleState(next_state.clone()), 1.0)];
+    let mut reflected_bases = vec![(next_state.clone(), 1.0)];
+    for reflector in reflected_status_targets {
+        reflected_bases = reflected_bases
+            .into_iter()
+            .flat_map(|(state, probability)| {
+                // Bounce this target's individual copy onto the original user.
+                // Swapping source/target also sends side-targeted effects to
+                // the original user's side, matching the existing single-
+                // target reflection behavior.
+                simulator_helpers::apply_secondary_effects(
+                    &state,
+                    reflector,
+                    action.user_slot,
+                    move_data,
+                )
+                .into_iter()
+                .map(move |(state, weight)| (state, probability * weight))
+            })
+            .collect();
+    }
+    let mut all_outcomes: Vec<(MatchState, f64)> = reflected_bases
+        .into_iter()
+        .map(|(state, probability)| (MatchState::BattleState(state), probability))
+        .collect();
 
     for (target_slot, target_outcomes) in &per_target_outcomes {
         let mut new_all_outcomes = Vec::new();

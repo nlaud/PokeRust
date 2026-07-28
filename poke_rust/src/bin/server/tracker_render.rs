@@ -291,11 +291,17 @@ fn render_top_level_event(
             }
             Ok(Some(out.join("\n")))
         }
-        EventKind::MegaEvolution { slot, into } => Ok(Some(format!(
-            "{} mega {}",
-            slot_token(*slot),
-            species_word(into)
-        ))),
+        EventKind::MegaEvolution { slot, into } => {
+            let mut out = vec![format!(
+                "{} mega {}",
+                slot_token(*slot),
+                species_word(into)
+            )];
+            for reaction in &explicit_reactions {
+                render_standalone_tree(reaction, belief, &mut out)?;
+            }
+            Ok(Some(out.join("\n")))
+        }
         EventKind::Terastallization { slot, tera_type } => Ok(Some(format!(
             "{} tera {}",
             slot_token(*slot),
@@ -676,9 +682,9 @@ fn render_move_qualifier(
 /// this module's doc comment for why this diff is necessary. Only compares
 /// one level deep (direct children), matching the shapes
 /// `augment_with_guaranteed_effects` itself produces for `MoveUsed`/
-/// `MegaEvolution`/`AbilityRevealed` (their synthesized reactions are leaves
-/// or, for a synthesized `AbilityRevealed`, a fully-cascaded subtree that
-/// compares equal as a whole via `PartialEq`).
+/// `MegaEvolution`/`AbilityRevealed`. When an otherwise guaranteed node has
+/// additional simulator-only descendants, recursively subtract the
+/// synthesized subtree so those observations are still rendered.
 fn reactions_requiring_explicit_render<'a>(
     event: &'a InformationEvent,
     belief: &UnknownBattleState,
@@ -747,17 +753,44 @@ fn reactions_requiring_explicit_render<'a>(
             continue;
         }
         // A guaranteed node may carry additional simulator-only children
-        // (for example Charm's guaranteed -2 Atk containing a Competitive
-        // reveal and its +2 SpA reaction). Match the guaranteed parent by
-        // kind, suppress that parent token, but preserve its observations.
+        // (for example an Intimidate drop containing a Defiant reveal and
+        // its +2 Atk reaction). Match the guaranteed parent by kind, suppress
+        // that parent token, and recursively preserve only the descendants
+        // that synthesis would not recreate.
         if let Some(pos) = remaining_synthetic.iter().position(|s| s.kind == r.kind) {
-            remaining_synthetic.remove(pos);
-            explicit.extend(r.reactions.iter());
+            let synthetic_match = remaining_synthetic.remove(pos);
+            collect_non_synthetic_reactions(r, &synthetic_match, &mut explicit);
             continue;
         }
         explicit.push(r);
     }
     explicit
+}
+
+fn collect_non_synthetic_reactions<'a>(
+    actual: &'a InformationEvent,
+    synthetic: &InformationEvent,
+    explicit: &mut Vec<&'a InformationEvent>,
+) {
+    let mut remaining_synthetic = synthetic.reactions.clone();
+    for reaction in &actual.reactions {
+        if let Some(pos) = remaining_synthetic
+            .iter()
+            .position(|candidate| candidate == reaction)
+        {
+            remaining_synthetic.remove(pos);
+            continue;
+        }
+        if let Some(pos) = remaining_synthetic
+            .iter()
+            .position(|candidate| candidate.kind == reaction.kind)
+        {
+            let synthetic_match = remaining_synthetic.remove(pos);
+            collect_non_synthetic_reactions(reaction, &synthetic_match, explicit);
+            continue;
+        }
+        explicit.push(reaction);
+    }
 }
 
 // ── Word rendering — inverse of tracker_parse.rs's word tables ─────────────

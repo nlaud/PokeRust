@@ -87,7 +87,8 @@ use poke_rust::information::unknowns::{
 };
 use poke_rust::state::battle::{FieldSlot, Player};
 use poke_rust::state::dex_data::{
-    MoveData, MoveTarget, PokemonData, PokemonType, Terrain, VolatileStatus, Weather,
+    MoveCategory, MoveData, MoveFlag, MoveTarget, PokemonData, PokemonType, PseudoWeather,
+    SideCondition, Terrain, VolatileStatus, Weather,
 };
 use poke_rust::state::pokemon::VolatileStatusState;
 
@@ -110,6 +111,7 @@ pub fn augment_turn(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<InformationEvent> {
     let mut scratch = belief.clone();
+    let mut effect_changes = TimedEffectChanges::default();
     // Mirror Armor changes where Intimidate's guaranteed drop lands. Tracker
     // text flattens its reveal into a later line, so make that reveal visible
     // before augmenting the earlier Intimidate event. Unlike Defiant or
@@ -165,6 +167,7 @@ pub fn augment_turn(
             let mut augmented =
                 augment_with_live_slots(e, &scratch, move_dex, pokemon_dex, &live_slots, true);
             fold_event_into_synthesis_scratch(&mut scratch, &augmented, pokemon_dex);
+            collect_timed_effect_changes(&augmented, &mut effect_changes);
             remove_fainted_slots(&augmented, &mut live_slots);
             // The turn's own events are all folded into `scratch` by this
             // point (we're at the LAST event — `split_into_turns` always
@@ -214,19 +217,56 @@ pub fn augment_turn(
                 // bucket, those extras cannot be reserves in this battle.
                 let bench_slots_exhausted =
                     fainted.len() >= scratch.back_mons_per_side as usize;
-                !active.is_empty()
-                    && active.iter().all(|mon| mon.fainted || is_zero_hp(&mon.hp))
-                    && (bench_slots_exhausted
-                        || !known_back
-                            .iter()
-                            .any(|mon| !mon.fainted && !is_zero_hp(&mon.hp)))
+                let same_identity =
+                    |left: &UnknownPokemonState, right: &UnknownPokemonState| {
+                        matches!(
+                            (&left.possible_mon_id, &right.possible_mon_id),
+                            (Unknown::Known(left_id), Unknown::Known(right_id))
+                                if left_id == right_id
+                        ) || matches!(
+                            (&left.possible_species, &right.possible_species),
+                            (Unknown::Known(left_species), Unknown::Known(right_species))
+                                if left_species == right_species
+                        )
+                    };
+                // Synthesis scratch is intentionally lightweight and can
+                // temporarily leave the incoming/just-fainted identity in a
+                // back bucket. Such a duplicate is not evidence of a reserve.
+                let has_distinct_healthy_reserve = known_back.iter().any(|candidate| {
+                    !candidate.fainted
+                        && !is_zero_hp(&candidate.hp)
+                        && !active.iter().any(|mon| same_identity(candidate, mon))
+                        && !fainted.iter().any(|mon| same_identity(candidate, mon))
+                });
+                let no_live_active = !live_slots.iter().any(|slot| slot.player == player);
+                let roster_size = match player {
+                    Player::P1 => scratch.p1_roster_templates.len(),
+                    Player::P2 => scratch.p2_roster_templates.len(),
+                };
+                // Tracker setup places the viewer's full roster in
+                // `known_back` before the bring-N selection is observable.
+                // In a bring-N-of-M format those entries cannot prove that a
+                // healthy reserve was actually brought, even though their
+                // species and builds are fully known to the viewer.
+                let location_is_ambiguous =
+                    roster_size
+                        > scratch.active_per_side as usize
+                            + scratch.back_mons_per_side as usize;
+                no_live_active
+                    && (location_is_ambiguous
+                        || bench_slots_exhausted
+                        || !has_distinct_healthy_reserve)
             };
             let game_might_already_be_over = matches!(augmented.kind, EventKind::EndOfTurn)
                 && (side_ambiguously_wiped(Player::P1) || side_ambiguously_wiped(Player::P2));
             if matches!(augmented.kind, EventKind::EndOfTurn) && !game_might_already_be_over {
                 augmented
                     .reactions
-                    .extend(synthesize_expiry_clears(belief, &scratch));
+                    .extend(synthesize_expiry_clears(
+                        belief,
+                        &scratch,
+                        &effect_changes,
+                    ));
             }
             let top_level_faint = match &augmented.kind {
                 EventKind::DamageDealt { target, new_hp, .. }
@@ -248,6 +288,32 @@ pub fn augment_turn(
             out
         })
         .collect()
+}
+
+#[derive(Default)]
+struct TimedEffectChanges {
+    weather: bool,
+    terrain: bool,
+    pseudo_weathers: HashSet<PseudoWeather>,
+    side_conditions: HashSet<(Player, SideCondition)>,
+}
+
+fn collect_timed_effect_changes(event: &InformationEvent, changes: &mut TimedEffectChanges) {
+    match &event.kind {
+        EventKind::WeatherChanged { .. } => changes.weather = true,
+        EventKind::TerrainChanged { .. } => changes.terrain = true,
+        EventKind::PseudoWeatherStart { effect } | EventKind::PseudoWeatherEnd { effect } => {
+            changes.pseudo_weathers.insert(effect.clone());
+        }
+        EventKind::SideConditionStart { side, condition }
+        | EventKind::SideConditionEnd { side, condition } => {
+            changes.side_conditions.insert((*side, condition.clone()));
+        }
+        _ => {}
+    }
+    for reaction in &event.reactions {
+        collect_timed_effect_changes(reaction, changes);
+    }
 }
 
 fn collect_mirror_armor_reveals(
@@ -327,20 +393,28 @@ fn remove_fainted_slots(event: &InformationEvent, live_slots: &mut HashSet<Field
 fn synthesize_expiry_clears(
     belief: &UnknownBattleState,
     scratch: &UnknownBattleState,
+    changes: &TimedEffectChanges,
 ) -> Vec<InformationEvent> {
     let mut clears = Vec::new();
 
-    if scratch.weather == belief.weather && matches!(belief.weather_turns, Some(Unknown::Known(1)))
+    if !changes.weather
+        && scratch.weather == belief.weather
+        && matches!(belief.weather_turns, Some(Unknown::Known(1)))
     {
         clears.push(leaf(EventKind::WeatherChanged { weather: None }));
     }
 
-    if scratch.terrain == belief.terrain && matches!(belief.terrain_turns, Some(Unknown::Known(1)))
+    if !changes.terrain
+        && scratch.terrain == belief.terrain
+        && matches!(belief.terrain_turns, Some(Unknown::Known(1)))
     {
         clears.push(leaf(EventKind::TerrainChanged { terrain: None }));
     }
 
     for (i, pw) in belief.pseudo_weathers.iter().enumerate() {
+        if changes.pseudo_weathers.contains(pw) {
+            continue;
+        }
         if !scratch.pseudo_weathers.contains(pw) {
             continue; // already ended by an explicit event this turn
         }
@@ -363,6 +437,9 @@ fn synthesize_expiry_clears(
             ),
         };
         for (i, sc) in conditions.iter().enumerate() {
+            if changes.side_conditions.contains(&(player, sc.clone())) {
+                continue;
+            }
             let still_active = scratch_conditions
                 .iter()
                 .any(|active| std::mem::discriminant(active) == std::mem::discriminant(sc));
@@ -871,11 +948,17 @@ fn augment_with_live_slots(
                             && !target_has_failed(&event.reactions, target)
                             && !is_semi_invulnerable(belief, target)
                         {
+                            let effect_target =
+                                if target_reflects_status_move(belief, *user, target, md) {
+                                    *user
+                                } else {
+                                    target
+                                };
                             synthesize_per_mon_effects(
                                 &mut event.reactions,
                                 &sec.effect,
-                                *user,
-                                target,
+                                if effect_target == *user { target } else { *user },
+                                effect_target,
                                 belief,
                             );
                         }
@@ -915,6 +998,48 @@ fn augment_with_live_slots(
 
     synthesize_guaranteed_faints(&mut event.reactions);
     event
+}
+
+fn target_reflects_status_move(
+    belief: &UnknownBattleState,
+    user: FieldSlot,
+    target: FieldSlot,
+    move_data: &MoveData,
+) -> bool {
+    if !matches!(move_data.category, MoveCategory::Status)
+        || !move_data
+            .flags
+            .iter()
+            .any(|flag| matches!(flag, MoveFlag::Reflectable))
+        || user.player == target.player
+    {
+        return false;
+    }
+
+    // Mold Breaker-family users bypass Magic Bounce, but not Magic Coat.
+    let user_breaks_mold = mon_at(belief, user).is_some_and(|mon| {
+        matches!(
+            &mon.possible_abilities,
+            Unknown::Known(
+                Ability::MoldBreaker | Ability::Teravolt | Ability::Turboblaze
+            )
+        )
+    });
+    mon_at(belief, target).is_some_and(|mon| {
+        let magic_coat = mon.volatiles.iter().any(|state| {
+            matches!(
+                state,
+                VolatileStatusState::TurnStatus(VolatileStatus::MagicCoat, _)
+                    | VolatileStatusState::MoveStatus(VolatileStatus::MagicCoat, _)
+            )
+        });
+        magic_coat
+            || (!user_breaks_mold
+                && matches!(
+                    &mon.possible_abilities,
+                    Unknown::Known(Ability::MagicBounce)
+                ))
+    })
 }
 
 /// A move-wide failure (the user typed `fail`/`failed` anywhere on the line)
@@ -1759,6 +1884,49 @@ mod tests {
     }
 
     #[test]
+    fn spread_status_move_is_reflected_per_magic_bounce_target() {
+        let mut belief = test_belief();
+        belief.active_per_side = 2;
+        belief.p1_active_mons[0].possible_abilities = Unknown::Known(Ability::Insomnia);
+        belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::Pressure);
+        let mut bouncer = make_active(Species::ClefableMega, PokemonHP::Percent(100));
+        bouncer.possible_abilities = Unknown::Known(Ability::MagicBounce);
+        belief.p2_active_mons.push(bouncer);
+        belief.p1_active_mons.push(make_active(
+            Species::Sylveon,
+            PokemonHP::Number(100),
+        ));
+        belief.p1_slot_conditions.push(Vec::new());
+        belief.p2_slot_conditions.push(Vec::new());
+
+        let augmented = parse_and_augment("p1 stringshot o1 o2", &belief);
+        let speed_drops: Vec<FieldSlot> = augmented
+            .reactions
+            .iter()
+            .filter_map(|reaction| match reaction.kind {
+                EventKind::BoostChanged {
+                    target,
+                    boost_idx: 4,
+                    stages: -2,
+                } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert!(speed_drops.contains(&p1()), "the bounced copy hits the user");
+        assert!(
+            speed_drops.contains(&o1()),
+            "the non-bouncing target is still affected"
+        );
+        assert!(
+            !speed_drops.contains(&FieldSlot {
+                player: Player::P2,
+                slot_index: 1,
+            }),
+            "Magic Bounce prevents the original copy from affecting its holder"
+        );
+    }
+
+    #[test]
     fn known_defiant_reacts_to_a_guaranteed_opponent_drop() {
         let mut belief = test_belief();
         belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::Defiant);
@@ -2302,6 +2470,37 @@ mod tests {
         assert!(
             eot.reactions.is_empty(),
             "expiry clear must not fire once the weather was overridden this turn"
+        );
+    }
+
+    #[test]
+    fn augment_turn_skips_weather_clear_after_same_value_replacement() {
+        // Fuzz seed 113461: the turn began in Sun with one turn left,
+        // Sand Stream replaced it, then Drought restored Sun. Comparing only
+        // the pre/post weather value incorrectly treated the original Sun as
+        // unchanged and synthesized its expiry.
+        let mut belief = test_belief();
+        belief.weather = Some(Weather::Sun);
+        belief.weather_turns = Some(Unknown::Known(1));
+        let augmented = augment_turn(
+            vec![
+                leaf(EventKind::WeatherChanged {
+                    weather: Some(Weather::Sandstorm),
+                }),
+                leaf(EventKind::WeatherChanged {
+                    weather: Some(Weather::Sun),
+                }),
+                leaf(EventKind::EndOfTurn),
+            ],
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        );
+        let eot = augmented.last().unwrap();
+        assert!(
+            eot.reactions.is_empty(),
+            "a weather touched this turn has a fresh timer even when its final \
+             value equals the pre-turn value"
         );
     }
 

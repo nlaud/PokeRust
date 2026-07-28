@@ -3,24 +3,6 @@
 ### Fixes
 Tracker improvements:
 
-- [ ] Fix target attribution for guaranteed multi-target move effects. The
-  simulator emits String Shot's `spe -2` on its user even though the move's
-  `MoveUsed.targets` are both opponents; tracker synthesis correctly applies
-  the drops to those opponents, so the observable multisets diverge. Reproduce
-  with real-team tracker-fuzz seed `113241` (turn 7). Audit other top-level
-  `boosts:` moves with `allAdjacentFoes`; several seeds in `113000..114000`
-  report the same multiset family.
-- [ ] Do not synthesize end-of-turn timer expiry after a terminal KO. Seed
-  `113057` ends with both P1 actives fainting before the engine runs `end_turn`,
-  but tracker augmentation appends `SideConditionEnd { P2, TailWind }` to its
-  parser-required `EndOfTurn` sentinel. The current healthy-reserve gate can be
-  fooled by stale/duplicate `known_back` entries.
-- [ ] Repair item identity across switch/faint bucket moves. Real-team
-  tracker-fuzz seed `113540` eventually assigns `SafetyGoggles` and then
-  `LifeOrb` to `mon#2`, causing an `ItemRevealed` contradiction. Confirm whether
-  the stale identity originates in synthesis scratch or core inference before
-  widening any item constraint.
-
 ### New features
 Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
 cache and `information/determinize.rs` samples a complete, playable `BattleState`
