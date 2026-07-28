@@ -343,15 +343,17 @@ fn render_top_level_event(
 }
 
 fn switch_line(sw: &SwitchState) -> Result<String, Unsupported> {
-    let mut line = format!(
-        "{} switch {} {}",
+    let line = format!(
+        "{} switch {} {} {}",
         slot_token(sw.slot),
         species_word(&sw.species),
-        hp_token(&sw.hp)
+        hp_token(&sw.hp),
+        sw.status
+            .as_ref()
+            .map(status_word)
+            .transpose()?
+            .unwrap_or("healthy")
     );
-    if let Some(status) = &sw.status {
-        let _ = write!(line, " {}", status_word(status)?);
-    }
     Ok(line)
 }
 
@@ -516,16 +518,16 @@ fn render_move_qualifier(
             species_word(actual_species)
         )),
         EventKind::Switch(switch) => Ok(format!(
-            "{} switch {} {}{}",
+            "{} switch {} {} {}",
             slot_token(switch.slot),
             species_word(&switch.species),
             hp_token(&switch.hp),
             switch
                 .status
                 .as_ref()
-                .map(|status| status_word(status).map(|word| format!(" {word}")))
+                .map(status_word)
                 .transpose()?
-                .unwrap_or_default()
+                .unwrap_or("healthy")
         )),
         EventKind::HitCount { target, hits } => Ok(format!("{} {hits}hits", slot_token(*target))),
         EventKind::DamageDealt { target, new_hp, .. } => Ok(format!(

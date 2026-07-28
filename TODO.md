@@ -3,6 +3,17 @@
 ### Fixes
 Tracker improvements:
 
+- [ ] Repair inference absence clauses that later conflict with a revealed
+  known value. Real-team tracker fuzz still self-heals invalid exclusions for
+  `Intimidate`, weather setters, and held items (for example `Leftovers` in
+  seed `114484`, context `item-clause#6`). Audit switch/mega identity and the
+  timing of "did not activate" evidence before removing these guards.
+- [ ] Resolve the remaining speed-order and damage-to-stat-bound self-heals.
+  Real-team tracker fuzz seeds `114052` and `114484` produce crossed
+  `SpeedComparison` / pass-3 stat windows and occasionally an unsatisfiable BCP
+  clause. These are currently discarded to preserve soundness, so the belief
+  loses valid ordering or damage evidence instead of tightening.
+
 ### New features
 Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
 cache and `information/determinize.rs` samples a complete, playable `BattleState`

@@ -994,6 +994,8 @@ fn parse_line(
                     HpToken::Percent(p) => PokemonHP::Percent(p),
                     HpToken::Number(n) => PokemonHP::Number(n),
                 };
+            } else if matches!(norm(tok).as_str(), "healthy" | "nostatus") {
+                switch.status = None;
             } else if let Some(status) = status_from_word(&norm(tok)) {
                 switch.status = Some(status);
             } else {
@@ -1630,11 +1632,15 @@ fn parse_move_line(
                 };
                 i += 1;
             }
-            if let Some(next) = rest.get(i + 1)
-                && let Some(status) = status_from_word(&norm(next))
-            {
-                switch.status = Some(status);
-                i += 1;
+            if let Some(next) = rest.get(i + 1) {
+                let normalized = norm(next);
+                if matches!(normalized.as_str(), "healthy" | "nostatus") {
+                    switch.status = None;
+                    i += 1;
+                } else if let Some(status) = status_from_word(&normalized) {
+                    switch.status = Some(status);
+                    i += 1;
+                }
             }
             hp_readings.insert(current, switch.hp.clone());
             children.push(leaf(EventKind::Switch(switch)));
@@ -2313,6 +2319,27 @@ mod tests {
             &lines[2],
             TrackerLine::Event(InformationEvent {
                 kind: EventKind::ItemRevealed { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn healthy_switch_observation_overrides_stale_roster_status() {
+        let mut belief = test_belief();
+        belief.p1_active_mons[0].status =
+            Some(poke_rust::state::dex_data::Status::Frozen(0));
+        let lines = parse_tracker_text(
+            "p1 switch pikachu 100hp healthy",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &lines[0],
+            TrackerLine::Event(InformationEvent {
+                kind: EventKind::Switch(SwitchState { status: None, .. }),
                 ..
             })
         ));
