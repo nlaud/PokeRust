@@ -13,8 +13,9 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::inference::{
-    EV_LATTICE, InferenceConfig, apply_information, apply_switch_out_reset, get_mon_by_idx,
-    mon_idx_for_active_slot, pass5_back_solve, unknown_is_excluded,
+    EV_LATTICE, InferenceConfig, apply_information, apply_structural_preview,
+    apply_switch_out_reset, get_mon_by_idx, mon_idx_for_active_slot, pass5_back_solve,
+    unknown_is_excluded,
 };
 use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
@@ -2714,8 +2715,10 @@ fn test_zoroark_learnset_promotes_when_primary_impossible() {
 /// slot's next signature move then hard-panicked in
 /// `check_move_legal_for_species` instead of promoting, since no hypothesis was
 /// left anywhere on the side to route the panic through. This drives the exact
-/// sequence: Zoroark resolves as Garchomp, switches out, switches back in as
-/// Milotic (a different decoy), and must re-promote on its next signature move.
+/// sequence: Zoroark resolves as Garchomp and switches out as Milotic replaces
+/// it. That immediate replacement cannot be the same physical Zoroark; a later
+/// Garchomp switch-in receives the re-armed hypothesis and must re-promote on
+/// its next signature move.
 #[test]
 fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() {
     let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
@@ -2768,9 +2771,8 @@ fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() 
         "first promotion must resolve the side's Zoroark"
     );
 
-    // The now-revealed Zoroark switches out; Milotic — a DIFFERENT decoy than the
-    // one it was resolved from — switches in. Illusion re-activates: this slot is
-    // secretly Zoroark again.
+    // The now-revealed Zoroark switches out as Milotic replaces it. Illusion is
+    // re-armed, but the simultaneous replacement cannot be that same Zoroark.
     let state = apply_with_config(
         state,
         vec![switch_in(Species::Milotic, p2(0))],
@@ -2783,12 +2785,23 @@ fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() 
         "the resolved Zoroark switching back out must re-arm tracking, not leave it at 0 forever"
     );
     assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_none(),
+        "the replacement entering while Zoroark leaves cannot itself be Zoroark"
+    );
+    let state = apply_with_config(
+        state,
+        vec![switch_in(Species::Garchomp, p2(0))],
+        HashMap::new(),
+        HashMap::new(),
+        make_config(),
+    );
+    assert!(
         state.p2_active_mons[0].possible_illusion_state.is_some(),
-        "the newly-arrived decoy slot must carry a freshly re-seeded hypothesis"
+        "a future incoming decoy must receive the re-armed Zoroark hypothesis"
     );
 
-    // "Milotic" uses Nasty Plot — illegal for Milotic, legal for Zoroark. Before
-    // the fix this hard-panicked in `check_move_legal_for_species`.
+    // "Garchomp" uses Nasty Plot — illegal for Garchomp, legal for Zoroark.
+    // Before the fix this hard-panicked in `check_move_legal_for_species`.
     let result = apply_with_config(
         state,
         vec![event(EventKind::MoveUsed {
@@ -7413,8 +7426,7 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
 #[test]
 fn test_powder_immunity_accepts_good_as_gold_before_item_reveal() {
     let mut p2_mon = unknown_mon();
-    p2_mon.possible_types =
-        Unknown::Known(vec![PokemonType::Steel, PokemonType::Ghost]);
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Steel, PokemonType::Ghost]);
     p2_mon.possible_abilities = Unknown::Known(Ability::GoodasGold);
     let state = battle_with_p2(vec![p2_mon]);
 
@@ -8339,6 +8351,199 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
         (mon.min_stats[5], mon.max_stats[5]),
         (172, 172),
         "own mon's post-mega Speed must stay exactly known at its real post-mega value"
+    );
+}
+
+/// A switch followed by Mega Evolution in the same turn must apply the forme
+/// change to the incoming Pokemon, never the outgoing slot occupant. Pass 4's
+/// pre-walk speed scan used to mutate the still-active outgoing record before
+/// Pass 1 processed the switch, creating a phantom bench mon with the outgoing
+/// mon_id/item but the incoming Mega species (tracker fuzz seed 114484).
+#[test]
+fn test_switch_then_mega_preserves_outgoing_identity() {
+    use crate::state::pokemon::PokemonGender;
+
+    let mut outgoing = unknown_mon_species(Species::Snorlax);
+    outgoing.possible_mon_id = Unknown::Known(2);
+    outgoing.item = Unknown::Known(Item::Leftovers);
+
+    let mut incoming = unknown_mon_species(Species::Garchomp);
+    incoming.possible_mon_id = Unknown::Known(1);
+    incoming.item = Unknown::Known(Item::Garchompite);
+
+    let mut state = battle_1v1(outgoing, unknown_mon_species(Species::Torkoal));
+    state.p1_possible_back_mons.push(incoming);
+    state.p1_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(
+        Species::GarchompMega,
+        PokemonData {
+            species: Species::GarchompMega,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 170, 115, 120, 95, 92],
+            weight: 950,
+            primary_ability: Some(Ability::SandForce),
+            abilities: vec![Ability::SandForce],
+            base_species: Some(Species::Garchomp),
+            forme: None,
+            required_item: Some("Garchompite".to_owned()),
+            battle_only: Some(Species::Garchomp),
+            default_gender: PokemonGender::Male,
+        },
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::Switch(SwitchState {
+                slot: p1(0),
+                species: Species::Garchomp,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+                disguise_species: None,
+                max_hp: 0,
+            })),
+            event(EventKind::MegaEvolution {
+                slot: p1(0),
+                into: Species::GarchompMega,
+            }),
+        ],
+        dex,
+        HashMap::new(),
+    );
+
+    let active = &result.p1_active_mons[0];
+    assert!(matches!(
+        active.possible_species,
+        Unknown::Known(Species::GarchompMega)
+    ));
+    assert!(matches!(active.possible_mon_id, Unknown::Known(1)));
+
+    let outgoing = result
+        .p1_known_back_mons
+        .iter()
+        .find(|mon| matches!(mon.possible_mon_id, Unknown::Known(2)))
+        .expect("outgoing Snorlax must be preserved on the bench");
+    assert!(matches!(
+        outgoing.possible_species,
+        Unknown::Known(Species::Snorlax)
+    ));
+    assert!(matches!(outgoing.item, Unknown::Known(Item::Leftovers)));
+    assert!(
+        !result.p1_known_back_mons.iter().any(|mon| matches!(
+            (&mon.possible_species, &mon.possible_mon_id),
+            (Unknown::Known(Species::GarchompMega), Unknown::Known(2))
+        )),
+        "the outgoing record must not be rewritten as a phantom Mega"
+    );
+}
+
+/// Pass 4 runs once before Pass 1 has applied top-level switches. A move from a
+/// slot that already switched in this event list belongs to the incoming mon,
+/// not the still-live turn-start occupant. It must not create a speed clause
+/// against the outgoing mon's bounds (tracker fuzz seed 114052).
+#[test]
+fn test_speed_order_skips_pre_walk_rebound_slot_identity() {
+    let mut p1_mon = unknown_mon_species(Species::FloetteEternal);
+    p1_mon.possible_mon_id = Unknown::Known(0);
+    p1_mon.min_stats[5] = 119;
+    p1_mon.max_stats[5] = 119;
+
+    let mut outgoing = unknown_mon_species(Species::Incineroar);
+    outgoing.possible_mon_id = Unknown::Known(6);
+    outgoing.min_stats[5] = 60;
+    outgoing.max_stats[5] = 60;
+
+    let mut incoming = unknown_mon_species(Species::ZoroarkHisui);
+    incoming.possible_mon_id = Unknown::Known(10);
+    incoming.min_stats[5] = 150;
+    incoming.max_stats[5] = 150;
+
+    let mut state = battle_1v1(p1_mon, outgoing);
+    state.p2_possible_back_mons.push(incoming);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::IcyWind,
+        normal_physical_move(PokemonMove::IcyWind, 55),
+    );
+    move_dex.insert(
+        PokemonMove::Moonblast,
+        normal_physical_move(PokemonMove::Moonblast, 95),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0),
+                species: Species::ZoroarkHisui,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+                disguise_species: None,
+                max_hp: 0,
+            })),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::IcyWind,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Moonblast,
+                targets: vec![p2(0)],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        !result
+            .predicates
+            .iter()
+            .flatten()
+            .any(|literal| matches!(literal, Statement::SpeedComparison { .. })),
+        "a rebound slot must not inherit a speed comparison derived for its outgoing occupant: {:?}",
+        result.predicates
+    );
+    assert!(matches!(
+        result.p2_active_mons[0].possible_mon_id,
+        Unknown::Known(10)
+    ));
+}
+
+/// Tracker parsing previews partial event lists to resolve later slot references.
+/// Those previews may apply direct switch identity, but they must not infer that
+/// an entry ability was absent before the rest of the turn (including its reveal)
+/// has been parsed.
+#[test]
+fn test_structural_preview_does_not_infer_entry_ability_absence() {
+    let mut entrant = unknown_mon_species(Species::Incineroar);
+    entrant.possible_abilities = Unknown::Possibly(vec![Ability::Intimidate, Ability::Blaze]);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![entrant];
+
+    apply_structural_preview(
+        &mut state,
+        &[switch_in(Species::Incineroar, p2(0))],
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &InferenceConfig::default(),
+    );
+
+    assert!(
+        !unknown_is_excluded(
+            &state.p2_active_mons[0].possible_abilities,
+            &Ability::Intimidate,
+        ),
+        "a partial-turn preview must preserve abilities whose visible reactions may appear later"
     );
 }
 

@@ -24610,10 +24610,7 @@ mod priority_abilities {
         use crate::state::dex_data::Weather;
         use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
 
-        fn tree_contains(
-            events: &[InformationEvent],
-            pred: &impl Fn(&EventKind) -> bool,
-        ) -> bool {
+        fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
             events
                 .iter()
                 .any(|event| pred(&event.kind) || tree_contains(&event.reactions, pred))
@@ -37072,8 +37069,12 @@ mod side_and_field_condition_moves {
             (Species::Pidgeot, PokemonMove::Fly), // semi-invulnerable family
             (Species::Venusaur, PokemonMove::SolarBeam), // pure-charge family
         ] {
-            let state =
-                battle_state_from_lists(vec![mon(species, charging_move.clone())], vec![], vec![bulky()], vec![]);
+            let state = battle_state_from_lists(
+                vec![mon(species, charging_move.clone())],
+                vec![],
+                vec![bulky()],
+                vec![],
+            );
             let outcomes = run_single_turn_with_events(
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -38988,7 +38989,9 @@ mod new_moves_session {
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{
+        AttackCommand, BattleCommand, FieldSlot, MatchState, Player, PlayerCommand,
+    };
     use crate::state::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
     use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
 
@@ -39418,6 +39421,83 @@ mod new_moves_session {
         assert!(
             !has_vol(&bs.p1_active_mons[0], &VolatileStatus::HelpingHand),
             "HelpingHand volatile should NOT be applied in singles"
+        );
+    }
+
+    #[test]
+    fn helping_hand_boosts_a_queued_ally_in_doubles() {
+        let helper = mon(Species::Togekiss, PokemonMove::HelpingHand, Ability::None);
+        let mut attacker = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        attacker.stats[1] = 200;
+        let mut target = mon(Species::Blissey, PokemonMove::Splash, Ability::None);
+        target.stats[0] = 1000;
+        target.hp = 1000;
+        target.stats[2] = 200;
+        let foe_ally = mon(Species::Blissey, PokemonMove::Splash, Ability::None);
+
+        let boosted_state = battle_state_from_lists(
+            vec![helper, attacker.clone()],
+            vec![],
+            vec![target.clone(), foe_ally.clone()],
+            vec![],
+        );
+        let baseline_state = battle_state_from_lists(
+            vec![
+                mon(Species::Togekiss, PokemonMove::Splash, Ability::None),
+                attacker,
+            ],
+            vec![],
+            vec![target, foe_ally],
+            vec![],
+        );
+        let attack = |move_slot, target| {
+            BattleCommand::Attack(AttackCommand {
+                move_slot,
+                target,
+                terastallize: false,
+                mega_evolve: false,
+            })
+        };
+        let ally_slot = Some(FieldSlot {
+            player: Player::P1,
+            slot_index: 1,
+        });
+        let foe_slot = Some(FieldSlot {
+            player: Player::P2,
+            slot_index: 0,
+        });
+        let boosted = run_single_turn(
+            &MatchState::BattleState(boosted_state),
+            &PlayerCommand::Battle(vec![attack(0, ally_slot), attack(0, foe_slot)]),
+            &PlayerCommand::Battle(vec![attack(0, None), attack(0, None)]),
+            move_dex(),
+            pokemon_dex(),
+        );
+        let baseline = run_single_turn(
+            &MatchState::BattleState(baseline_state),
+            &PlayerCommand::Battle(vec![attack(0, None), attack(0, foe_slot)]),
+            &PlayerCommand::Battle(vec![attack(0, None), attack(0, None)]),
+            move_dex(),
+            pokemon_dex(),
+        );
+        let damage = |outcomes: &[(MatchState, f64)]| {
+            outcomes
+                .iter()
+                .map(|(state, probability)| {
+                    let hp = match state {
+                        MatchState::BattleState(battle) => battle.p2_active_mons[0].hp,
+                        MatchState::GameOverState { .. } => 0,
+                        MatchState::TeamPreviewState(_) => 1000,
+                    };
+                    (1000 - hp) as f64 * probability
+                })
+                .sum::<f64>()
+        };
+        let boosted_damage = damage(&boosted);
+        let baseline_damage = damage(&baseline);
+        assert!(
+            (boosted_damage / baseline_damage - 1.5).abs() < 0.08,
+            "Helping Hand should boost its ally's move by 50%: boosted={boosted_damage}, baseline={baseline_damage}"
         );
     }
 

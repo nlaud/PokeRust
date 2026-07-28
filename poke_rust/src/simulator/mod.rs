@@ -3960,11 +3960,38 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
-    // Helping Hand: in singles there is no ally slot, so the move always fails.
-    // The ×1.5 boost read-site already exists (simulator_helpers.rs HelpingHand volatile
-    // check); the doubles applier can be added here when doubles support is implemented.
+    // Helping Hand succeeds only on a living ally that has not already moved this turn.
+    // A newly-switched ally is still a valid target even though its switch action is no
+    // longer queued. Once validated here, let the normal status-move path apply the
+    // volatile so Good as Gold, event emission, and PP handling stay centralized.
     if move_name == PokemonMove::HelpingHand {
+        let valid_target = target_slots.first().copied().is_some_and(|target_slot| {
+            if target_slot.player != action.user_slot.player
+                || target_slot.slot_index == action.user_slot.slot_index
+            {
+                return false;
+            }
+            let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            else {
+                return false;
+            };
+            if target.fainted {
+                return false;
+            }
+            target.switched_in_this_turn
+                || next_state.action_queue.iter().any(|queued| {
+                    let queued_slot = match queued {
+                        Action::MoveAction(move_action) => move_action.user_slot,
+                        Action::SwitchAction(switch_action) => switch_action.user_slot,
+                        Action::MegaAction(mega_action) => mega_action.user_slot,
+                        Action::TeraAction(tera_action) => tera_action.user_slot,
+                    };
+                    queued_slot == target_slot
+                })
+        });
+        if !valid_target {
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
     }
 
     // Lock-On / Mind Reader: lock the user's accuracy onto the target for the next turn.
@@ -7584,10 +7611,7 @@ fn possible_damage_outcomes_for_move(
     // Prankster's Dark-type immunity has the same field-wide exemption except
     // that Flower Shield is not one of its documented exceptions.
     let all_target_prankster_blockable = !matches!(move_data.target, MoveTarget::All)
-        || matches!(
-            move_name,
-            PokemonMove::PerishSong | PokemonMove::Rototiller
-        );
+        || matches!(move_name, PokemonMove::PerishSong | PokemonMove::Rototiller);
 
     for target_slot in &target_slots {
         let mut outcomes_for_target: Vec<TargetHitOutcome> = Vec::new();

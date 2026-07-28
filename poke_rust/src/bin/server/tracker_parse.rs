@@ -1551,7 +1551,24 @@ fn parse_move_line(
             continue;
         }
         if n == "crit" {
-            children.push(leaf(EventKind::Crit { target: current }));
+            // The simulator nests Crit under the specific DamageDealt node it
+            // belongs to. Preserve that shape when parsing the renderer's flat
+            // `damage ... crit` spelling so Pass 3 can distinguish crit and
+            // non-crit hits (especially in mixed-crit multi-hit moves). A bare
+            // crit without a preceding damage remains a direct reaction and is
+            // handled conservatively by consumers.
+            if let Some(damage) = children.iter_mut().rev().find(|child| {
+                matches!(
+                    &child.kind,
+                    EventKind::DamageDealt { target, .. } if *target == current
+                )
+            }) {
+                damage
+                    .reactions
+                    .push(leaf(EventKind::Crit { target: current }));
+            } else {
+                children.push(leaf(EventKind::Crit { target: current }));
+            }
         } else if n == "miss" || n == "missed" {
             children.push(leaf(EventKind::Missed { target: current }));
         } else if n == "immune" {
@@ -2013,6 +2030,42 @@ mod tests {
         assert_eq!(parse_boost_token("-2spe"), Some((4, -2)));
         assert_eq!(parse_boost_token("attack+1"), Some((0, 1)));
         assert!(parse_boost_token("garbage").is_none());
+    }
+
+    #[test]
+    fn move_line_nests_crit_under_its_damage_event() {
+        let belief = test_belief();
+        let lines = parse_tracker_text(
+            "p1 thunderbolt @o1 o1 damage 45% o1 crit",
+            &belief,
+            move_dex(),
+            pokemon_dex(),
+        )
+        .unwrap();
+        let TrackerLine::Event(move_event) = &lines[0] else {
+            panic!("expected move event")
+        };
+        let damage = move_event
+            .reactions
+            .iter()
+            .find(|reaction| {
+                matches!(
+                    reaction.kind,
+                    EventKind::DamageDealt { target, .. } if target == o1()
+                )
+            })
+            .expect("expected damage reaction");
+        assert!(damage.reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::Crit { target } if target == o1()
+        )));
+        assert!(
+            !move_event
+                .reactions
+                .iter()
+                .any(|reaction| matches!(reaction.kind, EventKind::Crit { .. })),
+            "Crit must not remain a sibling of DamageDealt"
+        );
     }
 
     #[test]

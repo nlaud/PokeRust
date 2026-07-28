@@ -545,39 +545,17 @@ fn count_illusion_capable_on_side(state: &UnknownBattleState, side: Player) -> u
 ///
 /// Bumps the count back up by 1 (capped at `count_illusion_capable_on_side`, since
 /// a non-Species-Clause format could in principle have more than one Illusion
-/// forme still unresolved) and re-attaches a fresh `possible_illusion_state`
-/// hypothesis — seeded from `baseline` (the just-benched Zoroark's own entry,
-/// already carrying everything learned about it this battle) — to every OTHER
-/// non-fainted, non-Illusion-capable mon on the side that doesn't already carry
-/// one. Fainted mons are deliberately skipped: they can never be switched in or
-/// act again, so re-attaching a hypothesis to one serves no future inference (see
-/// `combined_back`'s analogous exclusion).
-///
-/// Sound: this only ever ADDS hypotheses back — it widens the belief rather than
-/// narrowing it, so it can't itself introduce a contradiction.
-pub(super) fn rearm_zoroark_on_side(
-    state: &mut UnknownBattleState,
-    side: Player,
-    baseline: &UnknownPokemonState,
-) {
+/// forme still unresolved). A hypothesis is attached lazily by
+/// `maybe_seed_fresh_hypothesis` when a later switch-in could physically be that
+/// Zoroark. In particular, the replacement entering during this switch cannot be
+/// the same Pokémon that is simultaneously leaving.
+pub(super) fn rearm_zoroark_on_side(state: &mut UnknownBattleState, side: Player) {
     let cap = count_illusion_capable_on_side(state, side);
     let count = match side {
         Player::P1 => &mut state.p1_unresolved_zoroark_count,
         Player::P2 => &mut state.p2_unresolved_zoroark_count,
     };
     *count = count.saturating_add(1).min(cap);
-    for mon in side_mons_mut(state, side) {
-        if mon.fainted || mon.possible_illusion_state.is_some() {
-            continue;
-        }
-        if matches!(&mon.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
-        {
-            continue;
-        }
-        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(
-            mon, baseline,
-        )));
-    }
 }
 
 /// Shared follow-up for EVERY `IllusionMirrorOutcome::Promoted` call site — Pass 1
@@ -630,12 +608,10 @@ fn finish_illusion_promotion_restore(
 /// Shared follow-up for EVERY point a Zoroark hypothesis is positively resolved
 /// (a `Promoted` mirroring outcome, OR the dedicated `IllusionEnded` handler):
 /// the side's own pre-existing benched entry for this same physical Pokémon —
-/// seeded at team preview (`seed_illusion_hypotheses`) or re-attached on a later
-/// switch-out (`rearm_zoroark_on_side`) — is now a stale duplicate of the mon
+/// seeded at team preview (`seed_illusion_hypotheses`) — is now a stale duplicate
+/// of the mon
 /// that was just resolved. Left in place, `teammate_indices`/`enforce_unique_item`
-/// would see two teammates holding the same resolved item (or, worse, `rearm_
-/// zoroark_on_side` could later mistake this stale entry for a still-unresolved
-/// Illusion forme and seed a THIRD, spurious hypothesis from it). Removes it from
+/// would see two teammates holding the same resolved item. Removes it from
 /// whichever bench bucket (`known_back` preferred, `possible_back` fallback) it's
 /// currently sitting in; a no-op if neither has a matching entry (nothing stale
 /// to remove — e.g. called twice for the same resolution in one event).
@@ -1761,7 +1737,7 @@ fn apply_information_battle(
     // Run BEFORE the event walk so that speed bounds (min_stats[5]/max_stats[5])
     // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
     // and Electro Ball, which compute BP from effective speeds.
-    pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex);
+    pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex, true);
     // Propagate the emitted SpeedComparison predicates to fixpoint immediately.
     // Predicate set is static here (no clause pruning), so collect once and reuse.
     {
@@ -1781,6 +1757,7 @@ fn apply_information_battle(
         switched_slots_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
         form_changed_slots_this_turn: Vec::new(),
+        revealed_ability_slots_this_turn: collect_ability_reveal_slots(events),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
         structural_only: false,
@@ -1818,7 +1795,15 @@ fn apply_information_battle(
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
     // One re-run is sufficient; duplicate clauses are now guarded against.
-    pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex);
+    pass4_speed_from_order(
+        state,
+        &seed_state,
+        events,
+        dex,
+        move_dex,
+        ability_dex,
+        false,
+    );
     {
         let sc = bcp::collect_speed_comparisons(state);
         while bcp::propagate_collected(state, &sc) {}
@@ -1875,6 +1860,7 @@ pub fn apply_structural_preview(
         switched_slots_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
         form_changed_slots_this_turn: Vec::new(),
+        revealed_ability_slots_this_turn: collect_ability_reveal_slots(events),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
         structural_only: true,
@@ -2089,6 +2075,23 @@ struct DamagingHit {
     attacker_at_hit: UnknownPokemonState,
 }
 
+fn collect_ability_reveal_slots(events: &[InformationEvent]) -> HashSet<FieldSlot> {
+    fn visit(event: &InformationEvent, slots: &mut HashSet<FieldSlot>) {
+        if let EventKind::AbilityRevealed { slot, .. } = &event.kind {
+            slots.insert(*slot);
+        }
+        for reaction in &event.reactions {
+            visit(reaction, slots);
+        }
+    }
+
+    let mut slots = HashSet::new();
+    for event in events {
+        visit(event, &mut slots);
+    }
+    slots
+}
+
 struct BattleContext<'a> {
     dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
@@ -2135,6 +2138,12 @@ struct BattleContext<'a> {
     /// Damage observations crossing that boundary are structurally valid but are
     /// not safe inputs to the minimal Pass-3 oracle until the next turn.
     form_changed_slots_this_turn: Vec<FieldSlot>,
+    /// Every slot with an AbilityRevealed anywhere in this submitted turn.
+    /// Tracker syntax flattens entry reveals into a following top-level line,
+    /// whereas simulator events nest them under Switch. Absence inference must
+    /// see both representations before it concludes that an entry ability did
+    /// not fire.
+    revealed_ability_slots_this_turn: HashSet<FieldSlot>,
     /// S28: per-turn-segment last move-committed actor — the slot for which Analytic's
     /// "moved last" fires. Computed once from the event stream (`compute_analytic_last_movers`),
     /// indexed by `turn_segment`. Replaces the old "did the target already move this turn?"
@@ -2372,7 +2381,9 @@ fn process_battle_event(
     // Skipped entirely under a structural-only preview (see `BattleContext::structural_only`'s
     // doc comment) — these passes reason about absence ("no ability fired, so X is excluded")
     // and require the pre/post-move snapshots above to reflect a genuinely complete turn.
-    if !ctx.structural_only && let EventKind::MoveUsed { user, .. } = &event.kind {
+    if !ctx.structural_only
+        && let EventKind::MoveUsed { user, .. } = &event.kind
+    {
         let user_slot_for_order = *user;
         pass2_item_from_move(state, event, ctx);
         pass2_contact_absence(state, event, ctx);
@@ -3932,6 +3943,7 @@ fn pass1_apply_switch_event(
             apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
+            let rearm_illusion =
             bench_outgoing_mon(state, &sw.slot, &sw.species, same_slot_illusion_collision);
             pass1_switch(
                 state,
@@ -3941,6 +3953,9 @@ fn pass1_apply_switch_event(
                 same_slot_incoming,
                 cross_slot_illusion_collision,
             );
+            if rearm_illusion {
+                rearm_zoroark_on_side(state, sw.slot.player);
+            }
             apply_pending_self_switch_state(state, &sw.slot, passed_state);
             if state
                 .self_switch_pending
@@ -3948,7 +3963,9 @@ fn pass1_apply_switch_event(
             {
                 state.self_switch_pending = None;
             }
+            if !ctx.structural_only {
             pass1_ability_absence_inference(state, &[sw.slot], &event.reactions, ctx);
+        }
         }
         EventKind::SimultaneousSwitch { switches } => {
             // The concrete simulator emits `switches` in GLOBAL cross-side effective-
@@ -4029,6 +4046,7 @@ fn pass1_apply_switch_event(
                 })
                 .collect();
 
+            let mut sides_to_rearm: HashSet<Player> = HashSet::new();
             for (sw, same_slot_illusion_collision) in switches_by_slot
                 .iter()
                 .zip(same_slot_illusion_collisions.iter().copied())
@@ -4038,7 +4056,9 @@ fn pass1_apply_switch_event(
                 apply_switch_out_reset(state, &sw.slot);
                 apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
-                bench_outgoing_mon(state, &sw.slot, &sw.species, same_slot_illusion_collision);
+                if bench_outgoing_mon(state, &sw.slot, &sw.species, same_slot_illusion_collision) {
+                    sides_to_rearm.insert(sw.slot.player);
+                }
             }
             for (((sw, same_slot_illusion_collision), same_slot_incoming), cross_slot_collision) in
                 switches_by_slot
@@ -4056,11 +4076,16 @@ fn pass1_apply_switch_event(
                     cross_slot_collision,
                 );
             }
+            for side in sides_to_rearm {
+                rearm_zoroark_on_side(state, side);
+            }
             // Ability-absence inference cares about the REAL activation order (e.g.
             // Unnerve vs Sand Stream) — keep the original (speed-encoded) event
             // order here, unlike the two placement loops above.
             let slots: Vec<FieldSlot> = switches.iter().map(|sw| sw.slot).collect();
+            if !ctx.structural_only {
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
+        }
         }
         _ => {}
     }
@@ -4471,7 +4496,7 @@ fn bench_outgoing_mon(
     slot: &FieldSlot,
     incoming_species: &Species,
     force_bench: bool,
-) {
+) -> bool {
     let slot_i = slot.slot_index as usize;
     let already_placed = !force_bench
         && state.turn_number == 0
@@ -4481,7 +4506,7 @@ fn bench_outgoing_mon(
         }
         .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species));
     if already_placed {
-        return;
+        return false;
     }
     // Clone in a temporary scope to avoid simultaneous mutable borrows.
     let maybe_benched: Option<UnknownPokemonState> = {
@@ -4504,6 +4529,7 @@ fn bench_outgoing_mon(
                 Player::P1 => state.p1_fainted_mons.push(benched),
                 Player::P2 => state.p2_fainted_mons.push(benched),
             }
+            false
         } else {
             // `possible_species` is always `Known` under the parallel-hypothesis
             // Zoroark model (a mon's shown identity is never itself ambiguous —
@@ -4525,16 +4551,15 @@ fn bench_outgoing_mon(
             // `rearm_zoroark_on_side` must re-open tracking for it. See that
             // function's doc comment for why this is the fix for the re-disguise
             // gap (`resolve_zoroark_globally` only ever decrements).
-            let rearm_baseline = matches!(&benched.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
-                .then(|| benched.clone());
+            let should_rearm = matches!(&benched.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s));
             match slot.player {
                 Player::P1 => state.p1_known_back_mons.push(benched),
                 Player::P2 => state.p2_known_back_mons.push(benched),
             }
-            if let Some(baseline) = rearm_baseline {
-                rearm_zoroark_on_side(state, slot.player, &baseline);
-            }
+            should_rearm
         }
+    } else {
+        false
     }
 }
 
@@ -5406,12 +5431,7 @@ fn reveal_move_with_illusion_mirroring(
 
     let Some(mut hypothesis) = mon.possible_illusion_state.take() else {
         reveal_move_on_mon(mon, move_used);
-        check_move_legal_for_species(
-            mon,
-            move_used,
-            learnset_dex,
-            side_has_unresolved_zoroark,
-        );
+        check_move_legal_for_species(mon, move_used, learnset_dex, side_has_unresolved_zoroark);
         return IllusionMirrorOutcome::Unchanged;
     };
 
@@ -5681,7 +5701,11 @@ fn emit_extension_item_if_collapsed(
 /// `decrement_effect_timers` in `simulator/helpers.rs`. Visible EOT effects (weather
 /// chip, heal, etc.) are handled by the event walk visiting `EndOfTurn::reactions`;
 /// this function handles the invisible internal state.
-fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent, ctx: &BattleContext) {
+fn apply_end_of_turn(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
     // The team-preview → first-turn transition (a tracker session's `leads` turn,
     // or battle mode's own team-preview-to-battle step) mirrors the real engine's
     // `is_battle_start_setup` pass (`simulator::helpers::end_turn`'s doc comment
@@ -5943,7 +5967,8 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent, c
         // comment) are excluded via the same `volatile_timer(vs).is_some()`
         // gate, so their payload is left untouched.
         mon.volatiles.retain_mut(|v| match v {
-            VolatileStatusState::TurnStatus(vs, turns) | VolatileStatusState::MoveStatus(vs, turns)
+            VolatileStatusState::TurnStatus(vs, turns)
+            | VolatileStatusState::MoveStatus(vs, turns)
                 if volatile_timer(vs).is_some() =>
             {
                 if *turns > 1 {
@@ -6137,6 +6162,14 @@ const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::OrichalcumPulse, // Sets Sun (apply_entry_ability_field_effects, helpers.rs)
 ];
 
+/// Weather setters can be silent on entry through temporal interactions that the
+/// belief does not yet model completely. Keep the old narrowing implementation
+/// available for a future completeness audit, but do not use negative weather
+/// evidence until those paths can be proven exhaustive.
+fn weather_setter_absence_inference_enabled() -> bool {
+    false
+}
+
 /// The weather a given weather-setting ability would install, or `None` if `ab` isn't one
 /// of `WEATHER_SETTING_ABILITIES`. Mirrors `apply_entry_ability_field_effects` in
 /// `simulator/helpers.rs`. Used to guard the absence-inference pass below: since a weather
@@ -6275,6 +6308,27 @@ fn pass1_ability_absence_inference(
             mon.one_time_ability_used = true;
         }
 
+        // A direct reveal is strictly stronger than every absence deduction
+        // below. The event walk has not processed the nested AbilityRevealed
+        // node yet, so the mon may still look Unknown here; attempting absence
+        // inference first can exclude the very ability that is about to become
+        // Known when its visible secondary effect was a no-op (Intimidate into
+        // an immune target, weather setter under matching weather, etc.).
+        if ctx.revealed_ability_slots_this_turn.contains(slot)
+            || any_reaction_deep(
+                reactions,
+                &|kind| matches!(kind, EventKind::AbilityRevealed { slot: revealed, .. } if revealed == slot),
+            )
+        {
+            continue;
+        }
+        if matches!(
+            get_mon_by_idx(state, idx).map(|mon| &mon.possible_abilities),
+            Some(Unknown::Known(_))
+        ) {
+            continue;
+        }
+
         // Skip if ability might be suppressed (sound: conservative).
         // Absence inferences below are gated here; presence-recording above is not.
         if unknown_ability_might_be_suppressed(state, slot) {
@@ -6299,7 +6353,14 @@ fn pass1_ability_absence_inference(
             state.weather,
             Some(Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds)
         );
-        if !weather_changed {
+        // Do not infer weather-setter absence from a silent entry. Although matching
+        // and primordial weather cover the obvious no-op cases, real tracker sweeps
+        // have found additional temporally valid paths where a setter is silent on
+        // one entry and directly revealed on a later entry (Snow Warning in the
+        // 114000–114500 corpus). A positive WeatherChanged/AbilityRevealed remains
+        // useful evidence; the negative observation is not strong enough to narrow
+        // the ability soundly.
+        if weather_setter_absence_inference_enabled() && !weather_changed {
             // If ONLY this slot's mons could have a weather setter (no other entering
             // mon has one), absence of WeatherChanged proves this mon doesn't have it.
             // For single-entry (Switch) this is always unambiguous.
@@ -7502,9 +7563,7 @@ fn pass2_powder_immunity(
             });
         }
         if matches!(move_data.category, MoveCategory::Status)
-            && tm.is_none_or(|m| {
-                !unknown_is_excluded(&m.possible_abilities, &Ability::GoodasGold)
-            })
+            && tm.is_none_or(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::GoodasGold))
         {
             clause.push(Statement::HasAbility {
                 mon_idx: target_idx,
@@ -11687,6 +11746,7 @@ fn pass4_speed_from_order(
     dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     _ability_dex: &HashMap<Ability, AbilityData>,
+    pre_event_walk: bool,
 ) {
     // Running snapshot of Spe boost / paralysis / Tailwind / Trick Room / weather /
     // terrain, seeded from `seed_state` (turn start) and updated as we scan forward
@@ -11725,6 +11785,14 @@ fn pass4_speed_from_order(
     let mut terrain = seed_state.terrain.clone();
     let mut priority_may_differ: HashSet<usize> = HashSet::new();
     let mut speed_changed_since_previous_move: HashSet<usize> = HashSet::new();
+    // The first Pass-4 scan runs before the structural event walk. Once a slot
+    // has switched, `state` still contains the outgoing occupant, so neither a
+    // later move nor a later form change at that slot can be attributed to its
+    // current mon_idx yet. Fuzz seed 114052 bounded Gholdengo from a Choice-Scarf
+    // Zoroark move as though the departing Incineroar had used it; seed 114484
+    // applied Scovillain's Mega forme to the outgoing Archaludon record. Defer
+    // all such speed evidence until the post-walk scan, where identity is live.
+    let mut structurally_rebound_slots: HashSet<FieldSlot> = HashSet::new();
 
     // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
     // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
@@ -11733,6 +11801,17 @@ fn pass4_speed_from_order(
     // one).
     let mut move_order: Vec<Mover> = Vec::new();
     for event in top_events {
+        if pre_event_walk {
+            match &event.kind {
+                EventKind::Switch(sw) => {
+                    structurally_rebound_slots.insert(sw.slot);
+                }
+                EventKind::SimultaneousSwitch { switches } => {
+                    structurally_rebound_slots.extend(switches.iter().map(|sw| sw.slot));
+                }
+                _ => {}
+            }
+        }
         // S41: Mega Evolution / permanent Forme Change swap in a new base-stat table
         // and always resolve before any move that turn (real game rule) — but this is
         // the FIRST of pass4's two calls, which runs BEFORE the real event walk (see
@@ -11749,6 +11828,21 @@ fn pass4_speed_from_order(
             &event.kind
             && let Some(idx) = mon_idx_for_active_slot(state, slot)
         {
+            if pre_event_walk && structurally_rebound_slots.contains(slot) {
+                update_speed_snapshot_from_reactions(
+                    state,
+                    &event.reactions,
+                    &mut spe_boost,
+                    &mut paralyzed,
+                    &mut tailwind,
+                    &mut trick_room,
+                    &mut weather,
+                    &mut terrain,
+                    &mut priority_may_differ,
+                    &mut speed_changed_since_previous_move,
+                );
+                continue;
+            }
             // Pass 4 runs again after the event walk. A later forced switch can
             // already have replaced this slot by then (Dragon Tail is commonly a
             // nested reaction); never replay the earlier forme change onto that
@@ -11794,6 +11888,21 @@ fn pass4_speed_from_order(
             user, move_used, ..
         } = &event.kind
         {
+            if pre_event_walk && structurally_rebound_slots.contains(user) {
+                update_speed_snapshot_from_reactions(
+                    state,
+                    &event.reactions,
+                    &mut spe_boost,
+                    &mut paralyzed,
+                    &mut tailwind,
+                    &mut trick_room,
+                    &mut weather,
+                    &mut terrain,
+                    &mut priority_may_differ,
+                    &mut speed_changed_since_previous_move,
+                );
+                continue;
+            }
             let base_prio = move_dex.get(move_used).map(|md| md.priority).unwrap_or(0);
             let mut eff_prio = effective_move_priority(move_used, base_prio, &terrain);
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
