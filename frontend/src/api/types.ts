@@ -320,15 +320,11 @@ export interface TurnResponse {
 // `BenchmarkProgressDto`. `GET /api/benchmark` streams over Server-Sent Events
 // — no request body or knobs, always the full unbounded grid.
 //
-// The three sweeps run concurrently server-side and each reports on its own
+// The three sweeps run sequentially server-side so their timings remain
+// comparable to `poke_rust/benches/RESULTS.md`. Each still reports on its own
 // schedule: tagged `progress` events throughout, then one `result` per sweep the
 // moment it finishes, a `failed` that takes down only its own sweep, and a
 // single terminal `done`. That is what lets each chart render as it lands.
-//
-// Because the sweeps share the machine, the times are contended and do NOT
-// reproduce `poke_rust/benches/RESULTS.md`'s serial numbers — relative shape
-// within a sweep holds, absolute microseconds do not. Count columns (branches,
-// turns simulated, cells) are unaffected. `BenchmarkingPage` says so on screen.
 
 export interface TurnSpeedRow {
   scenario: 'singles' | 'doubles'

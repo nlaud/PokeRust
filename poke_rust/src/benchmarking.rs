@@ -277,7 +277,7 @@ pub fn run_turn_speed(
                 let p1_pv = PlayerCommand::TeamPreview(p1_tp);
                 let p2_pv = PlayerCommand::TeamPreview(p2_tp);
 
-                let state = simulate_turn(
+                let state = most_likely_state(simulate_turn(
                     &MatchState::TeamPreviewState(preview),
                     &p1_pv,
                     &p2_pv,
@@ -286,11 +286,8 @@ pub fn run_turn_speed(
                     false,
                     1,
                     None,
-                )
-                .into_iter()
-                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
-                .ok_or("team preview resolution produced no branches")?
-                .0;
+                ))
+                .ok_or("team preview resolution produced no branches")?;
 
                 let MatchState::BattleState(battle_state) = &state else {
                     continue; // shouldn't happen once leads are chosen, but don't let one odd pairing kill the run
@@ -888,6 +885,25 @@ const TURN_BUDGET_PER_CELL: f64 = 120_000.0;
 /// pairing. Whatever pairings completed are still reported.
 const MAX_CELL_SECONDS: f64 = 30.0;
 
+/// Select a benchmark branch reproducibly. `simulate_turn` drains a `HashMap`
+/// before sorting by probability, so equal-probability branches need a
+/// content-derived tiebreak rather than their arrival order.
+fn most_likely_state<E>(
+    branches: impl IntoIterator<Item = (MatchState, E, f64)>,
+) -> Option<MatchState> {
+    branches
+        .into_iter()
+        .map(|(state, _, probability)| {
+            let mut hasher = DefaultHasher::new();
+            state.hash(&mut hasher);
+            (hasher.finish(), state, probability)
+        })
+        // `max_by` returns the last equal item. Reverse the hash comparison so
+        // the smallest hash wins regardless of input order.
+        .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))
+        .map(|(_, state, _)| state)
+}
+
 const SOLVER_ALGORITHMS: [(&str, SolverAlgorithm); 3] = [
     ("backwardInduction", SolverAlgorithm::BackwardInduction),
     ("serializedBounds", SolverAlgorithm::SerializedBounds),
@@ -1052,9 +1068,6 @@ pub fn run_solver(
             for depth in SOLVER_DEPTHS {
                 for rolls in SOLVER_ROLLS {
                     for (chance_label, chance) in SOLVER_CHANCE {
-                        done += 1;
-                        on_progress(done, total_cells);
-
                         let action_cap = (scenario == "doubles").then_some(DOUBLES_ACTION_CAP);
                         let mut row = SolverRow {
                             scenario,
@@ -1078,6 +1091,8 @@ pub fn run_solver(
                         {
                             row.skipped = Some(reason);
                             rows.push(row);
+                            done += 1;
+                            on_progress(done, total_cells);
                             continue;
                         }
 
@@ -1120,6 +1135,8 @@ pub fn run_solver(
                             row.avg_lps = cell.lps / n;
                         }
                         rows.push(row);
+                        done += 1;
+                        on_progress(done, total_cells);
                     }
                 }
             }
@@ -1214,7 +1231,7 @@ fn battle_position(
     // the tiebreak, two runs of the same seed can pick different leads and
     // therefore benchmark different positions, which shows up as work counts
     // that refuse to reproduce.
-    let state = simulate_turn(
+    let state = most_likely_state(simulate_turn(
         &MatchState::TeamPreviewState(preview),
         &PlayerCommand::TeamPreview(p1),
         &PlayerCommand::TeamPreview(p2),
@@ -1223,15 +1240,36 @@ fn battle_position(
         false,
         1,
         None,
-    )
-    .into_iter()
-    .map(|(state, _, probability)| {
-        let mut hasher = DefaultHasher::new();
-        state.hash(&mut hasher);
-        (hasher.finish(), state, probability)
-    })
-    .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))?
-    .1;
+    ))?;
 
     matches!(state, MatchState::BattleState(_)).then_some(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::most_likely_state;
+    use crate::state::battle::MatchState;
+    use crate::tests::simuilator_test_helpers::battle_state_from_lists;
+
+    #[test]
+    fn equal_probability_benchmark_branches_ignore_arrival_order() {
+        let first = MatchState::BattleState(battle_state_from_lists(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut second_battle = match &first {
+            MatchState::BattleState(battle) => battle.clone(),
+            _ => unreachable!(),
+        };
+        second_battle.turn_number = 1;
+        let second = MatchState::BattleState(second_battle);
+
+        let forward =
+            most_likely_state(vec![(first.clone(), (), 0.5), (second.clone(), (), 0.5)]);
+        let reversed = most_likely_state(vec![(second, (), 0.5), (first, (), 0.5)]);
+
+        assert_eq!(forward, reversed);
+    }
 }

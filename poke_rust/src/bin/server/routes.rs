@@ -463,6 +463,25 @@ fn is_gigantamax_dex_entry(species_key: &poke_rust::data::species::Species) -> b
     format!("{species_key:?}").to_lowercase().ends_with("gmax")
 }
 
+/// Keep one panicking benchmark sweep from aborting the later sequential
+/// sweeps. Panics become ordinary per-sweep failures so the SSE contract still
+/// delivers exactly one `result` or `failed` event for every card.
+fn catch_benchmark_panic<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = payload.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            Err(format!("benchmark sweep panicked: {message}"))
+        }
+    }
+}
+
 /// Runs all three benchmark sweeps — turn resolution, fog-of-war inference and
 /// the game-tree solver (`poke_rust::benchmarking`, the unbounded grid each
 /// offline `cargo bench` binary runs) — and streams them over Server-Sent
@@ -584,8 +603,9 @@ pub async fn run_benchmark(
     let running = app.benchmark_running.clone();
     let sweeps = tokio::task::spawn_blocking(move || {
         let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::TurnSpeed);
-        let rows =
-            benchmarking::run_turn_speed(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress);
+        let rows = catch_benchmark_panic(|| {
+            benchmarking::run_turn_speed(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress)
+        });
         report(&tx, BenchmarkSweepDto::TurnSpeed, rows, |rows| {
             BenchmarkResultDto::TurnSpeed {
                 rows: rows.into_iter().map(turn_speed_row_dto).collect(),
@@ -593,13 +613,15 @@ pub async fn run_benchmark(
         });
 
         let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::Inference);
-        let rows = benchmarking::run_inference(
-            &dexes.pokemon_dex,
-            &dexes.move_dex,
-            &dexes.ability_dex,
-            &dexes.learnset_dex,
-            &mut on_progress,
-        );
+        let rows = catch_benchmark_panic(|| {
+            benchmarking::run_inference(
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &dexes.ability_dex,
+                &dexes.learnset_dex,
+                &mut on_progress,
+            )
+        });
         report(&tx, BenchmarkSweepDto::Inference, rows, |rows| {
             BenchmarkResultDto::Inference {
                 rows: rows.into_iter().map(inference_row_dto).collect(),
@@ -607,7 +629,9 @@ pub async fn run_benchmark(
         });
 
         let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::Solver);
-        let rows = benchmarking::run_solver(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress);
+        let rows = catch_benchmark_panic(|| {
+            benchmarking::run_solver(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress)
+        });
         report(&tx, BenchmarkSweepDto::Solver, rows, |rows| {
             BenchmarkResultDto::Solver {
                 rows: rows.into_iter().map(solver_row_dto).collect(),
@@ -749,4 +773,18 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
     let _ = tokio::fs::write(&cache_path, &bytes).await;
 
     sprite_bytes_response(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catch_benchmark_panic;
+
+    #[test]
+    fn benchmark_panics_become_sweep_failures() {
+        let result = catch_benchmark_panic::<()>(|| panic!("synthetic sweep failure"));
+        assert_eq!(
+            result,
+            Err("benchmark sweep panicked: synthetic sweep failure".to_string())
+        );
+    }
 }

@@ -69,6 +69,9 @@
 //! than to the tree, and each successor's subtree is dropped before the next is
 //! expanded. The node budget in `SolveConfig::default` is the backstop.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use poke_rust::benchmarking::{SolverRow, run_solver};
 use poke_rust::simulator::{simulate_turn, team_preview_state_from_teamsheets};
 use poke_rust::solver::chance::ChanceMode;
@@ -242,8 +245,13 @@ fn print_sample_solve(
         None,
     )
     .into_iter()
-    .max_by(|a, b| a.2.total_cmp(&b.2))
-    .map(|(state, _, _)| state) else {
+    .map(|(state, _, probability)| {
+        let mut hasher = DefaultHasher::new();
+        state.hash(&mut hasher);
+        (hasher.finish(), state, probability)
+    })
+    .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))
+    .map(|(_, state, _)| state) else {
         eprintln!("sample solve: team preview produced no branches");
         return;
     };

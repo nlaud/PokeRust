@@ -109,15 +109,15 @@ pub(super) fn run(
             max_fraction: ctx.max_discarded,
         });
     }
-    for (player, joint) in [
-        (Player::P1, &position.p1),
-        (Player::P2, &position.p2),
+    for (player, truncation) in [
+        (Player::P1, ctx.action_truncations[0]),
+        (Player::P2, ctx.action_truncations[1]),
     ] {
-        if joint.was_capped() {
+        if let Some((kept, total)) = truncation {
             warnings.push(SolveWarning::ActionsTruncated {
                 player,
-                kept: joint.actions.len(),
-                total: joint.total,
+                kept,
+                total,
             });
         }
     }
@@ -171,6 +171,10 @@ struct SearchContext<'a> {
     turn_cache: TurnCache,
     /// Largest fraction of outcome probability dropped at any one chance node.
     max_discarded: f64,
+    /// Largest action-set truncation encountered for each player anywhere in
+    /// the search. Child nodes matter just as much as the root: once any node is
+    /// capped, the returned equilibrium is approximate.
+    action_truncations: [Option<(usize, usize)>; 2],
     budget_hit: bool,
 }
 
@@ -188,6 +192,7 @@ impl<'a> SearchContext<'a> {
             tt: TranspositionTable::new(cfg.tt_capacity),
             turn_cache: TurnCache::new(cfg.turn_cache_capacity),
             max_discarded: 0.0,
+            action_truncations: [None, None],
             budget_hit: false,
         }
     }
@@ -238,7 +243,7 @@ impl<'a> SearchContext<'a> {
         }
 
         let key = hash_state(state) ^ SALT_SIMULTANEOUS;
-        if let Some(value) = self.tt.probe(key, depth) {
+        if let Some(value) = self.tt.probe(key, depth, chain) {
             self.stats.tt_hits += 1;
             return value;
         }
@@ -252,7 +257,7 @@ impl<'a> SearchContext<'a> {
             if (upper - lower).abs() <= EPS {
                 // The brackets met: this subgame has a pure equilibrium and the
                 // matrix never has to be built at all.
-                self.tt.store(key, depth, lower);
+                self.tt.store(key, depth, chain, lower);
                 return lower;
             }
             alpha = alpha.max(lower);
@@ -260,7 +265,7 @@ impl<'a> SearchContext<'a> {
         }
 
         let value = self.solve_position(state, depth, chain, alpha, beta).value;
-        self.tt.store(key, depth, value);
+        self.tt.store(key, depth, chain, value);
         value
     }
 
@@ -312,15 +317,34 @@ impl<'a> SearchContext<'a> {
         }
     }
 
-    fn joint_actions(&self, battle: &BattleState, player: Player, phase: Phase) -> JointActions {
-        actions::joint_actions(
+    fn joint_actions(
+        &mut self,
+        battle: &BattleState,
+        player: Player,
+        phase: Phase,
+    ) -> JointActions {
+        let joint = actions::joint_actions(
             battle,
             player,
             phase,
             self.move_dex,
             self.pokemon_dex,
             self.cfg.max_actions_per_player,
-        )
+        );
+        if joint.was_capped() {
+            let slot = match player {
+                Player::P1 => 0,
+                Player::P2 => 1,
+            };
+            let candidate = (joint.actions.len(), joint.total);
+            let dropped = |(kept, total): (usize, usize)| total - kept;
+            if self.action_truncations[slot]
+                .is_none_or(|previous| dropped(candidate) > dropped(previous))
+            {
+                self.action_truncations[slot] = Some(candidate);
+            }
+        }
+        joint
     }
 
     /// Algorithm 1: evaluate every cell, then solve.
@@ -948,6 +972,7 @@ struct TranspositionTable {
 struct TtEntry {
     key: u64,
     depth: u8,
+    chain: u8,
     value: f64,
 }
 
@@ -966,19 +991,25 @@ impl TranspositionTable {
         }
     }
 
-    /// A value is only reusable at the depth it was computed for: the same
-    /// position searched one ply shallower is a different question.
-    fn probe(&self, key: u64, depth: u8) -> Option<f64> {
+    /// A value is only reusable at the same search horizon. Besides ordinary
+    /// depth, the forced-phase chain matters because reaching its configured
+    /// limit makes the next replacement or pivot consume a ply.
+    fn probe(&self, key: u64, depth: u8, chain: u8) -> Option<f64> {
         let entry = (*self.slots.get((key & self.mask) as usize)?)?;
-        (entry.key == key && entry.depth == depth).then_some(entry.value)
+        (entry.key == key && entry.depth == depth && entry.chain == chain).then_some(entry.value)
     }
 
-    fn store(&mut self, key: u64, depth: u8, value: f64) {
+    fn store(&mut self, key: u64, depth: u8, chain: u8, value: f64) {
         if self.slots.is_empty() {
             return;
         }
         let index = (key & self.mask) as usize;
-        self.slots[index] = Some(TtEntry { key, depth, value });
+        self.slots[index] = Some(TtEntry {
+            key,
+            depth,
+            chain,
+            value,
+        });
     }
 }
 
@@ -1031,5 +1062,20 @@ impl TurnCache {
         self.stored += branches.len();
         self.order.push_back(key);
         self.entries.insert(key, branches.to_vec());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TranspositionTable;
+
+    #[test]
+    fn transposition_entries_distinguish_forced_chain_depth() {
+        let mut table = TranspositionTable::new(8);
+        table.store(17, 2, 1, 0.25);
+
+        assert_eq!(table.probe(17, 2, 1), Some(0.25));
+        assert_eq!(table.probe(17, 2, 0), None);
+        assert_eq!(table.probe(17, 2, 2), None);
     }
 }

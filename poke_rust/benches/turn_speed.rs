@@ -37,6 +37,8 @@
 mod bench_common;
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use rand::SeedableRng;
@@ -122,9 +124,14 @@ fn main() {
                     None,
                 )
                 .into_iter()
-                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+                .map(|(state, _, probability)| {
+                    let mut hasher = DefaultHasher::new();
+                    state.hash(&mut hasher);
+                    (hasher.finish(), state, probability)
+                })
+                .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))
                 .unwrap()
-                .0;
+                .1;
 
                 let MatchState::BattleState(battle_state) = &state else {
                     continue; // shouldn't happen once leads are chosen, but don't let one odd pairing kill the run

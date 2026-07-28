@@ -3,7 +3,7 @@ import * as api from '../api/client'
 import type { BenchmarkProgress, InferenceRow, SolverRow, TurnSpeedRow } from '../api/types'
 
 /** One sweep's lifecycle. Tracked per sweep rather than globally because the
- * three run concurrently server-side and finish at wildly different times — the
+ * three run sequentially server-side and finish at wildly different times — the
  * solver sweep takes minutes longer than turn speed — so the page renders each
  * chart the moment its own sweep lands. */
 export type SweepStatus = 'idle' | 'running' | 'done' | 'failed'
@@ -86,7 +86,21 @@ export const useBenchmark = create<BenchmarkStore>((set) => ({
           },
         })),
 
-      onDone: () => set({ busy: false }),
+      // `done` is terminal even if a worker failed before it could emit its
+      // per-sweep event. Never leave a card spinning after the stream closes.
+      onDone: () =>
+        set((state) => {
+          const finish = <Row,>(sweep: SweepState<Row>): SweepState<Row> =>
+            sweep.status === 'running'
+              ? { ...sweep, status: 'failed', error: 'Benchmark ended before this sweep reported' }
+              : sweep
+          return {
+            busy: false,
+            turnSpeed: finish(state.turnSpeed),
+            inference: finish(state.inference),
+            solver: finish(state.solver),
+          }
+        }),
 
       // The stream died, so anything still running will never report. Mark
       // those failed rather than leaving them spinning forever; sweeps that

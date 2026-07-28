@@ -721,6 +721,48 @@ fn capping_the_action_set_is_reported() {
     assert!(result.p1_strategy.len() <= 2);
 }
 
+/// The root has only one move per player, but its guaranteed KO reaches a
+/// replacement node with two bench choices. Truncation at that child used to be
+/// silently omitted because warning collection inspected only the root sets.
+#[test]
+fn capping_a_child_action_set_is_reported() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut battle = battle_state_from_lists(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Splash])],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+    );
+    battle.p2_active_mons[0].hp = 1;
+
+    let result = solve(
+        &MatchState::BattleState(battle),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            max_actions_per_player: Some(1),
+            ..base_config()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        result.warnings.iter().any(|warning| matches!(
+            warning,
+            SolveWarning::ActionsTruncated {
+                kept: 1,
+                total,
+                ..
+            } if *total > 1
+        )),
+        "child-node capping went unreported: {:?}",
+        result.warnings
+    );
+}
+
 #[test]
 fn a_finished_battle_cannot_be_solved() {
     let (pokemon_dex, move_dex) = dexes();

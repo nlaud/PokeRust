@@ -161,10 +161,10 @@ export function listSpecies(): Promise<SpeciesListDto> {
 
 /** Consumes the `GET /api/benchmark` Server-Sent Events stream.
  *
- * Three unbounded sweeps run concurrently server-side, so events for different
- * sweeps interleave and each sweep reports independently: `progress` throughout,
- * then one `result` when it finishes or one `failed` if it does not. Neither
- * closes the stream — a failed sweep must not cancel the two still running.
+ * Three unbounded sweeps run sequentially server-side and each reports
+ * independently: `progress` throughout, then one `result` when it finishes or
+ * one `failed` if it does not. Neither closes the stream — a failed sweep must
+ * not cancel the two still waiting to run.
  * Only `done`, sent once all three have reported, ends it.
  *
  * `failed` is named that rather than `error` so it cannot be confused with

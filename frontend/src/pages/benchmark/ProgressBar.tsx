@@ -4,9 +4,9 @@ import type { BenchmarkProgress } from '../../api/types'
  * server (see `api/client.ts::streamBenchmark`) — not a fake timer.
  *
  * One of these lives inside each sweep's own card rather than one shared bar at
- * the top of the page: the three sweeps run concurrently and are very
- * differently sized, so a single blended percentage would be fabricated. Before
- * a sweep's first event arrives there is no percentage to show at all, which is
+ * the top of the page: the sequential sweeps are very differently sized, so a
+ * single blended percentage would be fabricated. Before a sweep's first event
+ * arrives there is no percentage to show at all, which is
  * what `indeterminate` covers. Reuses `BenchmarkChart`'s two-rect inline-SVG
  * idiom (track + fill) rather than a charting or UI dependency. */
 export default function ProgressBar({ progress }: { progress: BenchmarkProgress | null }) {
