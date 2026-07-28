@@ -5,12 +5,11 @@ Minimalist web UI for the PokeRust battle simulator: a **Teams** page
 page (ruleset cards with a curated Pokémon Champions item pool for ban lists),
 a **Simulate** page (hotseat battles against the Rust engine), a **Tracker**
 page (follow a real battle by typing what happened instead of driving a
-simulated opponent — see "Tracker mode" below), and a **Benchmark** page (right-aligned in the navbar; runs the full turn-resolution
-and fog-of-war-inference speed sweep, streamed live over Server-Sent Events
-from `GET /api/benchmark` — see `poke_rust::benchmarking`. This is the same
-unbounded sweep the offline `cargo bench` binaries run, recorded in
-`poke_rust/benches/RESULTS.md`, so it can take several minutes; the page
-shows real backend-reported progress, not a fake timer).
+simulated opponent — see "Tracker mode" below), and a **Benchmark** page
+(right-aligned in the navbar; runs the turn-resolution, fog-of-war-inference
+and game-tree-solver sweeps, streamed live over Server-Sent Events from
+`GET /api/benchmark` — see `poke_rust::benchmarking` and "The Benchmark page"
+below).
 React + Vite + TypeScript + Tailwind CSS v4.
 
 ## Running
@@ -74,14 +73,50 @@ src/
   pages/tracker/      TrackerSetupPanel, TrackerScreen, TrackerArena,
                       TrackerInputBar (the autocomplete editor — see "The
                       input bar" above), TrackerLogSidebar, TrackerTeamSidebar
-  pages/benchmark/    BenchmarkChart, ProgressBar — hand-rolled inline-SVG bar
-                      chart + determinate progress bar (no charting
-                      dependency); used by pages/BenchmarkingPage.tsx
+  pages/benchmark/    ChartCard (renders a sweep's four states), BenchmarkChart
+                      + BenchmarkChartSkeleton, ProgressBar — hand-rolled
+                      inline-SVG bar chart + determinate progress bar (no
+                      charting dependency); used by pages/BenchmarkingPage.tsx
   store/trackerStore.ts  single-perspective session store for tracker mode —
                       no hotseat flip, no command wizard; owns the authored
                       script (committedTurns) and the live per-event preview
 e2e/                  Playwright suite (tracker-input.spec.ts) — see "Testing"
 ```
+
+## The Benchmark page
+
+Three sweeps — turn resolution, fog-of-war inference, and the game-tree solver
+— run **one after another** on the server, but report independently over one SSE
+stream: `progress` events tagged with their sweep throughout, then one `result`
+per sweep the moment it finishes. A `failed` event takes down only its own sweep;
+a single terminal `done` closes the stream.
+
+Sequential is the point. Running the sweeps concurrently finishes much sooner,
+but three CPU-bound sweeps sharing a machine report contended times that no
+longer reproduce `poke_rust/benches/RESULTS.md` — so the numbers on screen match
+the recorded ones, and per-sweep streaming is what keeps the page responsive
+instead.
+
+That protocol is what the page's structure follows. `benchmarkStore` keeps
+`status`/`rows`/`progress`/`error` **per sweep** rather than one global blob, so
+each `ChartCard` renders its own progress bar and skeleton and fills in the
+moment its sweep lands — which matters because the solver sweep runs minutes
+longer than turn speed. Cards keep their footprint across all four states
+(`idle`/`running`/`done`/`failed`), so an early finisher doesn't reflow the grid
+under the ones still loading. Charts are laid out two-up on `lg:` and stack on
+narrow screens.
+
+Each sweep is the same unbounded grid the offline `cargo bench` binaries run,
+so the whole thing takes several minutes and the progress bars are real
+backend-reported counts, not a fake timer.
+
+Charts carry several numeric columns, not just a time. Column headers and row
+labels with a dotted underline have a `title` tooltip; the engine concepts
+behind the labels — the three pruning algorithms, the chance-node sampling
+modes, enumerate-vs-sample turn resolution, and the fog-of-war information
+baselines — are explained in `pages/benchmark/glossary.ts`, which is the single
+place that wording lives. If the behaviour of any of those changes in the
+engine, update the glossary with it.
 
 ## Tracker mode
 

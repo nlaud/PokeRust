@@ -98,6 +98,7 @@ async fn main() {
         tracker_sessions: Arc::new(Mutex::new(HashMap::new())),
         sprite_cache_dir,
         http: reqwest::Client::new(),
+        benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let app = Router::new()

@@ -777,20 +777,61 @@ pub struct SpeciesListDto {
 }
 
 // ── Benchmarking ─────────────────────────────────────────────────────────────
-// See `poke_rust::benchmarking` for the timing logic these DTOs wrap. The
-// sweep is always the full unbounded teamsheet-pairing grid (matching the
-// offline `cargo bench` binaries exactly — no request-configurable knobs),
-// so `GET /api/benchmark` takes no body; it streams `BenchmarkProgressDto`
-// events over Server-Sent Events as it runs, ending in one `BenchmarkResponse`
-// (see `routes.rs::run_benchmark`).
+// See `poke_rust::benchmarking` for the timing logic these DTOs wrap. Each
+// sweep is the full unbounded teamsheet-pairing grid (the same grid the offline
+// `cargo bench` binaries run — no request-configurable knobs), so
+// `GET /api/benchmark` takes no body.
+//
+// The three sweeps run **one at a time** but report independently: every sweep
+// streams its own `BenchmarkProgressDto` events tagged with its `stage`, then
+// emits a single `BenchmarkResultDto` the moment it finishes, so the UI renders
+// each chart as it lands instead of waiting for the whole run. A
+// `BenchmarkSweepErrorDto` fails one sweep without stopping the rest, and a
+// final `done` event closes the stream. See `routes.rs::run_benchmark`.
+//
+// Sequential is the point, not an accident: running the sweeps concurrently
+// finishes sooner but makes every reported time a contended measurement that no
+// longer reproduces `poke_rust/benches/RESULTS.md`. Streaming per sweep is what
+// buys the responsiveness instead.
+
+/// Which of the three concurrent sweeps an event belongs to.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum BenchmarkSweepDto {
+    TurnSpeed,
+    Inference,
+    Solver,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkProgressDto {
-    /// `"turnSpeed"` | `"inference"` — which sweep is currently reporting.
-    pub stage: String,
+    pub stage: BenchmarkSweepDto,
     pub completed: usize,
     pub total: usize,
+}
+
+/// One finished sweep's rows. Tagged rather than a struct of three optional
+/// vectors, so a client cannot confuse "this sweep reported no rows" with "this
+/// sweep has not finished yet".
+#[derive(Serialize)]
+#[serde(tag = "sweep", rename_all = "camelCase")]
+pub enum BenchmarkResultDto {
+    #[serde(rename_all = "camelCase")]
+    TurnSpeed { rows: Vec<TurnSpeedRowDto> },
+    #[serde(rename_all = "camelCase")]
+    Inference { rows: Vec<InferenceRowDto> },
+    #[serde(rename_all = "camelCase")]
+    Solver { rows: Vec<SolverRowDto> },
+}
+
+/// One sweep failed. The others keep running, so this is not terminal for the
+/// stream — only the `done` event is.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkSweepErrorDto {
+    pub sweep: BenchmarkSweepDto,
+    pub message: String,
 }
 
 #[derive(Serialize)]
@@ -819,9 +860,32 @@ pub struct InferenceRowDto {
     pub contradiction_sample: Option<String>,
 }
 
+/// One `(scenario, algorithm, depth, rolls, chance)` cell of the game-tree
+/// solver sweep — see `poke_rust::benchmarking::SolverRow`.
+///
+/// `avg_turns_simulated` is the meaningful cost number: a `simulate_turn` call
+/// dominates a matrix LP by three orders of magnitude, so a configuration's
+/// wall-clock is very nearly its turn count times a constant — and unlike
+/// wall-clock, the count is immune to whatever else the machine is doing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BenchmarkResponse {
-    pub turn_speed: Vec<TurnSpeedRowDto>,
-    pub inference: Vec<InferenceRowDto>,
+pub struct SolverRowDto {
+    pub scenario: String,
+    pub algorithm: String,
+    pub depth: u8,
+    pub rolls: u8,
+    pub chance: String,
+    /// Joint-action cap in force, if any. Absent means the full action set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_cap: Option<usize>,
+    pub avg_time_secs: f64,
+    pub avg_nodes: f64,
+    pub avg_turns_simulated: f64,
+    pub avg_cells_evaluated: f64,
+    pub avg_cells_total: f64,
+    pub avg_lps: f64,
+    pub pairings: usize,
+    /// Why the cell was not attempted. Absent when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }

@@ -1,6 +1,7 @@
 import type {
   BenchmarkProgress,
-  BenchmarkResponse,
+  BenchmarkResult,
+  BenchmarkSweepError,
   CreateBattleRequest,
   CreateBattleResponse,
   CreateTrackerRequest,
@@ -158,35 +159,42 @@ export function listSpecies(): Promise<SpeciesListDto> {
   return request('/api/dex/species')
 }
 
-/** Consumes the `GET /api/benchmark` Server-Sent Events stream — a full,
- * unbounded sweep (matching the offline `cargo bench` binaries), so this can
- * run for several minutes. Named `failed` (not `error`) for the server-side
- * failure event so it can't be confused with `EventSource`'s own built-in
- * connection-level `error` (a plain `Event`, not a `MessageEvent` with
- * `.data`) — that's routed to `onFailed` too, but with a generic message.
+/** Consumes the `GET /api/benchmark` Server-Sent Events stream.
  *
- * Callers must let this close the connection on `result`/`failed` (done
- * below) — `EventSource` auto-reconnects by default, which would otherwise
- * silently re-trigger the whole sweep. The returned function lets a caller
- * cancel early too (e.g. on unmount). */
+ * Three unbounded sweeps run concurrently server-side, so events for different
+ * sweeps interleave and each sweep reports independently: `progress` throughout,
+ * then one `result` when it finishes or one `failed` if it does not. Neither
+ * closes the stream — a failed sweep must not cancel the two still running.
+ * Only `done`, sent once all three have reported, ends it.
+ *
+ * `failed` is named that rather than `error` so it cannot be confused with
+ * `EventSource`'s own built-in connection-level `error` (a plain `Event`, not a
+ * `MessageEvent` with `.data`). That one is a whole-stream failure and is
+ * reported through `onAborted`.
+ *
+ * Closing on `done` matters: `EventSource` auto-reconnects by default, which
+ * would silently re-trigger the entire multi-minute run. The returned function
+ * cancels early (e.g. on unmount). */
 export function streamBenchmark(handlers: {
   onProgress: (progress: BenchmarkProgress) => void
-  onResult: (result: BenchmarkResponse) => void
-  onFailed: (message: string) => void
+  onResult: (result: BenchmarkResult) => void
+  onSweepFailed: (failure: BenchmarkSweepError) => void
+  /** Every sweep has reported; the stream is closed. */
+  onDone: () => void
+  /** The stream itself died, so sweeps still running will never report. */
+  onAborted: (message: string) => void
 }): () => void {
   const es = new EventSource('/api/benchmark')
   es.addEventListener('progress', (e) => handlers.onProgress(JSON.parse(e.data)))
-  es.addEventListener('result', (e) => {
-    handlers.onResult(JSON.parse(e.data))
+  es.addEventListener('result', (e) => handlers.onResult(JSON.parse(e.data)))
+  es.addEventListener('failed', (e) => handlers.onSweepFailed(JSON.parse(e.data)))
+  es.addEventListener('done', () => {
     es.close()
-  })
-  es.addEventListener('failed', (e) => {
-    handlers.onFailed(JSON.parse(e.data).message)
-    es.close()
+    handlers.onDone()
   })
   es.onerror = () => {
-    handlers.onFailed('Connection to server lost')
     es.close()
+    handlers.onAborted('Connection to server lost')
   }
   return () => es.close()
 }

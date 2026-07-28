@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -12,7 +13,7 @@ use axum::http::StatusCode;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
@@ -43,6 +44,14 @@ pub struct AppState {
     pub sprite_cache_dir: PathBuf,
     /// Shared client for the one-time upstream fetch on a cache miss.
     pub http: reqwest::Client,
+    /// Whether a benchmark sweep is in flight — see `run_benchmark`.
+    ///
+    /// Closing the SSE stream does **not** stop the sweeps: they run on
+    /// `spawn_blocking` threads with no cancellation point, so a client that
+    /// reloads mid-run and starts another would leave the first three tasks
+    /// churning and stack six CPU-bound sweeps on top of each other. This flag
+    /// makes a second concurrent run fail fast instead.
+    pub benchmark_running: Arc<AtomicBool>,
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -454,94 +463,212 @@ fn is_gigantamax_dex_entry(species_key: &poke_rust::data::species::Species) -> b
     format!("{species_key:?}").to_lowercase().ends_with("gmax")
 }
 
-/// Runs the full turn-resolution-speed + fog-of-war-inference-speed sweep
-/// (`poke_rust::benchmarking` — the unbounded grid, matching the offline
-/// `cargo bench` binaries) and streams progress over Server-Sent Events,
-/// ending in one `result` (or `failed`) event. Needs only `app.dexes` — no
-/// `sessions` lock is taken, so a benchmark run never blocks battle requests.
-/// The sweep is synchronous, CPU-bound Rust with no `.await` points of its
-/// own, so it runs inside `spawn_blocking` rather than on the async runtime's
-/// worker threads, where it would stall every other in-flight request for
-/// the run's (now multi-minute) duration. `GET`, not `POST`: there are no
-/// request knobs left to send a body for, and the browser's native
-/// `EventSource` — which the frontend uses to consume this — can only issue
-/// `GET` requests.
+/// Runs all three benchmark sweeps — turn resolution, fog-of-war inference and
+/// the game-tree solver (`poke_rust::benchmarking`, the unbounded grid each
+/// offline `cargo bench` binary runs) — and streams them over Server-Sent
+/// Events.
+///
+/// **The sweeps run one at a time, deliberately.** Running them concurrently
+/// finishes sooner, but three CPU-bound sweeps sharing a machine — on a hybrid
+/// CPU, across different core types — report times that no longer reproduce
+/// `poke_rust/benches/RESULTS.md`. A benchmark whose numbers cannot be compared
+/// to the recorded ones is not worth the wall-clock it saves. Sequential keeps
+/// this endpoint's output directly comparable to `cargo bench`.
+///
+/// Streaming is what makes that affordable to watch. Everything runs in one
+/// `spawn_blocking` task, but each sweep emits its own tagged `progress` events
+/// and its own `result` the instant it finishes, so the page renders each chart
+/// as it lands instead of waiting on the solver sweep at the end. A sweep that
+/// fails emits `failed` and does not stop the ones after it; `done` is the one
+/// event that ends the stream.
+///
+/// Needs only `app.dexes` — no `sessions` lock is taken, so a benchmark run
+/// never blocks battle requests. The sweeps are synchronous, CPU-bound Rust with
+/// no `.await` points of their own, hence `spawn_blocking` rather than the async
+/// runtime's worker threads, where they would stall every other in-flight
+/// request for the run's duration. `GET`, not `POST`: there are no request knobs
+/// to send a body for, and the browser's native `EventSource` — which the
+/// frontend uses to consume this — can only issue `GET`.
 pub async fn run_benchmark(
     State(app): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let dexes = app.dexes.clone();
-    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+    // Room for every sweep to have progress in flight without any of them
+    // blocking on a browser that is slow to drain.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
-    tokio::task::spawn_blocking(move || {
-        // Captures `&tx` (a shared borrow is enough — `blocking_send` only
-        // needs `&self`), so `tx` is still free to send the final event below.
-        let send_progress = |stage: &'static str, completed: usize, total: usize| {
-            let event = Event::default()
-                .event("progress")
-                .json_data(BenchmarkProgressDto {
-                    stage: stage.to_string(),
+    // One run at a time. The sweeps cannot be cancelled once started, so
+    // without this a reload mid-run would double the CPU-bound work and make
+    // every reported time meaningless.
+    if app
+        .benchmark_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        for sweep in [
+            BenchmarkSweepDto::TurnSpeed,
+            BenchmarkSweepDto::Inference,
+            BenchmarkSweepDto::Solver,
+        ] {
+            let _ = tx.try_send(
+                Event::default()
+                    .event("failed")
+                    .json_data(BenchmarkSweepErrorDto {
+                        sweep,
+                        message: "A benchmark is already running; wait for it to finish."
+                            .to_string(),
+                    })
+                    .unwrap_or_else(|_| Event::default().event("failed")),
+            );
+        }
+        let _ = tx.try_send(Event::default().event("done").data("{}"));
+        return Sse::new(ReceiverStream::new(rx).map(Ok)).keep_alive(KeepAlive::default());
+    }
+
+    /// Build a named SSE event, degrading to a payload-less event of the same
+    /// name if serialization somehow fails, so the client's state machine still
+    /// advances rather than hanging on a sweep that never reports.
+    fn event(name: &'static str, payload: impl Serialize) -> Event {
+        Event::default()
+            .event(name)
+            .json_data(payload)
+            .unwrap_or_else(|_| Event::default().event(name))
+    }
+
+    /// One sweep's plumbing: stream tagged progress, then emit exactly one
+    /// `result` or `failed`. Returns once the sweep has reported.
+    fn report<T>(
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        sweep: BenchmarkSweepDto,
+        outcome: Result<T, String>,
+        into_result: impl FnOnce(T) -> BenchmarkResultDto,
+    ) {
+        // Named "failed", not "error" — `EventSource` has its own built-in
+        // connection-level `error` event (a plain `Event`, not a `MessageEvent`
+        // with `.data`); reusing that name would make a server-reported failure
+        // indistinguishable from a dropped connection.
+        let reported = match outcome {
+            Ok(rows) => event("result", into_result(rows)),
+            Err(message) => event(
+                "failed",
+                BenchmarkSweepErrorDto { sweep, message },
+            ),
+        };
+        let _ = tx.blocking_send(reported);
+    }
+
+    // `try_send`, not `blocking_send`: progress is lossy by nature — only the
+    // latest value means anything — and these calls sit on the benchmark's own
+    // worker thread. Blocking one on a browser that is slow to drain would
+    // inflate the very wall-clock the sweep is there to measure. `result` and
+    // `failed` still block, since losing one would strand a chart forever.
+    let progress_sender = |tx: tokio::sync::mpsc::Sender<Event>, sweep: BenchmarkSweepDto| {
+        move |completed: usize, total: usize| {
+            let _ = tx.try_send(event(
+                "progress",
+                BenchmarkProgressDto {
+                    stage: sweep,
                     completed,
                     total,
-                })
-                .unwrap_or_else(|_| Event::default().event("progress"));
-            let _ = tx.blocking_send(event);
-        };
+                },
+            ));
+        }
+    };
 
-        let turn_speed = benchmarking::run_turn_speed(
-            &dexes.pokemon_dex,
-            &dexes.move_dex,
-            &mut |completed, total| send_progress("turnSpeed", completed, total),
-        );
-        let inference = benchmarking::run_inference(
+    // Held outside the sweep task so `done` is still sent if that task panics —
+    // otherwise a panic would leave every chart stuck on its skeleton forever.
+    let done_tx = tx.clone();
+
+    // One task, three sweeps in sequence — cheapest sweep first, so the page has
+    // something on screen early and the multi-minute solver sweep lands last.
+    let dexes = app.dexes.clone();
+    let running = app.benchmark_running.clone();
+    let sweeps = tokio::task::spawn_blocking(move || {
+        let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::TurnSpeed);
+        let rows =
+            benchmarking::run_turn_speed(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress);
+        report(&tx, BenchmarkSweepDto::TurnSpeed, rows, |rows| {
+            BenchmarkResultDto::TurnSpeed {
+                rows: rows.into_iter().map(turn_speed_row_dto).collect(),
+            }
+        });
+
+        let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::Inference);
+        let rows = benchmarking::run_inference(
             &dexes.pokemon_dex,
             &dexes.move_dex,
             &dexes.ability_dex,
             &dexes.learnset_dex,
-            &mut |completed, total| send_progress("inference", completed, total),
+            &mut on_progress,
         );
-
-        // Named "failed", not "error" — `EventSource` already has its own
-        // built-in connection-level `error` event (a plain `Event`, not a
-        // `MessageEvent` with `.data`); reusing that name here would make a
-        // real server-reported failure indistinguishable from a dropped
-        // connection on the client.
-        let final_event = match (turn_speed, inference) {
-            (Ok(ts), Ok(inf)) => Event::default().event("result").json_data(BenchmarkResponse {
-                turn_speed: ts
-                    .into_iter()
-                    .map(|r| TurnSpeedRowDto {
-                        scenario: r.scenario.to_string(),
-                        mode: r.mode.to_string(),
-                        rolls: r.rolls,
-                        crit: r.crit,
-                        avg_time_secs: r.avg_time_secs,
-                        avg_branches: r.avg_branches,
-                        pairings: r.pairings,
-                    })
-                    .collect(),
-                inference: inf
-                    .into_iter()
-                    .map(|r| InferenceRowDto {
-                        scenario: r.scenario.to_string(),
-                        information_mode: r.information_mode.to_string(),
-                        calls: r.calls,
-                        avg_time_secs: r.avg_time_secs,
-                        contradictions: r.contradictions,
-                        contradiction_sample: r.contradiction_sample,
-                    })
-                    .collect(),
-            }),
-            (Err(message), _) | (_, Err(message)) => {
-                Event::default().event("failed").json_data(ApiError { message })
+        report(&tx, BenchmarkSweepDto::Inference, rows, |rows| {
+            BenchmarkResultDto::Inference {
+                rows: rows.into_iter().map(inference_row_dto).collect(),
             }
-        };
-        let _ = tx.blocking_send(
-            final_event.unwrap_or_else(|_| Event::default().event("failed")),
-        );
+        });
+
+        let mut on_progress = progress_sender(tx.clone(), BenchmarkSweepDto::Solver);
+        let rows = benchmarking::run_solver(&dexes.pokemon_dex, &dexes.move_dex, &mut on_progress);
+        report(&tx, BenchmarkSweepDto::Solver, rows, |rows| {
+            BenchmarkResultDto::Solver {
+                rows: rows.into_iter().map(solver_row_dto).collect(),
+            }
+        });
+    });
+
+    // `done` is what ends the stream. Sent even if the task panicked, so a
+    // client is never left waiting on a sweep that will never report — and the
+    // in-flight flag is cleared on that same path, so a panic cannot wedge the
+    // endpoint into permanently refusing new runs.
+    tokio::spawn(async move {
+        let _ = sweeps.await;
+        running.store(false, Ordering::SeqCst);
+        let _ = done_tx.send(Event::default().event("done").data("{}")).await;
     });
 
     let stream = ReceiverStream::new(rx).map(Ok);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn turn_speed_row_dto(row: benchmarking::TurnSpeedRow) -> TurnSpeedRowDto {
+    TurnSpeedRowDto {
+        scenario: row.scenario.to_string(),
+        mode: row.mode.to_string(),
+        rolls: row.rolls,
+        crit: row.crit,
+        avg_time_secs: row.avg_time_secs,
+        avg_branches: row.avg_branches,
+        pairings: row.pairings,
+    }
+}
+
+fn inference_row_dto(row: benchmarking::InferenceRow) -> InferenceRowDto {
+    InferenceRowDto {
+        scenario: row.scenario.to_string(),
+        information_mode: row.information_mode.to_string(),
+        calls: row.calls,
+        avg_time_secs: row.avg_time_secs,
+        contradictions: row.contradictions,
+        contradiction_sample: row.contradiction_sample,
+    }
+}
+
+fn solver_row_dto(row: benchmarking::SolverRow) -> SolverRowDto {
+    SolverRowDto {
+        scenario: row.scenario.to_string(),
+        algorithm: row.algorithm.to_string(),
+        depth: row.depth,
+        rolls: row.rolls,
+        chance: row.chance.to_string(),
+        action_cap: row.action_cap,
+        avg_time_secs: row.avg_time_secs,
+        avg_nodes: row.avg_nodes,
+        avg_turns_simulated: row.avg_turns_simulated,
+        avg_cells_evaluated: row.avg_cells_evaluated,
+        avg_cells_total: row.avg_cells_total,
+        avg_lps: row.avg_lps,
+        pairings: row.pairings,
+        skipped: row.skipped.map(str::to_string),
+    }
 }
 
 /// Sprites live outside the repo on GitHub (see `frontend/src/lib/sprites.ts`); nothing

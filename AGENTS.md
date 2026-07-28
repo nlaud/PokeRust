@@ -460,8 +460,37 @@ probability is the joint probability of the sampled trajectory. The server
 uses it for all turns, so the frontend always requests 16 damage rolls.
 Still run the server with `--release`.
 
+### The benchmark endpoint
+
+`GET /api/benchmark` runs all three sweeps — turn resolution, inference, solver
+(`benchmarking::run_turn_speed`/`run_inference`/`run_solver`) — over a single SSE
+stream. Each sweep tags its own `progress` events and emits its own `result` when
+it finishes, so the page fills in per chart rather than waiting on the whole run.
+`failed` takes down one sweep, not the stream; only `done` ends it. Adding a
+sweep means a `BenchmarkResultDto` variant, a call in `run_benchmark`, and the
+matching hand-mirrored types in `frontend/src/api/types.ts`.
+
+**The sweeps run sequentially, and that is deliberate.** Running them
+concurrently finishes far sooner, but three CPU-bound sweeps sharing a machine
+(on a hybrid CPU, across different core types) report contended times that no
+longer reproduce `benches/RESULTS.md` — a benchmark whose numbers can't be
+compared to the recorded ones isn't worth the wall-clock it saves. Per-sweep
+streaming is what buys responsiveness instead. Don't "optimize" this back into
+`tokio::join!`.
+
+**A sweep cannot be cancelled once started.** `spawn_blocking` tasks have no
+cancellation point, and closing the SSE stream does not stop them — a client
+that reloads mid-run and starts another would leave the first three churning.
+`AppState::benchmark_running` is an `AtomicBool` guard that makes a second
+concurrent run fail fast instead; it is cleared on the same path that emits
+`done`, so a panicking sweep cannot wedge the endpoint shut. This was found by
+driving the page, not by reading the code: aborted runs left orphaned sweeps
+saturating the CPU and every later measurement drifted.
+
 ### Testing the server
 
 `helper_scripts/` has none for this; smoke-test with curl against
 `http://127.0.0.1:3001/api` (create battle → preview turn → commands →
-attack turn), or the flow in `frontend/README.md`.
+attack turn), or the flow in `frontend/README.md`. `frontend/e2e/` has a
+Playwright suite, and Playwright is the way to eyeball a UI change — drive
+`npm run dev` and screenshot rather than reasoning about the layout.

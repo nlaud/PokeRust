@@ -315,11 +315,20 @@ export interface TurnResponse {
 }
 
 // ── Benchmarking ────────────────────────────────────────────────────────────
-// Mirrors `poke_rust::benchmarking`'s result rows via
-// `src/bin/server/dto.rs`'s `TurnSpeedRowDto`/`InferenceRowDto`/
-// `BenchmarkResponse`/`BenchmarkProgressDto`. `GET /api/benchmark` streams
-// over Server-Sent Events — no request body/knobs, always the full unbounded
-// sweep matching `poke_rust/benches/RESULTS.md`'s offline numbers.
+// Mirrors `poke_rust::benchmarking`'s result rows via `src/bin/server/dto.rs`'s
+// `TurnSpeedRowDto`/`InferenceRowDto`/`SolverRowDto`/`BenchmarkResultDto`/
+// `BenchmarkProgressDto`. `GET /api/benchmark` streams over Server-Sent Events
+// — no request body or knobs, always the full unbounded grid.
+//
+// The three sweeps run concurrently server-side and each reports on its own
+// schedule: tagged `progress` events throughout, then one `result` per sweep the
+// moment it finishes, a `failed` that takes down only its own sweep, and a
+// single terminal `done`. That is what lets each chart render as it lands.
+//
+// Because the sweeps share the machine, the times are contended and do NOT
+// reproduce `poke_rust/benches/RESULTS.md`'s serial numbers — relative shape
+// within a sweep holds, absolute microseconds do not. Count columns (branches,
+// turns simulated, cells) are unaffected. `BenchmarkingPage` says so on screen.
 
 export interface TurnSpeedRow {
   scenario: 'singles' | 'doubles'
@@ -345,16 +354,53 @@ export interface InferenceRow {
   contradictionSample?: string
 }
 
-export interface BenchmarkResponse {
-  turnSpeed: TurnSpeedRow[]
-  inference: InferenceRow[]
+/** One `(scenario, algorithm, depth, rolls, chance)` cell of the game-tree
+ * solver sweep.
+ *
+ * `avgTurnsSimulated` is the cost number that matters, not `avgTimeSecs`: a
+ * `simulate_turn` call outweighs a matrix LP by three orders of magnitude, and
+ * unlike wall-clock it is unaffected by the sweeps sharing the machine.
+ * `avgCellsEvaluated` against `avgCellsTotal` is what the pruning bought. */
+export interface SolverRow {
+  scenario: 'singles' | 'doubles'
+  algorithm: 'backwardInduction' | 'serializedBounds' | 'doubleOracle'
+  depth: number
+  rolls: number
+  chance: string
+  /** Joint-action cap in force. Absent means the full action set was used. */
+  actionCap?: number
+  avgTimeSecs: number
+  avgNodes: number
+  avgTurnsSimulated: number
+  avgCellsEvaluated: number
+  avgCellsTotal: number
+  avgLps: number
+  pairings: number
+  /** Why the cell was not attempted. Absent when it ran. */
+  skipped?: string
 }
 
-/** One `progress` SSE event — `stage` is which sweep is currently running. */
+export type BenchmarkSweep = 'turnSpeed' | 'inference' | 'solver'
+
+/** One finished sweep. Tagged rather than an object of three optional arrays,
+ * so "reported no rows" can never be mistaken for "has not finished yet". */
+export type BenchmarkResult =
+  | { sweep: 'turnSpeed'; rows: TurnSpeedRow[] }
+  | { sweep: 'inference'; rows: InferenceRow[] }
+  | { sweep: 'solver'; rows: SolverRow[] }
+
+/** One `progress` SSE event — `stage` says which sweep it belongs to. All three
+ * interleave, so progress must be tracked per sweep rather than globally. */
 export interface BenchmarkProgress {
-  stage: 'turnSpeed' | 'inference'
+  stage: BenchmarkSweep
   completed: number
   total: number
+}
+
+/** One sweep failed. Not terminal for the stream — the others keep going. */
+export interface BenchmarkSweepError {
+  sweep: BenchmarkSweep
+  message: string
 }
 
 // ── Tracker mode ────────────────────────────────────────────────────────────
