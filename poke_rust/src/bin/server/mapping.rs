@@ -13,6 +13,7 @@ use poke_rust::information::information::{CantReason, EventKind, InformationEven
 use poke_rust::information::unknowns::{
     PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
 };
+use poke_rust::solver::actions as solver_actions;
 use poke_rust::state::battle::{
     BattleCommand, BattleState, FieldSlot, MatchState, Player, TeamPreviewState,
 };
@@ -837,21 +838,17 @@ fn field_view(state: &BattleState) -> FieldView {
     }
 }
 
-/// Which input phase the battle is in — the same dispatch the terminal driver uses
-/// in `user::choose_battle_commands_for_player`.
+/// Which input phase the battle is in, as a wire type.
+///
+/// The classification itself lives in `solver::actions::phase_of` so the solver
+/// and the server cannot drift apart on it; this only maps it to the DTO.
 pub fn phase_of(state: &MatchState) -> PhaseDto {
-    match state {
-        MatchState::TeamPreviewState(_) => PhaseDto::TeamPreview,
-        MatchState::GameOverState { .. } => PhaseDto::GameOver,
-        MatchState::BattleState(battle) => {
-            if battle.self_switch_pending.is_some() {
-                PhaseDto::SelfSwitch
-            } else if battle.turn_started && battle.turn_ended {
-                PhaseDto::Replacement
-            } else {
-                PhaseDto::Normal
-            }
-        }
+    match solver_actions::phase_of(state) {
+        solver_actions::Phase::TeamPreview => PhaseDto::TeamPreview,
+        solver_actions::Phase::Normal => PhaseDto::Normal,
+        solver_actions::Phase::SelfSwitch => PhaseDto::SelfSwitch,
+        solver_actions::Phase::Replacement => PhaseDto::Replacement,
+        solver_actions::Phase::GameOver => PhaseDto::GameOver,
     }
 }
 

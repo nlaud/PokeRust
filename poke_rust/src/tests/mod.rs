@@ -10,3 +10,5 @@ mod random_battle_tests;
 pub mod simuilator_test_helpers;
 #[cfg(test)]
 mod simulator_tests;
+#[cfg(test)]
+mod solver_tests;

@@ -26,7 +26,14 @@ produces worlds that are legal but less plausible than they could be.
   invisible to the subset oracle (an invented Pokémon contradicts nothing). It is
   warned on every occurrence; a better prior than teammate-rank would help.
 
-- Now that determinization exists, create the nash solver and recursive evaluation
-  (when both players have perfect information) — determinized worlds are the leaves
-  it evaluates.
+- [x] Nash solver and recursive evaluation for perfect-information positions —
+  `poke_rust/src/solver/`. Simultaneous-move backward induction with double-oracle
+  pruning and serialized alpha-beta bounds (Bošanský et al., AIJ 2016), an exact
+  matrix-game equilibrium solver, and `cargo bench --bench solver_speed`.
+  - [ ] Wire it to the determinizer: solve over sampled determinized worlds and
+    average the resulting strategies, so it can be used under fog of war rather
+    than only on fully-known positions.
+  - [ ] Calibrate `solver::eval::heuristic`. Its weights are reasoned, not fitted;
+    the evaluator is a `fn` pointer specifically so a playout-based scorer can be
+    swapped in to fit them.
   - [ ] Then move on to actual bot creation, battle and mentor pages (Could make these an option in the simulate / tracker page?).

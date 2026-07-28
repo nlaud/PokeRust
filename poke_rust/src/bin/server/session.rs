@@ -13,9 +13,9 @@ use poke_rust::information::information::{InformationEvent, mask_events_for};
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::meta::{MetaDex, MetaFormat};
 use poke_rust::simulator;
+use poke_rust::solver::actions as solver_actions;
 use poke_rust::state::battle::{
-    BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
-    TeamPreviewCommand,
+    BattleCommand, BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand,
 };
 use poke_rust::state::dex_data::{AbilityData, MoveData, PokemonData};
 use poke_rust::user::replacement_commands_are_valid;
@@ -132,86 +132,31 @@ fn active_mons(
     }
 }
 
-fn healthy_bench_switches(state: &BattleState, player: Player) -> Vec<BattleCommand> {
-    let back_mons = match player {
-        Player::P1 => &state.p1_back_mons,
-        Player::P2 => &state.p2_back_mons,
-    };
-    back_mons
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| !m.fainted)
-        .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
-        .collect()
-}
-
-/// Enumerate the legal commands for every slot of `player`, mirroring the phase
-/// dispatch in `user::choose_battle_commands_for_player`. Slots whose only legal
-/// action is Pass are marked `forced` so the frontend can auto-fill them.
+/// Enumerate the legal commands for every slot of `player`.
+///
+/// The phase dispatch itself lives in `solver::actions::per_slot_commands`,
+/// shared with the game-tree solver; this adds only the presentation concern the
+/// solver has no use for. A slot whose sole legal action is `Pass` — a fainted
+/// Pokemon with an empty bench, a recharge turn, the healthy partner of a
+/// fainted slot — offers no real choice, so it is marked `forced` and the
+/// frontend auto-fills it.
 pub fn legal_commands(session: &BattleSession, dexes: &Dexes, player: Player) -> LegalCommandsView {
     let phase = mapping::phase_of(&session.state);
     let mut slots = Vec::new();
 
     if let MatchState::BattleState(state) = &session.state {
-        let active_len = active_mons(state, player).len();
+        let per_slot = solver_actions::per_slot_commands(
+            state,
+            player,
+            solver_actions::phase_of(&session.state),
+            &dexes.move_dex,
+            &dexes.pokemon_dex,
+        );
 
-        for slot_idx in 0..active_len {
-            let (commands, forced) = match phase {
-                PhaseDto::SelfSwitch => {
-                    let pending = state.self_switch_pending.map(|(slot, _)| slot);
-                    let this_slot = FieldSlot {
-                        player,
-                        slot_index: slot_idx as u8,
-                    };
-                    if pending == Some(this_slot) {
-                        let switches = healthy_bench_switches(state, player);
-                        if switches.is_empty() {
-                            (vec![BattleCommand::Pass], true)
-                        } else {
-                            (switches, false)
-                        }
-                    } else {
-                        (vec![BattleCommand::Pass], true)
-                    }
-                }
-                PhaseDto::Replacement => {
-                    let mon = &active_mons(state, player)[slot_idx];
-                    if mon.fainted {
-                        let switches = healthy_bench_switches(state, player);
-                        // Earlier fainted slots claim bench mons first: with two
-                        // fainted actives and one healthy bench mon, slot 0 gets
-                        // the switch and this slot is a forced Pass.
-                        let earlier_fainted = active_mons(state, player)[..slot_idx]
-                            .iter()
-                            .filter(|m| m.fainted)
-                            .count();
-                        if switches.len() <= earlier_fainted {
-                            (vec![BattleCommand::Pass], true)
-                        } else {
-                            (switches, false)
-                        }
-                    } else {
-                        (vec![BattleCommand::Pass], true)
-                    }
-                }
-                _ => {
-                    let commands = simulator::get_possible_commands_for_active_slot(
-                        state,
-                        player,
-                        slot_idx,
-                        &dexes.move_dex,
-                        &dexes.pokemon_dex,
-                    );
-                    // A Pass-only slot (fainted mon with an empty bench, or a
-                    // recharge turn) offers no real choice — let the UI skip it.
-                    let forced = commands.len() == 1 && matches!(commands[0], BattleCommand::Pass);
-                    (commands, forced)
-                }
-            };
-
+        for (slot_idx, commands) in per_slot.iter().enumerate() {
             slots.push(SlotCommandsDto {
                 slot_index: slot_idx,
-                forced,
+                forced: commands.len() == 1 && matches!(commands[0], BattleCommand::Pass),
                 options: commands
                     .iter()
                     .map(|c| mapping::command_option(state, player, slot_idx, c))

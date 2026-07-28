@@ -150,11 +150,24 @@ meta/                     Competitive usage statistics (championsbattledata.com)
                           override table. Unresolvable species are a HARD ERROR
   schema.rs                Drift-tolerant serde types for the raw JSON
   dex.rs                   MetaDex: load, lookup, renormalization, priors
+solver/                   Perfect-information Nash solver (simultaneous-move
+                          game-tree search over concrete states)
+  mod.rs                   Public API: SolveConfig/SolveResult, solve, solve_seeded
+  search.rs                BI / BIab / DOab recursion, serialized alpha-beta with
+                          star1, transposition table, turn cache
+  matrix.rs                Zero-sum matrix-game equilibrium (dense tableau simplex)
+  actions.rs               Phase-aware joint-action enumeration; SHARED with the
+                          HTTP server, which delegates its legal-command dispatch here
+  eval.rs                  LeafEvaluator fn pointer + the default heuristic
+  chance.rs                ChanceMode: how much of a turn's outcome distribution
+                          the search descends into
 tests/
   simulator_tests.rs        Main battle-mechanics test suite (~33,700 lines)
   inference_tests.rs         Inference-engine regression tests, named
                           test_s<NN>_*/roundtrip_s<NN>_* after the soundness finding
   determinize_tests.rs       Determinizer soundness, runnability and fidelity
+  solver_tests.rs            Solver search tests; the load-bearing one is
+                          all_algorithms_agree (proves the pruning is sound)
   simuilator_test_helpers.rs Test builders/helpers (battle builders, damage
                           helpers, assert functions)
 helper_scripts/            Python scripts to regenerate data/ enums from Showdown source files
@@ -291,6 +304,64 @@ Things worth knowing before touching it:
 Tests that assert cache *contents* will break on every scraper run; the suite
 asserts invariants and reads its fidelity targets from the loaded dex instead.
 
+### Perfect-information Nash solver (`solver/`)
+
+Given a concrete `MatchState`, computes each player's optimal **mixed** strategy
+over their legal joint commands plus the win odds:
+`solve(state, pokemon_dex, move_dex, &SolveConfig) -> Result<SolveResult, SolveError>`
+(and a `solve_seeded` twin, mirroring `determinize`/`determinize_seeded`).
+
+A Pokemon turn is a *simultaneous-move stochastic game*: both players commit
+without seeing the other, then the engine returns a distribution over successors.
+Minimax models that wrongly — it leaks one player's commitment — and its
+deterministic "safest move" output is exploitable. Each node's value is the Nash
+equilibrium value of its payoff matrix, which is why the output is a probability
+per action. Implements Algorithms 1–4 of Bošanský, Lisý, Lanctot, Čermák &
+Winands, *Algorithms for computing strategies in two-player simultaneous move
+games*, AIJ 237:1–40 (2016). The paper's chance-node weight `P*(s,r,c,s')` is
+exactly the `f64` `simulate_turn` already attaches to each successor.
+
+Things worth knowing before touching it:
+
+- **A matrix cell may never be a bound.** Alpha-beta style pruning returns a
+  bound; an LP over interval-valued cells computes nonsense and does so silently.
+  Cells are always evaluated over the full `[0, 1]` window. Bounds are legal only
+  inside `serial_ab` (an ordinary alternating-move search, where cutoffs and
+  star1 are sound) and as an `(α, β)` window that *came from* serialized bounds —
+  those provably contain the true value, so narrowing to them keeps values exact.
+  That invariant is what lets the transposition table store bare numbers.
+- **Utilities are win probabilities in `[0, 1]`**, P1-positive. Not cosmetic: it
+  supplies the globally valid `L = 0`, `U = 1` that star1 pruning needs.
+- **Mid-turn decision points don't consume a ply.** A faint leaves a replacement
+  phase and a self-switch leaves a pivot pending; both are real simultaneous-move
+  nodes, but charging them depth would make a depth-3 search that hit two faints
+  really look one turn ahead.
+- **Cost is `simulate_turn`, not the LP** — hundreds of microseconds against a
+  few. Judge a configuration by `SolveStats::turns_simulated`; `ChanceMode` is
+  the lever that matters. `SolverAlgorithm::SerializedBounds` trades LPs for
+  extra turn resolutions, which is the wrong direction here — it exists so the
+  benchmark can measure that rather than assume it.
+- **`solver::actions` is shared with the HTTP server**, which delegates its
+  legal-command dispatch to it. Replacement-phase joint legality needs
+  `user::replacement_commands_are_valid`, not `validate_battle_command_combination`.
+- **Determinism is per-process, not per-machine.** `coalesce_branches` sorts by
+  probability but drains a `HashMap` first, so equal-probability successors come
+  out in a run-varying order. `search::resolve` re-sorts with a state-hash
+  tiebreak — unconditionally, not just for the reducing `ChanceMode`s, since even
+  exact enumeration sums a cell in list order and float addition is not
+  associative. That makes repeated solves inside one process identical
+  (`repeated_solves_are_identical`). It does **not** make two processes agree:
+  the engine coalesces at every intermediate expansion level too, so a
+  successor's probability can land a few ulps apart across runs, moving work
+  counts by ~1%. Values agree bit for bit or within one ulp. Backward induction
+  drifts as much as the pruning algorithms, which is what places the cause in the
+  transition function rather than in the search — fixing it would mean changing
+  `coalesce_branches` for every caller.
+- Anti-OOM is structural: the search is depth-first (live memory is
+  `O(depth × branching)`, not `O(tree)`), successors are consumed so each
+  subtree drops before the next expands, and `node_budget` degrades to static
+  evaluation with a warning rather than panicking.
+
 ### Global configuration
 
 Verbosity and some roll-sharing flags are stored in `OnceLock<AtomicBool>` globals, set once at startup from CLI args. Functions throughout the codebase read these directly rather than threading config through arguments.
@@ -313,6 +384,13 @@ Tests live in `tests/simulator_tests.rs` (battle mechanics) and
 
 Inference regression tests are named `test_s<NN>_*` / `roundtrip_s<NN>_*` after
 the soundness finding they cover (see git log for the finding's history).
+
+Solver tests live in `tests/solver_tests.rs`, plus inline `mod tests` in each
+`solver/` file. `all_algorithms_agree` is the one that matters: backward
+induction, serialized bounds and double oracle explore wildly different
+fractions of the tree, so any unsound cutoff surfaces as a disagreement in the
+value. Keep solver test positions small — a search's cost is the product of the
+action counts and the branching factor at every ply, and these run in debug.
 
 ## Frontend
 

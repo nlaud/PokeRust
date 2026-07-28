@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "battle_sweep"
 harness = false
+
+[[bench]]
+name = "solver_speed"
+harness = false

@@ -25,7 +25,9 @@
 //! 15 GB (see `turn_speed.rs`'s header) — that safety cap is orthogonal to
 //! and unaffected by running the full pairing grid.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -44,6 +46,8 @@ use crate::simulator::{
     get_possible_commands_for_active_slot, sample_turn, sample_turn_raw, simulate_turn,
     team_preview_state_from_teamsheets, validate_battle_command_combination,
 };
+use crate::solver::chance::ChanceMode;
+use crate::solver::{SolveConfig, SolverAlgorithm, solve};
 use crate::state::battle::{
     BattleCommand, BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand,
 };
@@ -848,4 +852,386 @@ pub fn run_inference(
         }
     }
     Ok(rows)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Game-tree solver
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Doubles action cap. A doubles slot offers 15–20 commands, so the two slots
+/// together produce a few hundred joint actions and a matrix with tens of
+/// thousands of cells — every one of them a `simulate_turn` call. Capping keeps
+/// the doubles rows comparable to the singles rows instead of being a single
+/// measurement of "too slow"; the resulting equilibrium is over a subset of the
+/// real options, which is why the cap is printed alongside the timings.
+const DOUBLES_ACTION_CAP: usize = 24;
+
+/// Typical joint-action count per player in singles. Only used to predict a
+/// cell's cost before running it. Calibrated against the measured depth-1
+/// backward-induction cell counts in `benches/RESULTS.md`, which are ~51 — a
+/// roughly 7×7 matrix.
+const SINGLES_ACTION_ESTIMATE: f64 = 7.5;
+
+/// Skip any cell predicted to need more turn resolutions than this. At the
+/// ~270 µs per resolution recorded in `benches/RESULTS.md` this is a couple of
+/// minutes for a single solve; [`MAX_CELL_SECONDS`] then stops the cell from
+/// taking more than one such solve.
+const MAX_ESTIMATED_TURNS: f64 = 400_000.0;
+
+/// Turn-resolution budget per grid cell, spent on as many teamsheet pairings as
+/// fit. Cheap cells therefore average over many pairings and expensive ones over
+/// few, which is the only way a single grid can span three orders of magnitude
+/// of cost without either being noise or running for hours.
+const TURN_BUDGET_PER_CELL: f64 = 120_000.0;
+
+/// Hard wall-clock stop per cell, in case the cost model is wrong about a
+/// pairing. Whatever pairings completed are still reported.
+const MAX_CELL_SECONDS: f64 = 30.0;
+
+const SOLVER_ALGORITHMS: [(&str, SolverAlgorithm); 3] = [
+    ("backwardInduction", SolverAlgorithm::BackwardInduction),
+    ("serializedBounds", SolverAlgorithm::SerializedBounds),
+    ("doubleOracle", SolverAlgorithm::DoubleOracle),
+];
+const SOLVER_DEPTHS: [u8; 3] = [1, 2, 3];
+const SOLVER_ROLLS: [u8; 2] = [1, 4];
+const SOLVER_CHANCE: [(&str, ChanceMode); 3] = [
+    ("enumerate", ChanceMode::Enumerate),
+    ("top4", ChanceMode::TopK(4)),
+    ("top1", ChanceMode::TopK(1)),
+];
+
+/// One `(scenario, algorithm, depth, rolls, chance)` cell of the solver sweep.
+///
+/// `avg_turns_simulated` is the number that matters: a `simulate_turn` call
+/// costs hundreds of microseconds while a matrix LP costs a few, so wall-clock
+/// time is very nearly turn count times a constant. The ratio of
+/// `avg_cells_evaluated` to `avg_cells_total` is what the pruning actually
+/// bought.
+#[derive(Clone, Debug)]
+pub struct SolverRow {
+    pub scenario: &'static str, // "singles" | "doubles"
+    pub algorithm: &'static str,
+    pub depth: u8,
+    pub rolls: u8,
+    pub chance: &'static str,
+    /// Joint-action cap in force, if any. `None` means the full action set.
+    pub action_cap: Option<usize>,
+    pub avg_time_secs: f64,
+    pub avg_nodes: f64,
+    pub avg_turns_simulated: f64,
+    pub avg_cells_evaluated: f64,
+    pub avg_cells_total: f64,
+    pub avg_lps: f64,
+    /// Teamsheet pairings averaged over. Zero means the cell was skipped as too
+    /// expensive to attempt.
+    pub pairings: usize,
+    /// Why the cell was skipped, when `pairings == 0`.
+    pub skipped: Option<&'static str>,
+}
+
+/// Predicted turn resolutions for one solve, as backward induction would do it.
+///
+/// A node evaluates `actions²` cells; each cell expands `branches` successors;
+/// each successor is another node. So the tree is `(actions² · branches)^depth`
+/// resolutions, give or take — and at depth 1 that correctly collapses to
+/// `actions²`, since the successors are scored statically rather than expanded.
+///
+/// Deliberately conservative, and it does not model mid-turn decision points: a
+/// faint leaves a replacement phase that recurses *without* consuming a ply, so
+/// a position where Pokemon are dying costs more than this predicts. That is
+/// what [`MAX_CELL_SECONDS`] backstops.
+fn estimated_turns(scenario: &str, depth: u8, rolls: u8, chance: ChanceMode) -> f64 {
+    let actions = if scenario == "doubles" {
+        DOUBLES_ACTION_CAP as f64
+    } else {
+        SINGLES_ACTION_ESTIMATE
+    };
+    let branches = match chance {
+        // Successor counts recorded for singles enumeration in
+        // `benches/RESULTS.md`; every other mode caps the count itself.
+        ChanceMode::Enumerate => match rolls {
+            1 => 5.0,
+            2 => 14.0,
+            _ => 44.0,
+        },
+        ChanceMode::TopK(k) => (k as f64).max(1.0),
+        ChanceMode::Threshold(_) => 4.0,
+        ChanceMode::Sample(n) => (n as f64).max(1.0),
+    };
+    let per_node = actions * actions;
+    (per_node * branches).powi(depth as i32) / branches
+}
+
+/// How an algorithm's real cost compares to the backward-induction estimate.
+///
+/// Both figures are measured, from the sweep's own `turns` column. Double oracle
+/// only ever fills the cells its restricted game reaches. Serialized bounds is
+/// *slower* than backward induction here — it converts turn resolutions into
+/// skipped matrix cells, and in this engine a turn resolution is the expensive
+/// thing — hence a factor below one.
+///
+/// Used only to schedule the sweep; nothing in the reported results depends on
+/// these numbers.
+fn algorithm_speedup(algorithm: SolverAlgorithm) -> f64 {
+    match algorithm {
+        SolverAlgorithm::BackwardInduction => 1.0,
+        SolverAlgorithm::SerializedBounds => 0.5,
+        SolverAlgorithm::DoubleOracle => 3.0,
+    }
+}
+
+/// Whether a grid cell is worth attempting, and why not if it is not.
+fn solver_cell_ok(
+    scenario: &str,
+    algorithm: SolverAlgorithm,
+    depth: u8,
+    rolls: u8,
+    chance: ChanceMode,
+) -> Result<(), &'static str> {
+    // High roll counts multiply the successor count that `ChanceMode` then
+    // truncates away, so pairing them with a truncating mode measures
+    // `simulate_turn`'s cost rather than the solver's. Enumerate is the only
+    // mode where the roll count reaches the search at all.
+    if rolls > 1 && !matches!(chance, ChanceMode::Enumerate) {
+        return Err("rolls>1 only informative under enumerate");
+    }
+    // Doubles is bounded by its action space, not its depth: even capped, one
+    // ply already costs what several singles plies do.
+    if scenario == "doubles" && depth > 1 {
+        return Err("doubles beyond one ply");
+    }
+    let estimate = estimated_turns(scenario, depth, rolls, chance) / algorithm_speedup(algorithm);
+    if estimate > MAX_ESTIMATED_TURNS {
+        return Err("over the estimated-cost ceiling");
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct SolverCell {
+    total_secs: f64,
+    pairings: usize,
+    nodes: f64,
+    turns: f64,
+    cells_evaluated: f64,
+    cells_total: f64,
+    lps: f64,
+}
+
+/// Sweep the game-tree solver across algorithms, depths, damage rolls and
+/// chance-node policies, in singles and doubles.
+///
+/// Each cell averages over as many `../teamsheets` pairings as its cost budget
+/// allows — see [`TURN_BUDGET_PER_CELL`] — using the same
+/// teamsheet → team preview → highest-probability branch construction as
+/// [`run_turn_speed`], so the positions are real mid-turn-one states rather than
+/// synthetic ones. `on_progress(completed, total)` fires once per cell.
+///
+/// Set `VERBOSITY` to 0 before calling; the engine's tracing is keyed off that
+/// global and a sweep performs millions of turn resolutions.
+pub fn run_solver(
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    on_progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<SolverRow>, String> {
+    let paths = teamsheet_paths();
+    if paths.is_empty() {
+        return Err("no teamsheets found in ../teamsheets".to_string());
+    }
+
+    let grid: Vec<(&'static str, u8, u8)> = vec![("singles", 1, 3), ("doubles", 2, 4)];
+    let total_cells =
+        grid.len() * SOLVER_ALGORITHMS.len() * SOLVER_DEPTHS.len() * SOLVER_ROLLS.len()
+            * SOLVER_CHANCE.len();
+    let mut rows = Vec::with_capacity(total_cells);
+    let mut done = 0usize;
+
+    for (scenario, active, brought) in grid {
+        for (algorithm_label, algorithm) in SOLVER_ALGORITHMS {
+            for depth in SOLVER_DEPTHS {
+                for rolls in SOLVER_ROLLS {
+                    for (chance_label, chance) in SOLVER_CHANCE {
+                        done += 1;
+                        on_progress(done, total_cells);
+
+                        let action_cap = (scenario == "doubles").then_some(DOUBLES_ACTION_CAP);
+                        let mut row = SolverRow {
+                            scenario,
+                            algorithm: algorithm_label,
+                            depth,
+                            rolls,
+                            chance: chance_label,
+                            action_cap,
+                            avg_time_secs: 0.0,
+                            avg_nodes: 0.0,
+                            avg_turns_simulated: 0.0,
+                            avg_cells_evaluated: 0.0,
+                            avg_cells_total: 0.0,
+                            avg_lps: 0.0,
+                            pairings: 0,
+                            skipped: None,
+                        };
+
+                        if let Err(reason) =
+                            solver_cell_ok(scenario, algorithm, depth, rolls, chance)
+                        {
+                            row.skipped = Some(reason);
+                            rows.push(row);
+                            continue;
+                        }
+
+                        let config = SolveConfig {
+                            depth,
+                            damage_rolls: rolls,
+                            consider_crit: false,
+                            chance,
+                            algorithm,
+                            max_actions_per_player: action_cap,
+                            ..SolveConfig::default()
+                        };
+                        // Spend the cell's budget on as many pairings as fit —
+                        // never fewer than one, or the cell says nothing.
+                        let estimate = estimated_turns(scenario, depth, rolls, chance)
+                            / algorithm_speedup(algorithm);
+                        let target_pairings =
+                            ((TURN_BUDGET_PER_CELL / estimate.max(1.0)) as usize).clamp(1, 24);
+
+                        let cell = measure_solver_cell(
+                            &paths,
+                            active,
+                            brought,
+                            &config,
+                            target_pairings,
+                            pokemon_dex,
+                            move_dex,
+                        )?;
+
+                        if cell.pairings == 0 {
+                            row.skipped = Some("no pairing produced a battle position");
+                        } else {
+                            let n = cell.pairings as f64;
+                            row.pairings = cell.pairings;
+                            row.avg_time_secs = cell.total_secs / n;
+                            row.avg_nodes = cell.nodes / n;
+                            row.avg_turns_simulated = cell.turns / n;
+                            row.avg_cells_evaluated = cell.cells_evaluated / n;
+                            row.avg_cells_total = cell.cells_total / n;
+                            row.avg_lps = cell.lps / n;
+                        }
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Time one grid cell over up to `target_pairings` teamsheet pairings, stopping
+/// early if the cell exceeds its wall-clock allowance.
+#[allow(clippy::too_many_arguments)]
+fn measure_solver_cell(
+    paths: &[PathBuf],
+    active: u8,
+    brought: u8,
+    config: &SolveConfig,
+    target_pairings: usize,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> Result<SolverCell, String> {
+    let mut cell = SolverCell::default();
+
+    for index in 0..target_pairings {
+        if cell.total_secs > MAX_CELL_SECONDS {
+            break;
+        }
+        // Stride through the ordered pairing grid rather than taking a prefix,
+        // so a cell that affords few pairings still samples across teams instead
+        // of measuring one matchup repeatedly.
+        let i = (index * 5) % paths.len();
+        let j = (index * 7 + 3) % paths.len();
+        let seed = (i * paths.len() + j) as u64;
+
+        let Some(state) = battle_position(paths, i, j, active, brought, seed, pokemon_dex, move_dex)
+        else {
+            continue;
+        };
+
+        let start = Instant::now();
+        let result = match solve(&state, pokemon_dex, move_dex, config) {
+            Ok(result) => result,
+            // A pairing that lands on an already-decided or preview position has
+            // nothing to solve; skip it rather than failing the sweep.
+            Err(_) => continue,
+        };
+        let elapsed = start.elapsed().as_secs_f64();
+
+        cell.total_secs += elapsed;
+        cell.pairings += 1;
+        cell.nodes += result.stats.nodes_expanded as f64;
+        cell.turns += result.stats.turns_simulated as f64;
+        cell.cells_evaluated += result.stats.matrix_cells_evaluated as f64;
+        cell.cells_total += result.stats.matrix_cells_total as f64;
+        cell.lps += result.stats.lps_solved as f64;
+    }
+
+    Ok(cell)
+}
+
+/// Resolve one teamsheet pairing's team preview into a real mid-turn-one battle
+/// position — the same construction [`run_turn_speed`] uses.
+#[allow(clippy::too_many_arguments)]
+fn battle_position(
+    paths: &[PathBuf],
+    i: usize,
+    j: usize,
+    active: u8,
+    brought: u8,
+    seed: u64,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> Option<MatchState> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let preview = team_preview_state_from_teamsheets(
+        paths[i].to_str()?,
+        paths[j].to_str()?,
+        pokemon_dex,
+        move_dex,
+        active,
+        brought,
+        true,
+    );
+    let p1 = random_team_preview_command(preview.p1_mons.len(), active, brought, &mut rng);
+    let p2 = random_team_preview_command(preview.p2_mons.len(), active, brought, &mut rng);
+
+    // Break probability ties on the state hash, not on list position.
+    //
+    // `simulate_turn` returns its branches sorted by probability but builds them
+    // by draining a `HashMap`, so equally-likely branches arrive in an order that
+    // varies from run to run — and `max_by` returns the *last* maximum. Without
+    // the tiebreak, two runs of the same seed can pick different leads and
+    // therefore benchmark different positions, which shows up as work counts
+    // that refuse to reproduce.
+    let state = simulate_turn(
+        &MatchState::TeamPreviewState(preview),
+        &PlayerCommand::TeamPreview(p1),
+        &PlayerCommand::TeamPreview(p2),
+        move_dex,
+        pokemon_dex,
+        false,
+        1,
+        None,
+    )
+    .into_iter()
+    .map(|(state, _, probability)| {
+        let mut hasher = DefaultHasher::new();
+        state.hash(&mut hasher);
+        (hasher.finish(), state, probability)
+    })
+    .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))?
+    .1;
+
+    matches!(state, MatchState::BattleState(_)).then_some(state)
 }

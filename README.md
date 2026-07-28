@@ -16,9 +16,23 @@ crit branching (singles and doubles scenarios):
     cargo bench --bench turn_speed
 
 Takes a couple of minutes (the tractable doubles enumeration rows run for
-seconds each; intractable ones are skipped). Recorded results and analysis
-live in `poke_rust/benches/RESULTS.md` — append a new section there when
-re-measuring after engine changes.
+seconds each; intractable ones are skipped).
+
+Game-tree solver speed across the three simultaneous-move algorithms, search
+depths, damage-roll counts, and chance-node policies:
+
+    cd poke_rust
+    cargo bench --bench solver_speed
+
+Takes several minutes. Cells predicted to be too expensive print `skipped` with
+a reason rather than being attempted, and each cell that does run averages over
+as many teamsheet pairings as its cost budget allows — so the `pairs` column
+varies by row. The `turns` column is the one to read: turn resolution dominates
+the solver's cost by three orders of magnitude over the equilibrium solving.
+
+Recorded results and analysis for both benchmarks live in
+`poke_rust/benches/RESULTS.md` — append a new section there when re-measuring
+after engine changes.
 
 ### Project documentation
 
