@@ -947,6 +947,7 @@ fn augment_with_live_slots(
                         if live_slots.contains(&target)
                             && !target_has_failed(&event.reactions, target)
                             && !is_semi_invulnerable(belief, target)
+                            && !substitute_blocks_move_effect(belief, *user, target, md)
                         {
                             let effect_target =
                                 if target_reflects_status_move(belief, *user, target, md) {
@@ -998,6 +999,40 @@ fn augment_with_live_slots(
 
     synthesize_guaranteed_faints(&mut event.reactions);
     event
+}
+
+fn substitute_blocks_move_effect(
+    belief: &UnknownBattleState,
+    user: FieldSlot,
+    target: FieldSlot,
+    move_data: &MoveData,
+) -> bool {
+    if user == target {
+        return false;
+    }
+    let target_has_substitute = mon_at(belief, target).is_some_and(|mon| {
+        mon.volatiles.iter().any(|state| {
+            matches!(
+                state,
+                VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                    | VolatileStatusState::MoveStatus(VolatileStatus::Substitute(_), _)
+            )
+        })
+    });
+    if !target_has_substitute {
+        return false;
+    }
+    let bypasses_by_flag = move_data
+        .flags
+        .iter()
+        .any(|flag| matches!(flag, MoveFlag::Sound | MoveFlag::BypassSub));
+    let bypasses_by_ability = mon_at(belief, user).is_some_and(|mon| {
+        matches!(
+            &mon.possible_abilities,
+            Unknown::Known(Ability::Infiltrator)
+        )
+    });
+    !bypasses_by_flag && !bypasses_by_ability
 }
 
 fn target_reflects_status_move(
@@ -1881,6 +1916,29 @@ mod tests {
             &r.kind,
             EventKind::BoostChanged { target, boost_idx: 1, stages: -1 } if *target == o1()
         )));
+    }
+
+    #[test]
+    fn substitute_blocks_guaranteed_opponent_stat_drop() {
+        // Fuzz seeds 114049/114052/114247: damaging the substitute does
+        // not apply the move's guaranteed stat drop to the protected mon,
+        // whether or not that hit breaks the doll.
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Substitute(20), 0),
+        );
+        let augmented = parse_and_augment("p1 luminacrash o1", &belief);
+        assert!(
+            !augmented.reactions.iter().any(|reaction| matches!(
+                reaction.kind,
+                EventKind::BoostChanged {
+                    target,
+                    boost_idx: 3,
+                    stages: -2
+                } if target == o1()
+            )),
+            "Substitute must shield its owner from Lumina Crash's SpD drop"
+        );
     }
 
     #[test]

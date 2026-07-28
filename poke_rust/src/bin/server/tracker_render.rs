@@ -321,6 +321,8 @@ fn render_top_level_event(
         EventKind::MustRecharge { slot } => Ok(Some(format!("{} mustrecharge", slot_token(*slot)))),
         EventKind::AbilityRevealed { .. }
         | EventKind::ItemRevealed { .. }
+        | EventKind::ItemLost { .. }
+        | EventKind::ItemGained { .. }
         | EventKind::WeatherChanged { .. }
         | EventKind::TerrainChanged { .. }
         | EventKind::PseudoWeatherStart { .. }
