@@ -1358,9 +1358,7 @@ fn guaranteed_ability_reactions(
             .iter()
             .copied()
             .filter(|target| target.player != slot.player)
-            .flat_map(|target| {
-                synthesize_boost_changes(&[-1, 0, 0, 0, 0, 0, 0], slot, target, belief)
-            })
+            .flat_map(|target| intimidate_reactions(slot, target, belief))
             .collect(),
         Ability::Drizzle
             if !weather_is_strong(&belief.weather)
@@ -1414,6 +1412,76 @@ fn guaranteed_ability_reactions(
         Ability::Download => download_reaction(slot, belief),
         Ability::Trace => trace_reaction(slot, belief, live_slots),
         _ => Vec::new(),
+    }
+}
+
+/// Synthesize only consequences that are certain for an Intimidate target.
+///
+/// In particular, the target's current ability may have changed earlier in the
+/// battle (Skill Swap, Trace, etc.). The ordinary stat-drop helper cannot infer
+/// that Intimidate-specific immunities block the effect entirely, so handle
+/// those and Guard Dog's replacement effect before asking it to build events.
+fn intimidate_reactions(
+    source: FieldSlot,
+    target: FieldSlot,
+    belief: &UnknownBattleState,
+) -> Vec<InformationEvent> {
+    let Some(mon) = mon_at(belief, target) else {
+        return Vec::new();
+    };
+
+    // Intimidate does not pass through a Substitute.
+    if mon.volatiles.iter().any(|state| {
+        matches!(
+            state,
+            VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::Substitute(_), _)
+        )
+    }) {
+        return Vec::new();
+    }
+
+    let blocks_attack_drop = |ability: &Ability| {
+        matches!(
+            ability,
+            Ability::InnerFocus
+                | Ability::OwnTempo
+                | Ability::Oblivious
+                | Ability::Scrappy
+                | Ability::ClearBody
+                | Ability::WhiteSmoke
+                | Ability::FullMetalBody
+                | Ability::HyperCutter
+                | Ability::MirrorArmor
+        )
+    };
+
+    match &mon.possible_abilities {
+        Unknown::Known(Ability::GuardDog) => {
+            synthesize_boost_changes(&[1, 0, 0, 0, 0, 0, 0], target, target, belief)
+        }
+        Unknown::Known(ability) if blocks_attack_drop(ability) => Vec::new(),
+        Unknown::Known(_) => {
+            synthesize_boost_changes(&[-1, 0, 0, 0, 0, 0, 0], source, target, belief)
+        }
+        Unknown::Possibly(abilities) => {
+            // A direct drop is not guaranteed if any still-live ability can
+            // block, reflect, or replace it.
+            if abilities
+                .iter()
+                .any(|ability| blocks_attack_drop(ability) || *ability == Ability::GuardDog)
+            {
+                Vec::new()
+            } else {
+                synthesize_boost_changes(&[-1, 0, 0, 0, 0, 0, 0], source, target, belief)
+            }
+        }
+        Unknown::Not(excluded) => {
+            // An open-world `Not` set cannot prove that none of the blockers
+            // is the current ability.
+            let _ = excluded;
+            Vec::new()
+        }
     }
 }
 
@@ -1730,6 +1798,49 @@ mod tests {
                 stages: 2
             } if target == o1()
         )));
+    }
+
+    #[test]
+    fn intimidate_respects_an_inner_focus_gained_mid_battle() {
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::InnerFocus);
+
+        assert!(
+            intimidate_reactions(p1(), o1(), &belief).is_empty(),
+            "Inner Focus must make Intimidate a guaranteed no-op"
+        );
+    }
+
+    #[test]
+    fn intimidate_uses_guard_dogs_replacement_boost() {
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].possible_abilities = Unknown::Known(Ability::GuardDog);
+
+        let reactions = intimidate_reactions(p1(), o1(), &belief);
+        assert!(reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::BoostChanged {
+                target,
+                boost_idx: 0,
+                stages: 1
+            } if target == o1()
+        )));
+        assert!(!reactions.iter().any(|reaction| matches!(
+            reaction.kind,
+            EventKind::BoostChanged { stages, .. } if stages < 0
+        )));
+    }
+
+    #[test]
+    fn intimidate_does_not_invent_an_effect_when_ability_is_uncertain() {
+        let mut belief = test_belief();
+        belief.p2_active_mons[0].possible_abilities =
+            Unknown::Possibly(vec![Ability::InnerFocus, Ability::Pressure]);
+
+        assert!(
+            intimidate_reactions(p1(), o1(), &belief).is_empty(),
+            "a drop is not guaranteed while an immunity ability remains possible"
+        );
     }
 
     #[test]

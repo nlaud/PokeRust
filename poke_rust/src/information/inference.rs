@@ -153,11 +153,11 @@ mod bcp;
 //
 // A mon that could secretly be a disguised Illusion user (Zoroark line) carries
 // a full second `UnknownPokemonState` in `possible_illusion_state` — see that
-// field's doc comment in `unknowns.rs` for the design. Every per-mon narrowing
-// operation that can panic via `inference_contradiction!` (reveal handling,
-// stat-bound tightening, etc.) is applied through `apply_with_illusion_mirroring`
-// instead of being called directly on the primary mon, so the SAME evidence is
-// replayed against the hypothesis:
+// field's doc comment in `unknowns.rs` for the design. Fallible per-mon narrowing
+// operations (item reveals, stat-bound tightening, etc.) are applied through
+// `apply_with_illusion_mirroring`; move learnset checks use the equivalent
+// non-panicking `reveal_move_with_illusion_mirroring`. In both cases the SAME
+// evidence is replayed against the hypothesis:
 //   - hypothesis rejects the operation           → not Zoroark; drop it.
 //   - primary rejects, hypothesis accepts         → IS Zoroark; promote.
 //   - both accept                                 → keep both, unchanged.
@@ -2513,15 +2513,12 @@ fn pass1_apply_event(
                 // `Promoted` outcome — see `finish_illusion_promotion_restore`.
                 discarded_before = mon.possible_species.clone();
                 let learnset_dex = &ctx.config.learnset_dex;
-                let outcome = apply_with_illusion_mirroring(mon, |m| {
-                    reveal_move_on_mon(m, move_used);
-                    check_move_legal_for_species(
-                        m,
-                        move_used,
-                        learnset_dex,
-                        side_has_unresolved_zoroark_without_hypothesis,
-                    );
-                });
+                let outcome = reveal_move_with_illusion_mirroring(
+                    mon,
+                    move_used,
+                    learnset_dex,
+                    side_has_unresolved_zoroark_without_hypothesis,
+                );
                 promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                 if promoted_illusion {
                     promoted_idx = Some(idx);
@@ -3476,15 +3473,12 @@ fn pass1_apply_event(
                 // `Promoted` outcome — see `finish_illusion_promotion_restore`.
                 discarded_before = mon.possible_species.clone();
                 let learnset_dex = &ctx.config.learnset_dex;
-                let outcome = apply_with_illusion_mirroring(mon, |m| {
-                    reveal_move_on_mon(m, move_used);
-                    check_move_legal_for_species(
-                        m,
-                        move_used,
-                        learnset_dex,
-                        side_has_unresolved_zoroark_without_hypothesis,
-                    );
-                });
+                let outcome = reveal_move_with_illusion_mirroring(
+                    mon,
+                    move_used,
+                    learnset_dex,
+                    side_has_unresolved_zoroark_without_hypothesis,
+                );
                 promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                 if promoted_illusion {
                     promoted_idx = Some(idx);
@@ -5334,11 +5328,9 @@ fn reveal_move_on_mon(mon: &mut UnknownPokemonState, pokemon_move: &PokemonMove)
 /// narrowing disabled).
 ///
 /// This is the fallible half of move-reveal handling for the Zoroark parallel-
-/// hypothesis model: called alongside `reveal_move_on_mon` (which just records
-/// the move and never itself panics) through `apply_with_illusion_mirroring`, so
-/// a move outside a hypothesis' learnset drops that hypothesis, and a move
-/// outside the PRIMARY's own learnset (while the hypothesis' learnset accepts
-/// it) promotes the mon to that hypothesis instead.
+/// hypothesis model. `reveal_move_with_illusion_mirroring` preflights it on both
+/// identities, so an expected branch rejection does not need to panic; this
+/// function remains the diagnostic path for a genuine contradiction.
 /// `side_has_unresolved_zoroark` — whether this mon's SIDE still has an Illusion-capable
 /// roster member whose location hasn't been positively pinned down anywhere (the side-
 /// wide `p1_unresolved_zoroark_count`/`p2_unresolved_zoroark_count` counter, captured by
@@ -5383,6 +5375,69 @@ fn check_move_legal_for_species(
             "species cannot learn revealed move {:?}",
             move_used
         );
+    }
+}
+
+/// Move-reveal specialization of [`apply_with_illusion_mirroring`].
+///
+/// Learnset membership is a normal branch discriminator for an unresolved
+/// Illusion hypothesis, not an exceptional condition. Preflight that one
+/// predicate so rejecting the primary or hypothesis does not need a caught
+/// panic (and therefore cannot leak an expected contradiction through the
+/// process-wide panic hook). Genuine both-branch contradictions still go
+/// through `check_move_legal_for_species` and retain its diagnostic.
+fn reveal_move_with_illusion_mirroring(
+    mon: &mut UnknownPokemonState,
+    move_used: &PokemonMove,
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+    side_has_unresolved_zoroark: bool,
+) -> IllusionMirrorOutcome {
+    let can_learn = |candidate: &UnknownPokemonState| {
+        if learnset_dex.is_empty() {
+            return true;
+        }
+        let Unknown::Known(species) = &candidate.possible_species else {
+            return true;
+        };
+        learnset_dex
+            .get(species)
+            .is_none_or(|moves| moves.contains(move_used))
+    };
+
+    let Some(mut hypothesis) = mon.possible_illusion_state.take() else {
+        reveal_move_on_mon(mon, move_used);
+        check_move_legal_for_species(
+            mon,
+            move_used,
+            learnset_dex,
+            side_has_unresolved_zoroark,
+        );
+        return IllusionMirrorOutcome::Unchanged;
+    };
+
+    match (can_learn(mon), can_learn(&hypothesis)) {
+        (true, true) => {
+            reveal_move_on_mon(mon, move_used);
+            reveal_move_on_mon(&mut hypothesis, move_used);
+            mon.possible_illusion_state = Some(hypothesis);
+            IllusionMirrorOutcome::Unchanged
+        }
+        (true, false) => {
+            reveal_move_on_mon(mon, move_used);
+            IllusionMirrorOutcome::HypothesisRejected
+        }
+        (false, true) => {
+            reveal_move_on_mon(&mut hypothesis, move_used);
+            promote_illusion_to_primary(mon, *hypothesis);
+            IllusionMirrorOutcome::Promoted
+        }
+        (false, false) => {
+            // Preserve the primary's state and the ordinary contradiction
+            // message for evidence that neither identity can explain.
+            reveal_move_on_mon(mon, move_used);
+            check_move_legal_for_species(mon, move_used, learnset_dex, false);
+            unreachable!("both illegal learnsets must contradict");
+        }
     }
 }
 
