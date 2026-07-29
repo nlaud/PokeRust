@@ -14,14 +14,7 @@ Tracker improvements:
   silent on one entry and directly revealed on a later entry even after the
   obvious matching-weather and primordial-weather no-op cases were handled.
 ### New features
-Determinizer follow-ups — **done**. Nature/spread coherence ships on at `0.15`,
-applied per-nature-row so `P(nature)` stays pinned to the usage rate;
-`pre_transform` / `illusion_disguise` / `rest_sleep` all round-trip; the bench
-prior is bidirectional and multiplicative. Three bugs surfaced along the way and
-are fixed: the 510 EV cap (S68), the invented-bench item-clause leak, and the
-subset oracle deriving pre-nature stats for Transformed mons.
-
-Left over from that work, none of it blocking:
+Determinizer follow-ups (none blocking):
 
 - `nature_spread_coherence` is one knob damping two rules of very different
   evidential strength. Measured across 235 species, "nature raises a stat with 0
