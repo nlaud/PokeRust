@@ -178,8 +178,49 @@ current official tournament handbook):
     opponent-exploitation can trade a displayed exploitability budget for value
     against a learned opponent model. Never silently mix this objective into the
     equilibrium result.
-  - [ ] Then move on to actual bot creation and battle/mentor-page integration
-    (possibly optional panels on the simulator and tracker pages).
+  - [ ] Integrate the solver into the simulator as an optional P2 bot, with a
+    configurable bot profile attached to battle creation. Expose at least
+    perfect-information vs. P2-belief play, robust Nash vs. explicitly-labelled
+    exploitative play, exact/approximate algorithm, time/node budget, maximum
+    depth, worker count, chance sampling, seed/reproducibility and action-cap
+    policy; surface every approximation and fallback in the UI rather than
+    silently weakening the game.
+    - Start P2's cancellable analysis job immediately after a turn resolves and
+      legal commands for the new state are known, while P1 is reading the board
+      and considering moves. Search from an immutable state/belief snapshot and
+      reuse all completed depths/checkpoints until P1 submits or the state
+      generation changes. This turns human think time into bot compute time
+      without extending the turn wait.
+    - Preserve simultaneous-move semantics: P2's strategy may depend on P2's
+      regulation-appropriate information state, but never on P1's hovered,
+      selected or submitted command. The server must not send P2's live strategy
+      to the P1 client before resolution. When P1 commits, sample P2's joint
+      command once from the latest complete mixed strategy using the configured
+      stable seed, then resolve both commands together.
+    - Define early-submit and failure behavior. If P1 acts before any checkpoint,
+      either wait up to a configured bot response deadline or use a clearly
+      labelled shallow/policy fallback; never use a half-solved payoff matrix as
+      an equilibrium. If the solver fails, exhausts its budget or is cancelled,
+      retain the last valid completed checkpoint. Perfect-information bot mode
+      may use ground truth only when explicitly selected; ordinary simulator bot
+      mode must use P2's own belief and observation history.
+    - Give every battle turn a solver generation ID. Cancel superseded jobs on
+      turn resolution, battle deletion, disconnect or configuration change, and
+      ignore stale completions. Share the bounded solver CPU pool with the live
+      analysis API under explicit per-session quotas so an idle-thinking bot
+      cannot starve turn resolution or benchmarks.
+    - Add simulator controls for Human vs. Bot P2 and named bot presets
+      (fast/balanced/strong/custom), a private progress indicator showing that P2
+      is thinking without leaking its policy, deterministic replay metadata, and
+      post-turn diagnostics that reveal the sampled action and the strategy it
+      came from only after both moves are locked. Test that P1 selection changes
+      do not restart or influence P2 search, the same seed reproduces the sampled
+      bot command, fog mode never reads hidden P1 state, stale generations cannot
+      submit, and bot turns remain legal through normal, replacement and pivot
+      phases.
+  - [ ] Then add mentor-page integration, possibly as an optional simulator or
+    tracker panel, using the same streamed checkpoints but showing the requesting
+    player's recommendation rather than autonomously submitting it.
 
 VGC solver parallelization plan:
 
