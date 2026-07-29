@@ -13474,6 +13474,133 @@ fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
     );
 }
 
+/// Weather-setter absence narrowing is live again: once suppression, a direct
+/// reveal, entry fainting, matching/strong weather, and multi-entrant ambiguity
+/// are all ruled out, a silent entry excludes every setter that would have
+/// visibly changed the weather.
+#[test]
+fn test_weather_setter_excluded_after_unsuppressed_silent_entry() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    assert!(
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::SnowWarning
+        ),
+        "Snow Warning would have changed clear weather and must be excluded after a \
+         genuinely silent, unsuppressed entry; possible_abilities = {:?}",
+        result.p2_active_mons[0].possible_abilities
+    );
+}
+
+/// Entry hazards resolve before send-out abilities. Simulator observations nest
+/// the resulting Faint under Switch; tracker input may flatten it into the next
+/// top-level line. Neither representation may exclude a true weather setter that
+/// never reached its activation window.
+#[test]
+fn test_weather_setter_not_excluded_when_entry_faints_before_ability() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut base = battle_with_p2(vec![]);
+    base.p2_known_back_mons = vec![p2_back];
+
+    let switch = SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(1),
+        status: None,
+        tera_type: None,
+    };
+    let cases = [
+        (
+            "simulator-nested",
+            vec![event_with(
+                EventKind::Switch(switch.clone()),
+                vec![event(EventKind::Faint { slot: p2(0) })],
+            )],
+        ),
+        (
+            "tracker-flat",
+            vec![
+                event(EventKind::Switch(switch)),
+                event(EventKind::Faint { slot: p2(0) }),
+            ],
+        ),
+    ];
+
+    for (shape, events) in cases {
+        let result = apply(base.clone(), events);
+        assert!(
+            !unknown_is_excluded(
+                &result.p2_active_mons[0].possible_abilities,
+                &Ability::SnowWarning
+            ),
+            "{shape}: Snow Warning must remain possible when hazards faint the entrant \
+             before its ability activates; possible_abilities = {:?}",
+            result.p2_active_mons[0].possible_abilities
+        );
+    }
+}
+
+/// Matching normal weather is a genuine silent no-op even when tracker input
+/// omits the otherwise-visible AbilityRevealed line. This exercises the
+/// per-ability weather target guard rather than the stronger direct-reveal guard.
+#[test]
+fn test_weather_setter_not_excluded_under_matching_weather_without_reveal() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.weather = Some(Weather::Snow);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    let abilities = &result.p2_active_mons[0].possible_abilities;
+    assert!(
+        !unknown_is_excluded(abilities, &Ability::SnowWarning),
+        "Snow Warning must remain possible under already-active Snow"
+    );
+    assert!(
+        unknown_is_excluded(abilities, &Ability::Drought),
+        "Drought would have replaced Snow with Sun and should still be excluded"
+    );
+}
+
 // ── T1: End-to-end simulator → inference round-trip harness ──────────────────
 //
 // These tests wire the full pipeline: a real `BattleState` → `simulate_turn` with

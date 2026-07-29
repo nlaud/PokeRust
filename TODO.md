@@ -3,16 +3,6 @@
 ### Fixes
 - Rewrite documentation + comments in STE
 
-- Remove "The three sweeps run one after another so their timings stay directly comparable to the recorded numbers in poke_rust/benches/RESULTS.md; each chart fills in the moment its own sweep finishes rather than waiting for the whole run. Hover a dotted underline for what a setting or column means" from benchmarking
-Tracker improvements:
-
-- Fox hovering tooltips, they jsut show a ?mark 
-
-- [ ] Model every temporally valid silent-entry path for weather-setting
-  abilities, then re-enable weather-setter absence narrowing. It is currently
-  disabled conservatively: real-team tracker fuzz found `SnowWarning` could be
-  silent on one entry and directly revealed on a later entry even after the
-  obvious matching-weather and primordial-weather no-op cases were handled.
 ### New features
 Determinizer follow-ups (none blocking):
 

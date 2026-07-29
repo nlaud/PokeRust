@@ -1771,6 +1771,7 @@ fn apply_information_battle(
         move_users_this_turn: Vec::new(),
         form_changed_slots_this_turn: Vec::new(),
         revealed_ability_slots_this_turn: collect_ability_reveal_slots(events),
+        fainted_slots_this_turn: collect_faint_slots(events),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
         structural_only: false,
@@ -1874,6 +1875,7 @@ pub fn apply_structural_preview(
         move_users_this_turn: Vec::new(),
         form_changed_slots_this_turn: Vec::new(),
         revealed_ability_slots_this_turn: collect_ability_reveal_slots(events),
+        fainted_slots_this_turn: collect_faint_slots(events),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
         structural_only: true,
@@ -2105,6 +2107,27 @@ fn collect_ability_reveal_slots(events: &[InformationEvent]) -> HashSet<FieldSlo
     slots
 }
 
+/// Every slot with a Faint anywhere in the submitted turn. Entry-hazard faints
+/// are nested under Switch in simulator output but are commonly a following
+/// top-level line in tracker input. Ability-absence inference needs the whole
+/// turn known up front because hazards resolve before the entrant's ability.
+fn collect_faint_slots(events: &[InformationEvent]) -> HashSet<FieldSlot> {
+    fn visit(event: &InformationEvent, slots: &mut HashSet<FieldSlot>) {
+        if let EventKind::Faint { slot } = &event.kind {
+            slots.insert(*slot);
+        }
+        for reaction in &event.reactions {
+            visit(reaction, slots);
+        }
+    }
+
+    let mut slots = HashSet::new();
+    for event in events {
+        visit(event, &mut slots);
+    }
+    slots
+}
+
 struct BattleContext<'a> {
     dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
@@ -2157,6 +2180,13 @@ struct BattleContext<'a> {
     /// see both representations before it concludes that an entry ability did
     /// not fire.
     revealed_ability_slots_this_turn: HashSet<FieldSlot>,
+    /// Every slot that faints in this submitted turn. This deliberately
+    /// over-approximates the narrower "fainted to entry hazards" condition:
+    /// simulator events nest that faint under Switch, while tracker events may
+    /// flatten it after the Switch. Retaining an ability when the entrant
+    /// actually fainted later is conservative; excluding a weather setter from
+    /// an entrant that never reached its activation window is unsound.
+    fainted_slots_this_turn: HashSet<FieldSlot>,
     /// S28: per-turn-segment last move-committed actor — the slot for which Analytic's
     /// "moved last" fires. Computed once from the event stream (`compute_analytic_last_movers`),
     /// indexed by `turn_segment`. Replaces the old "did the target already move this turn?"
@@ -6208,14 +6238,6 @@ const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::OrichalcumPulse, // Sets Sun (apply_entry_ability_field_effects, helpers.rs)
 ];
 
-/// Weather setters can be silent on entry through temporal interactions that the
-/// belief does not yet model completely. Keep the old narrowing implementation
-/// available for a future completeness audit, but do not use negative weather
-/// evidence until those paths can be proven exhaustive.
-fn weather_setter_absence_inference_enabled() -> bool {
-    false
-}
-
 /// The weather a given weather-setting ability would install, or `None` if `ab` isn't one
 /// of `WEATHER_SETTING_ABILITIES`. Mirrors `apply_entry_ability_field_effects` in
 /// `simulator/helpers.rs`. Used to guard the absence-inference pass below: since a weather
@@ -6375,8 +6397,26 @@ fn pass1_ability_absence_inference(
             continue;
         }
 
+        // Entry hazards resolve before send-out abilities. If this slot faints
+        // anywhere in the submitted turn, the event stream may be either the
+        // simulator's nested Switch -> Faint shape or the tracker's flattened
+        // Switch, Faint shape. We cannot safely distinguish a hazard faint from
+        // a later same-turn faint in the flattened representation, so retain all
+        // entry-ability candidates. The false-positive case only loses a
+        // narrowing opportunity; the false-negative case would exclude a true
+        // weather setter that never had an activation window.
+        if ctx.fainted_slots_this_turn.contains(slot) {
+            continue;
+        }
+
         // Skip if ability might be suppressed (sound: conservative).
-        // Absence inferences below are gated here; presence-recording above is not.
+        // This covers both a previously-active Neutralizing Gas and the
+        // temporally important simultaneous-entry path: every entrant has been
+        // placed before this pass runs, so an entering Gas user is already among
+        // the active candidates. Neutralizing Gas has switch-in priority 2 and
+        // suppresses ordinary weather setters before their priority-0 activation.
+        // Gastro Acid is covered for completeness, although ordinary switching
+        // clears it. Presence-recording above is intentionally not gated.
         if unknown_ability_might_be_suppressed(state, slot) {
             continue;
         }
@@ -6399,14 +6439,10 @@ fn pass1_ability_absence_inference(
             state.weather,
             Some(Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds)
         );
-        // Do not infer weather-setter absence from a silent entry. Although matching
-        // and primordial weather cover the obvious no-op cases, real tracker sweeps
-        // have found additional temporally valid paths where a setter is silent on
-        // one entry and directly revealed on a later entry (Snow Warning in the
-        // 114000–114500 corpus). A positive WeatherChanged/AbilityRevealed remains
-        // useful evidence; the negative observation is not strong enough to narrow
-        // the ability soundly.
-        if weather_setter_absence_inference_enabled() && !weather_changed {
+        // At this point every silent path has been guarded: direct reveals,
+        // pre-activation hazard faints, suppression, strong weather, matching
+        // weather, and multi-entrant attribution ambiguity.
+        if !weather_changed {
             // If ONLY this slot's mons could have a weather setter (no other entering
             // mon has one), absence of WeatherChanged proves this mon doesn't have it.
             // For single-entry (Switch) this is always unambiguous.

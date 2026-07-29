@@ -264,13 +264,7 @@ export default function BenchmarkingPage() {
 
   return (
     <div className="mx-auto max-w-6xl p-6">
-      <h1 className="mb-1 text-xl font-semibold">Benchmark</h1>
-      <p className="mb-5 max-w-3xl text-xs text-ink-muted">
-        The three sweeps run one after another so their timings stay directly comparable to the
-        recorded numbers in <code>poke_rust/benches/RESULTS.md</code>; each chart fills in the
-        moment its own sweep finishes rather than waiting for the whole run. Hover a dotted
-        underline for what a setting or column means.
-      </p>
+      <h1 className="mb-5 text-xl font-semibold">Benchmark</h1>
 
       <button
         onClick={run}

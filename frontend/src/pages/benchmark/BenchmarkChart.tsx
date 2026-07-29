@@ -1,4 +1,5 @@
 import { Fragment } from 'react'
+import Tooltip from '../../components/common/Tooltip'
 
 /** A numeric column to the right of the bars. `title` is the explanation of what
  * the column measures — it lives on the header rather than on every cell, so a
@@ -69,21 +70,21 @@ export default function BenchmarkChart({
   return (
     <div className="overflow-x-auto">
       <div className="grid min-w-fit items-center gap-x-3 gap-y-1.5" style={{ gridTemplateColumns: template }}>
-        {/* Header row. `cursor-help` + underline is the only affordance a
-            title-attribute tooltip gets, so columns that have an explanation
-            have to look different from ones that don't. */}
+        {/* Dotted underlines mark labels with an explanation. Tooltip renders
+            its own hover/focus popover instead of relying on the browser's
+            delayed title attribute. */}
         <span />
         <span />
         {columns.map((column) => (
-          <span
+          <Tooltip
             key={column.key}
+            content={column.title}
             className={`text-right text-[10px] font-medium uppercase tracking-wide text-ink-muted ${
-              column.title ? 'cursor-help underline decoration-dotted underline-offset-2' : ''
+              column.title ? 'underline decoration-dotted underline-offset-2' : ''
             }`}
-            title={column.title}
           >
             {column.header}
-          </span>
+          </Tooltip>
         ))}
 
         {rows.map((row) => {
@@ -92,14 +93,14 @@ export default function BenchmarkChart({
           const pct = row.value > 0 ? Math.max((row.value / max) * 100, 1) : 0
           return (
             <Fragment key={row.key}>
-              <span
-                className={`truncate text-xs text-ink-muted ${
-                  row.labelTitle ? 'cursor-help underline decoration-dotted underline-offset-2' : ''
+              <Tooltip
+                content={row.labelTitle}
+                className={`min-w-0 text-xs text-ink-muted ${
+                  row.labelTitle ? 'underline decoration-dotted underline-offset-2' : ''
                 }`}
-                title={row.labelTitle ?? row.label}
               >
-                {row.label}
-              </span>
+                <span className="block truncate">{row.label}</span>
+              </Tooltip>
               <svg
                 viewBox="0 0 100 10"
                 preserveAspectRatio="none"
@@ -128,17 +129,17 @@ export default function BenchmarkChart({
               {columns.map((column, i) => {
                 const cell = row.cells[i]
                 return (
-                  <span
+                  <Tooltip
                     key={column.key}
+                    content={cell?.title}
                     className={`whitespace-nowrap text-right text-xs tabular-nums ${
                       i === 0 ? 'font-medium text-ink' : 'text-[11px]'
                     } ${cell?.warn ? 'text-warning' : i === 0 ? '' : 'text-ink-muted'} ${
-                      cell?.title ? 'cursor-help' : ''
+                      cell?.title ? 'underline decoration-dotted underline-offset-2' : ''
                     }`}
-                    title={cell?.title}
                   >
                     {cell?.text ?? '—'}
-                  </span>
+                  </Tooltip>
                 )
               })}
             </Fragment>
