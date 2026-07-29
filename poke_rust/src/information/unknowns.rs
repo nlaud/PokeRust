@@ -136,6 +136,19 @@ pub struct UnknownPokemonState {
     pub boosts: PokemonBoostTable,
     pub status: Option<Status>,
 
+    /// True while the current `Status::Sleep` was induced by Rest, mirroring
+    /// `PokemonState::rest_sleep`. Rest's sleep is a deterministic 2 blocked
+    /// turns (1 with Early Bird) rather than the weighted random duration, so
+    /// without this a Rest-slept opponent is played back with the wrong wake
+    /// distribution (`simulator::mod`'s `status_fail_prob` is 1.0 at n==1 for a
+    /// Rest sleep and 2/3 for a natural one).
+    ///
+    /// Sound to track from the observer's seat: Rest is a move, so its use is
+    /// always visible. `false` is the safe default — it never claims a sleep is
+    /// deterministic when it might not be, only the reverse, and the reverse is
+    /// what the belief starts from.
+    pub rest_sleep: bool,
+
     pub volatiles: Vec<VolatileStatusState>, //If this might be unknown, replace it with Unknown<Vec<VolatileStatusState>>
 
     pub possible_original_abilities: Unknown<Ability>,
@@ -749,6 +762,10 @@ pub(crate) fn seed_illusion_hypothesis_for(
     sub.hp = host.hp.clone();
     sub.boosts = host.boosts;
     sub.status = host.status.clone();
+    // Tracks `status`: the hypothesis differs from the host in *identity*, not in
+    // what happened on the field, and "the sleep now on this slot came from Rest"
+    // is a field fact.
+    sub.rest_sleep = host.rest_sleep;
     sub.volatiles = host.volatiles.clone();
     sub.is_tera = host.is_tera;
     sub.is_mega = host.is_mega;
@@ -853,6 +870,7 @@ impl UnknownPokemonState {
             max_pre_nature_stat: [u16::MAX; 6],
             boosts: mon.boosts,
             status: mon.status.clone(),
+            rest_sleep: mon.rest_sleep,
             volatiles: mon.volatiles.clone(),
             possible_original_abilities: Unknown::Known(
                 mon.original_ability
@@ -994,6 +1012,7 @@ impl UnknownPokemonState {
             max_pre_nature_stat: max_pre_nature,
             boosts: [0; 7],
             status: None,
+            rest_sleep: false,
             volatiles: Vec::new(),
             possible_original_abilities: if data.is_some_and(|d| !d.abilities.is_empty()) {
                 Unknown::Possibly(data.unwrap().abilities.clone())

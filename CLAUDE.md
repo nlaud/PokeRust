@@ -285,6 +285,12 @@ Things worth knowing before touching it:
   is set; `PokemonState.evs` and the belief's `min_evs`/`max_evs` are both already
   scaled. Four encodings of one quantity — variables are named `raw_points` vs
   scaled `evs` throughout, and passing the wrong one applies the formula twice.
+  The budget is 66 *points*, and it does not translate to a fixed EV total: the
+  −4 is charged once per nonzero stat, so a fully-spent spread is `528 − 4k` EVs
+  over k invested stats, up to **516**. Hence `ev_total_cap` defaults to 516, not
+  the familiar 510 (S68) — 510 both rejected every fully-spent spread in the
+  cache and let Pass 5 tighten `max_evs` below a true 252. Check budgets in
+  points wherever the authoring unit is available.
 - **Move percentages are marginals, not a distribution.** They sum to ~350, not
   400; the shortfall is real mass on moves outside the top-10 list. `cps.rs` models
   it with explicit residual slots rather than normalizing it away — normalizing

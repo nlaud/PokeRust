@@ -1,7 +1,12 @@
 # TODO: Always remove items from here when they are completed :)
 
 ### Fixes
+- Rewrite documentation + comments in STE
+
+- Remove "The three sweeps run one after another so their timings stay directly comparable to the recorded numbers in poke_rust/benches/RESULTS.md; each chart fills in the moment its own sweep finishes rather than waiting for the whole run. Hover a dotted underline for what a setting or column means" from benchmarking
 Tracker improvements:
+
+- Fox hovering tooltips, they jsut show a ?mark 
 
 - [ ] Model every temporally valid silent-entry path for weather-setting
   abilities, then re-enable weather-setter absence narrowing. It is currently
@@ -9,21 +14,37 @@ Tracker improvements:
   silent on one entry and directly revealed on a later entry even after the
   obvious matching-weather and primordial-weather no-op cases were handled.
 ### New features
-Determinizer follow-ups — the core landed: `poke_rust/src/meta/` parses the usage
-cache and `information/determinize.rs` samples a complete, playable `BattleState`
-from a belief. What is left is all fidelity, not correctness; every item below
-produces worlds that are legal but less plausible than they could be.
+Determinizer follow-ups — **done**. Nature/spread coherence ships on at `0.15`,
+applied per-nature-row so `P(nature)` stays pinned to the usage rate;
+`pre_transform` / `illusion_disguise` / `rest_sleep` all round-trip; the bench
+prior is bidirectional and multiplicative. Three bugs surfaced along the way and
+are fixed: the 510 EV cap (S68), the invented-bench item-clause leak, and the
+subset oracle deriving pre-nature stats for Transformed mons.
 
-- `nature_spread_coherence` ships at `1.0` (off), so nature and spread are drawn
-  independently and incoherent builds (Bold with 32 Atk points) do occur. The data
-  carries the signal to fix it — `stat_up`/`stat_down` on every nature row — so try
-  `0.15` and confirm `sampled_builds_follow_the_usage_data` still passes.
-- `pre_transform` / `illusion_disguise` / `rest_sleep` are dropped when building a
-  concrete Pokémon, and the belief's `possible_illusion_state` is never consumed —
-  so a determinized world can't represent an active Transform or Illusion.
-- Bench invention is the biggest source of implausible-but-legal worlds and is
-  invisible to the subset oracle (an invented Pokémon contradicts nothing). It is
-  warned on every occurrence; a better prior than teammate-rank would help.
+Left over from that work, none of it blocking:
+
+- `nature_spread_coherence` is one knob damping two rules of very different
+  evidential strength. Measured across 235 species, "nature raises a stat with 0
+  points" is 12.9pp of the 19.4% incoherent baseline while "nature lowers an
+  invested stat" is only 3.9pp — but the first is much weaker evidence, since a
+  nature boost scales the whole base stat (Careful with 0 SpD EVs still gains
+  ~15 SpD off base 90, a build people run). Consider splitting into two
+  multipliers, ~0.10 lowered / ~0.35 raised.
+- `sample_uniform_spread` still bypasses coherence entirely. It only runs once
+  the belief has excluded every authored spread, and its doc calls that the
+  honest maximum-entropy answer — but it is also exactly where incoherent builds
+  are most likely.
+- `meta/team_gen.rs`'s `sample_nature`/`sample_spread` still draw independently,
+  so generated teams carry the ~19.4% incoherent rate the determinizer no longer
+  does. Fixing it is conditional renormalization for free (the nature is already
+  fixed, so there is no marginal to preserve).
+- `collect_natures` (`meta/dex.rs`) pushes duplicate `stat_alignment` rows that
+  resolve to the same `Nature` — avalugg lists Adamant at both rank 1 (36.2%)
+  and rank 4 (12.2%). The true marginal is the sum, so any nature-marginal
+  assertion is wrong by ~12pp for those species. Merge, or warn.
+- `check_determinization` has no duplicate-item check. Adding one would make the
+  item clause a permanent invariant rather than something a single test watches,
+  but it needs `&DeterminizeConfig` in a public signature.
 
 VGC solver target definition (rechecked against the July 2026 repository and
 current official tournament handbook):

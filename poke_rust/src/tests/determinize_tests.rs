@@ -33,8 +33,8 @@ use crate::information::unknowns::{
 };
 use crate::meta::{MetaDex, MetaFormat};
 use crate::simulator::sample_turn_raw_seeded;
-use crate::state::battle::{MatchState, Player, PlayerCommand};
-use crate::state::pokemon::Nature;
+use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
+use crate::state::pokemon::{Nature, PokemonState, nature_stat_modifiers};
 use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -292,6 +292,259 @@ fn respects_revealed_information() {
 
 // ── 3. Determinism ───────────────────────────────────────────────────────────
 
+/// A Rest-induced sleep must reach the concrete world, because the simulator
+/// branches on it: `rest_sleep` blocks deterministically for exactly two turns,
+/// while a natural sleep wakes on a 1/3-vs-2/3 weighted roll. Dropping the flag
+/// silently hands a solver the wrong wake distribution for a Rest-slept
+/// opponent — a legal world, but the wrong one to plan against.
+#[test]
+fn a_rest_sleep_reaches_the_determinized_world() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+    belief.p2_active_mons[0].status =
+        Some(crate::state::dex_data::Status::Sleep(2));
+
+    belief.p2_active_mons[0].rest_sleep = true;
+    let world =
+        determinize_seeded(3, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+    assert!(
+        world.state.p2_active_mons[0].rest_sleep,
+        "the belief said this sleep came from Rest and the world lost it"
+    );
+
+    // ...and a natural sleep must not be promoted to a deterministic one.
+    belief.p2_active_mons[0].rest_sleep = false;
+    let world =
+        determinize_seeded(3, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+    assert!(
+        !world.state.p2_active_mons[0].rest_sleep,
+        "an ordinary sleep was wrongly marked Rest-induced"
+    );
+}
+
+/// A Transformed opponent must keep its **own** HP and stay able to revert.
+///
+/// Transform copies every stat except HP (`transform_into` skips `stats[0]`),
+/// and the belief mirrors that: after `EventKind::Transformed`, inference copies
+/// the target's bounds into indices 1..6 only and leaves `min_stats[0]` /
+/// `max_stats[0]` describing the *transformer*. So a post-Transform belief's
+/// species and HP bounds disagree on purpose, and the fixture below has to
+/// reproduce that or it is testing a state the engine never produces.
+///
+/// Before this was handled, building from the primary view gave a Ditto-into-
+/// Garchomp the **target's** 185 HP and `pre_transform: None` — the wrong
+/// Pokemon, unable to revert, with no warning of either.
+#[test]
+fn a_transformed_opponent_keeps_its_own_hp_and_can_revert() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+
+    // A Ditto that has Transformed into Garchomp: the belief's primary fields
+    // show the copy target, `pre_transform` holds the real identity.
+    let real = opponent(Species::Ditto);
+    let (real_hp_lo, real_hp_hi) = (real.min_stats[0], real.max_stats[0]);
+    let shown_hp_lo = belief.p2_active_mons[0].min_stats[0];
+    assert!(
+        real_hp_hi < shown_hp_lo,
+        "fixture needs the two HP ranges disjoint to prove which one was used: \
+         Ditto {real_hp_lo}..={real_hp_hi} vs Garchomp from {shown_hp_lo}"
+    );
+
+    // Match what inference really leaves behind: HP bounds stay the Ditto's.
+    belief.p2_active_mons[0].min_stats[0] = real.min_stats[0];
+    belief.p2_active_mons[0].max_stats[0] = real.max_stats[0];
+    belief.p2_active_mons[0].min_pre_nature_stat[0] = real.min_pre_nature_stat[0];
+    belief.p2_active_mons[0].max_pre_nature_stat[0] = real.max_pre_nature_stat[0];
+    belief.p2_active_mons[0].pre_transform = Some(Box::new(real));
+
+    for seed in 0..25u64 {
+        let world = determinize_seeded(
+            seed,
+            &belief,
+            meta,
+            pokemon_dex(),
+            move_dex(),
+            &config_with_learnsets(),
+        )
+        .unwrap();
+        let mon = &world.state.p2_active_mons[0];
+
+        // Appearance is the copy target...
+        assert_eq!(mon.species, Species::Garchomp, "seed {seed}");
+        // ...but HP is its own, and it can revert.
+        assert!(
+            (real_hp_lo..=real_hp_hi).contains(&mon.stats[0]),
+            "seed {seed}: max HP {} is not in the Ditto's range {real_hp_lo}..={real_hp_hi} \
+             — Transform must not copy HP",
+            mon.stats[0]
+        );
+        let pre = mon
+            .pre_transform
+            .as_ref()
+            .unwrap_or_else(|| panic!("seed {seed}: no revert snapshot"));
+        assert_eq!(pre.species, Species::Ditto, "seed {seed}");
+
+        // Transform caps copied PP at 5.
+        for (i, pp) in mon.move_pp.iter().enumerate() {
+            if mon.moves[i].is_some() {
+                assert!(*pp <= 5, "seed {seed}: slot {i} has {pp} PP, Transform caps at 5");
+            }
+        }
+
+        assert!(
+            !world.warnings.iter().any(|w| matches!(
+                w,
+                DeterminizeWarning::UnsatisfiedConstraint { .. }
+            )),
+            "seed {seed}: {:?}",
+            world.warnings
+        );
+    }
+
+    // A malformed `pre_transform` surfaces as a panic or an illegal command in
+    // the engine rather than as a bad field, so the world has to be driven.
+    for seed in 0..8u64 {
+        let world = determinize_seeded(
+            seed,
+            &belief,
+            meta,
+            pokemon_dex(),
+            move_dex(),
+            &config_with_learnsets(),
+        )
+        .unwrap();
+        let mut state = MatchState::BattleState(world.state);
+        for turn in 0..3 {
+            let MatchState::BattleState(battle) = &state else {
+                break;
+            };
+            let p1 = legal_commands(battle, Player::P1);
+            let p2 = legal_commands(battle, Player::P2);
+            assert!(
+                !p1.is_empty() && !p2.is_empty(),
+                "seed {seed} turn {turn}: a side has no legal move"
+            );
+            let (next, _, probability) = sample_turn_raw_seeded(
+                seed.wrapping_mul(31).wrapping_add(turn),
+                &state,
+                &PlayerCommand::Battle(vec![p1[0].clone()]),
+                &PlayerCommand::Battle(vec![p2[0].clone()]),
+                move_dex(),
+                pokemon_dex(),
+                true,
+                16,
+                Some(Player::P1),
+            );
+            assert!(
+                probability > 0.0,
+                "seed {seed} turn {turn}: zero-probability turn"
+            );
+            state = next;
+        }
+    }
+}
+
+/// An unresolved Zoroark hypothesis must become a real, self-consistent
+/// disguise.
+///
+/// The load-bearing assertion is the last one. `illusion_disguise` is a stored
+/// field, but the engine *derives* the disguise from the concrete roster —
+/// "the last non-fainted party member" (`compute_illusion_disguise`) — and
+/// recomputes it on every switch-in. If the stored value and the derived one
+/// disagree, the world is fine until the Zoroark pivots out and back, at which
+/// point it silently changes what it is pretending to be. So committing the
+/// hypothesis has to constrain the bench *order*, not just set a field.
+#[test]
+fn an_unresolved_zoroark_becomes_a_self_consistent_disguise() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 2);
+
+    // The active slot LOOKS like Garchomp; the hypothesis says it is really a
+    // Zoroark. The genuine Garchomp — the decoy — is on the bench, which is
+    // what makes the disguise possible in the first place.
+    belief.p2_active_mons[0].possible_illusion_state =
+        Some(Box::new(opponent(Species::Zoroark)));
+    belief.p2_unresolved_zoroark_count = 1;
+    // Deliberately NOT last: bench order follows belief order, so the decoy
+    // starts in the wrong place and the commitment has to move it. Listing it
+    // last would make the ordering assertion below pass for free.
+    belief.p2_known_back_mons.push(opponent(Species::Garchomp));
+    belief.p2_known_back_mons.push(opponent(Species::Incineroar));
+
+    let slot = FieldSlot {
+        player: Player::P2,
+        slot_index: 0,
+    };
+
+    for seed in 0..25u64 {
+        let world = determinize_seeded(
+            seed,
+            &belief,
+            meta,
+            pokemon_dex(),
+            move_dex(),
+            &config_with_learnsets(),
+        )
+        .unwrap();
+        let mon = &world.state.p2_active_mons[0];
+
+        assert_eq!(
+            mon.species,
+            Species::Zoroark,
+            "seed {seed}: the hypothesis was drawn, so the true species is the Zoroark"
+        );
+        assert_eq!(mon.ability, Ability::Illusion, "seed {seed}");
+        assert_eq!(
+            mon.illusion_disguise,
+            Some(Species::Garchomp),
+            "seed {seed}: must appear as what the observer has been seeing"
+        );
+        // Illusion and Transform are mutually exclusive.
+        assert!(mon.pre_transform.is_none(), "seed {seed}");
+
+        assert_eq!(
+            crate::simulator::helpers::compute_illusion_disguise(&world.state, slot),
+            mon.illusion_disguise,
+            "seed {seed}: the engine derives a different disguise than the one stored — \
+             bench order {:?}",
+            world
+                .state
+                .p2_back_mons
+                .iter()
+                .map(|m| (m.species.clone(), m.fainted))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// ...and with the count already at zero, nothing may be invented: the side's
+/// Zoroark is accounted for, so asserting a disguise would be fabrication.
+#[test]
+fn a_resolved_side_gets_no_disguise() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 2);
+    belief.p2_active_mons[0].possible_illusion_state =
+        Some(Box::new(opponent(Species::Zoroark)));
+    belief.p2_unresolved_zoroark_count = 0;
+    belief.p2_known_back_mons.push(opponent(Species::Incineroar));
+    belief.p2_known_back_mons.push(opponent(Species::Garchomp));
+
+    for seed in 0..15u64 {
+        let world = determinize_seeded(
+            seed,
+            &belief,
+            meta,
+            pokemon_dex(),
+            move_dex(),
+            &config_with_learnsets(),
+        )
+        .unwrap();
+        let mon = &world.state.p2_active_mons[0];
+        assert_eq!(mon.species, Species::Garchomp, "seed {seed}");
+        assert_eq!(mon.illusion_disguise, None, "seed {seed}");
+    }
+}
+
 #[test]
 fn same_seed_gives_the_same_world() {
     with_meta!(meta);
@@ -421,6 +674,109 @@ fn sampled_builds_follow_the_usage_data() {
         (per_draw - expected_off_meta).abs() < 0.05,
         "off-meta moves averaged {per_draw:.3} per draw, expected ~{expected_off_meta:.3}"
     );
+}
+
+/// Coherence must suppress builds whose nature fights their investment *without*
+/// moving the nature marginal.
+///
+/// Those two halves pull against each other, and that tension is the whole
+/// reason the damping is applied inside a nature's row rather than across the
+/// joint table. A Careful Dragonite is a real thing people run — it just never
+/// carries 32 Attack points. Damping `P(nature)·P(spread)` jointly would buy the
+/// first half by paying for it with the second, shifting mass onto whichever
+/// natures happen to have fewer damped cells;
+/// `sampled_builds_follow_the_usage_data` is what would catch that, and this
+/// test is what catches the reverse (a formulation so marginal-preserving it
+/// stopped suppressing anything).
+///
+/// **Dragonite, not Garchomp**, and the choice is load-bearing. A species only
+/// exercises this if its nature list and its spread list actually disagree
+/// somewhere. Every Garchomp spread in the cache is Atk/Spe-shaped, so each of
+/// its natures is either wholly coherent or wholly incoherent and the
+/// incoherent ones carry ~1.7% of the mass between them — the measurement has
+/// no room to move, and `on < off` there is within noise of a coin flip.
+/// Dragonite carries a genuinely mixed spread table: 46.7% of its draws are
+/// incoherent undamped, 14.5% damped.
+///
+/// The incoherence predicate is re-derived here in EV units rather than calling
+/// the sampler's own — a test that shares the implementation it is checking
+/// proves nothing.
+#[test]
+fn incoherent_builds_are_suppressed_without_moving_the_nature_marginal() {
+    with_meta!(meta);
+    let subject = Species::Dragonite;
+    let belief = belief_1v1(Species::Charizard, subject.clone(), 0);
+    let subject_meta = meta.get(&subject).expect("Dragonite is in the cache");
+
+    const DRAWS: usize = 4_000;
+
+    // `ev = max(0, 8p - 4)`, so 8 authoring points is 60 EVs and 0 stays 0.
+    let is_incoherent = |mon: &PokemonState| {
+        nature_stat_modifiers(&mon.nature)
+            .iter()
+            .enumerate()
+            .any(|(i, m)| {
+                let ev = mon.evs[i + 1];
+                (*m < 1.0 && ev >= 60) || (*m > 1.0 && ev == 0)
+            })
+    };
+
+    let sweep = |coherence: f64| {
+        let cfg = DeterminizeConfig {
+            nature_spread_coherence: coherence,
+            ..config_with_learnsets()
+        };
+        let mut incoherent = 0usize;
+        let mut natures: HashMap<Nature, usize> = HashMap::new();
+        for seed in 0..DRAWS as u64 {
+            let world =
+                determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &cfg).unwrap();
+            let mon = &world.state.p2_active_mons[0];
+            if is_incoherent(mon) {
+                incoherent += 1;
+            }
+            *natures.entry(mon.nature).or_default() += 1;
+        }
+        (incoherent as f64 / DRAWS as f64 * 100.0, natures)
+    };
+
+    let (off_rate, off_natures) = sweep(1.0);
+    let (on_rate, on_natures) = sweep(0.15);
+
+    // The gap is the point. `1.0` must actually emit these, or the fixture has
+    // stopped exercising the case and the comparison below is vacuous. Measured
+    // 46.7% at the time of writing; the guard sits far below that so a cache
+    // refresh that shifts the spread table does not fail the build spuriously,
+    // but a refresh that flattens it entirely still does.
+    assert!(
+        off_rate > 15.0,
+        "with coherence off only {off_rate:.2}% of builds were incoherent — \
+         this fixture no longer exercises the case, pick another species"
+    );
+    // Measured ratio ~0.31. Asserting merely `on < off` would pass on noise.
+    assert!(
+        on_rate < off_rate * 0.5,
+        "coherence 0.15 left {on_rate:.2}% incoherent, barely down from {off_rate:.2}%"
+    );
+
+    // ...and the nature marginal must survive both settings.
+    let nature_total: f64 = subject_meta.natures.iter().map(|w| w.pct).sum();
+    let tolerance = |expected: f64| {
+        let p = (expected / 100.0).clamp(0.0, 1.0);
+        400.0 * (p * (1.0 - p) / DRAWS as f64).sqrt() + 1.5
+    };
+    for (label, natures) in [("off", &off_natures), ("on", &on_natures)] {
+        for weighted in subject_meta.natures.iter().take(2) {
+            let expected = weighted.pct / nature_total * 100.0;
+            let observed =
+                natures.get(&weighted.value).copied().unwrap_or(0) as f64 / DRAWS as f64 * 100.0;
+            assert!(
+                (observed - expected).abs() < tolerance(expected),
+                "coherence {label}: {:?} sampled {observed:.1}%, expected ~{expected:.1}%",
+                weighted.value
+            );
+        }
+    }
 }
 
 /// A revealed move must survive into every world, keep its slot, and never be
@@ -690,6 +1046,137 @@ fn no_two_teammates_share_an_item() {
             );
         }
     }
+}
+
+/// The item clause must survive bench *invention*, not just bench selection.
+///
+/// `no_two_teammates_share_an_item` fills the bench from the belief, so
+/// invention never runs there and this path was uncovered. It also cannot be
+/// caught downstream: `subset_check` compares the world against the belief, and
+/// an invented Pokemon has no belief entry to contradict, so a duplicated item
+/// is invisible to every existing oracle.
+#[test]
+fn invented_bench_respects_the_item_clause() {
+    with_meta!(meta);
+    // No bench candidates at all, so all three slots are invented — and the
+    // active is already holding something they must not collide with.
+    let belief = belief_1v1(Species::Charizard, Species::Garchomp, 3);
+
+    for seed in 0..200u64 {
+        let world =
+            determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+        let mut seen: HashSet<Item> = HashSet::new();
+        for mon in world
+            .state
+            .p2_active_mons
+            .iter()
+            .chain(world.state.p2_back_mons.iter())
+        {
+            if mon.item == Item::None {
+                continue; // exempt: any number of Pokemon may hold nothing
+            }
+            assert!(
+                seen.insert(mon.item.clone()),
+                "seed {seed}: {:?} duplicated on the team ({:?})",
+                mon.item,
+                world
+                    .state
+                    .p2_active_mons
+                    .iter()
+                    .chain(world.state.p2_back_mons.iter())
+                    .map(|m| (m.species.clone(), m.item.clone()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// Invented Pokemon should look like teammates of what we have already seen,
+/// not merely like the format's most popular species.
+///
+/// Plausibility is invisible to both oracles (see the note on
+/// `invented_bench_respects_the_item_clause`), so it has to be measured
+/// directly. Targets are read from the cache rather than hardcoded, for the
+/// same reason `sampled_builds_follow_the_usage_data` does it: the percentages
+/// move on every scraper run, and what must hold across refreshes is the
+/// *relationship* between the data and the draws.
+#[test]
+fn invented_bench_prefers_known_partners() {
+    with_meta!(meta);
+    let subject = Species::Garchomp;
+    let Some(subject_meta) = meta.get(&subject) else {
+        return;
+    };
+    let belief = belief_1v1(Species::Charizard, subject.clone(), 3);
+
+    let partners: HashSet<Species> = subject_meta
+        .teammates
+        .iter()
+        .map(|w| w.value.clone())
+        .collect();
+    assert!(
+        partners.len() >= 5,
+        "fixture needs a real teammate list, got {}",
+        partners.len()
+    );
+
+    let mut invented = 0usize;
+    let mut from_partners = 0usize;
+    for seed in 0..500u64 {
+        let world =
+            determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+        for mon in &world.state.p2_back_mons {
+            invented += 1;
+            if partners.contains(&mon.species) {
+                from_partners += 1;
+            }
+        }
+    }
+    assert!(invented > 0, "the fixture invented nothing");
+
+    // The listed partners are ~10 of ~235 species. Uninformed drawing would put
+    // them near 4%; the prior should put them far above it. The bound is loose
+    // on purpose — this asserts the signal exists, not its exact strength.
+    let share = from_partners as f64 / invented as f64 * 100.0;
+    assert!(
+        share > 25.0,
+        "only {share:.1}% of invented bench mons were listed teammates of \
+         {subject:?} — the co-occurrence prior is not being applied"
+    );
+}
+
+/// ...but the prior must not collapse onto the teammate lists either.
+///
+/// Roughly half the format has no teammate data at all, and the belief has said
+/// nothing to rule those species out. `POPULARITY_FLOOR` is what keeps them
+/// reachable; without it they would be impossible rather than merely unlikely.
+#[test]
+fn invented_bench_can_still_reach_an_unlisted_species() {
+    with_meta!(meta);
+    let subject = Species::Garchomp;
+    let Some(subject_meta) = meta.get(&subject) else {
+        return;
+    };
+    let belief = belief_1v1(Species::Charizard, subject.clone(), 3);
+    let partners: HashSet<Species> = subject_meta
+        .teammates
+        .iter()
+        .map(|w| w.value.clone())
+        .collect();
+
+    let reached_outside = (0..500u64).any(|seed| {
+        determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &config())
+            .unwrap()
+            .state
+            .p2_back_mons
+            .iter()
+            .any(|m| !partners.contains(&m.species))
+    });
+    assert!(
+        reached_outside,
+        "500 seeds never invented a species outside {subject:?}'s teammate list — \
+         the prior has collapsed onto it"
+    );
 }
 
 // ── 8. mon_id ────────────────────────────────────────────────────────────────

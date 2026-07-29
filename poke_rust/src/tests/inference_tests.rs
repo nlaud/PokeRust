@@ -282,6 +282,93 @@ fn test_status_inflicted_then_cured() {
     assert_eq!(result.p2_active_mons[0].status, None);
 }
 
+/// Rest's sleep is a deterministic 2 blocked turns (1 with Early Bird), not the
+/// weighted random duration, so the belief has to distinguish it — otherwise a
+/// determinized or materialized world plays a Rest-slept opponent back with the
+/// wrong wake distribution.
+///
+/// The signal is the enclosing move, which is why this is detected in the
+/// `MoveUsed` arm: `StatusInflicted` on its own cannot tell the two apart.
+#[test]
+fn test_rest_sleep_is_tracked_and_distinguished_from_natural_sleep() {
+    // Rest on oneself ⇒ flagged.
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Rest,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Sleep(2),
+            })],
+        )],
+    );
+    assert_eq!(result.p2_active_mons[0].status, Some(Status::Sleep(2)));
+    assert!(
+        result.p2_active_mons[0].rest_sleep,
+        "a self-targeted Rest must mark the sleep as Rest-induced"
+    );
+
+    // Spore ⇒ ordinary random sleep, must NOT be flagged.
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Spore,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Sleep(2),
+            })],
+        )],
+    );
+    assert_eq!(result.p2_active_mons[0].status, Some(Status::Sleep(2)));
+    assert!(
+        !result.p2_active_mons[0].rest_sleep,
+        "a Spore sleep is the ordinary weighted-duration kind"
+    );
+}
+
+/// Waking up must clear the flag, or a later natural sleep on the same mon
+/// inherits it and is wrongly played back as deterministic. This mirrors the
+/// sim, which clears `rest_sleep` on wake for exactly the same reason.
+#[test]
+fn test_rest_sleep_clears_on_wake() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Rest,
+                    targets: vec![p2(0)],
+                },
+                vec![event(EventKind::StatusInflicted {
+                    target: p2(0),
+                    status: Status::Sleep(2),
+                })],
+            ),
+            event(EventKind::StatusCured {
+                target: p2(0),
+                status: Status::Sleep(0),
+            }),
+        ],
+    );
+    assert_eq!(result.p2_active_mons[0].status, None);
+    assert!(
+        !result.p2_active_mons[0].rest_sleep,
+        "the flag must not survive the wake-up that ended the sleep it described"
+    );
+}
+
 /// S44: a Fire-type/`thawsTarget` move thawing a Frozen target used to be a silent
 /// `mon.status = None` in `simulator::apply_single_hit_branch` with no matching
 /// `StatusCured` event — the observer's belief kept tracking Frozen, so a later
@@ -6055,6 +6142,77 @@ fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
         mon.max_stats[0],
         real_lo,
         real_hi
+    );
+}
+
+/// S68 regression: `ev_total_cap` must be an upper bound on what a *legal*
+/// Champions build can reach, not the familiar 510.
+///
+/// Pass 5 uses the cap to tighten: `max_evs[i] ≤ cap − Σ_{j≠i} min_evs[j]`. That
+/// is only sound if no real build can exceed `cap`. Under stat-point authoring
+/// `ev = max(0, 8p − 4)` charges the −4 once per *nonzero* stat, so a fully-spent
+/// 66-point spread totals `528 − 4k` EVs over k invested stats. 66 points needs
+/// at least three stats (32+32+2), so builds legitimately reach **516**.
+///
+/// The fixture is Garchomp's real top spread from the usage cache — points
+/// `[2,32,0,0,0,32]`, EVs `[12,252,0,0,0,252]`, total 516. With the old 510 cap,
+/// once HP and Attack were pinned the Speed budget came out at `510 − 264 = 246`
+/// and `max_evs[spe]` was clamped down the lattice to 244, excluding the true
+/// 252 — the one thing this engine must never do. The same off-by-six made the
+/// determinizer reject every fully-spent spread in the cache.
+#[test]
+fn test_s68_ev_total_cap_does_not_exclude_a_legal_full_budget_spread() {
+    let pd = crate::tests::simuilator_test_helpers::pokemon_dex();
+
+    // The true build we must never rule out.
+    const TRUE_EVS: [u8; 6] = [12, 252, 0, 0, 0, 252];
+    assert_eq!(
+        TRUE_EVS.iter().map(|e| u16::from(*e)).sum::<u16>(),
+        516,
+        "fixture sanity: this is the 66-point spread that motivated the finding"
+    );
+
+    // Pin HP and Attack, as damage/stat inference would once it has seen enough,
+    // and leave Speed wide. That is the configuration in which the cap bites.
+    let pinned = |cap: Option<u16>| {
+        let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, pd, 50);
+        mon.possible_species = Unknown::Known(Species::Garchomp);
+        mon.min_evs = [12, 252, 0, 0, 0, 0];
+        mon.max_evs = [252; 6];
+        let config = InferenceConfig {
+            ev_total_cap: cap,
+            ..InferenceConfig::default()
+        };
+        pass5_back_solve(&mut mon, 0, &config, pd);
+        mon
+    };
+
+    // The shipped default must keep the true Speed investment reachable.
+    let mon = pinned(InferenceConfig::default().ev_total_cap);
+    assert!(
+        mon.max_evs[5] >= TRUE_EVS[5],
+        "the default cap clamped max_evs[spe] to {}, excluding the true {} — \
+         a legal 66-point spread is no longer representable",
+        mon.max_evs[5],
+        TRUE_EVS[5]
+    );
+    for (i, true_ev) in TRUE_EVS.iter().enumerate() {
+        assert!(
+            mon.min_evs[i] <= *true_ev && *true_ev <= mon.max_evs[i],
+            "stat {i}: true EV {true_ev} fell outside the belief window [{}, {}]",
+            mon.min_evs[i],
+            mon.max_evs[i]
+        );
+    }
+
+    // ...and the old value really did exclude it, so this test is not vacuous.
+    let old = pinned(Some(510));
+    assert!(
+        old.max_evs[5] < TRUE_EVS[5],
+        "expected the historical 510 cap to exclude the true Speed EV; it left \
+         max_evs[spe] = {}. If this now passes, the tightening changed and the \
+         assertion above is no longer testing what it claims.",
+        old.max_evs[5]
     );
 }
 

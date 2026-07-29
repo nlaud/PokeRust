@@ -32,10 +32,14 @@
 //! `P(item)·P(ability)·P(nature)·P(spread)·P_CP(moves)`. The cache reports only
 //! marginals, so nothing else is available. Two consequences worth knowing:
 //! nature and spread really are correlated in play (Bold + 252 Atk is a build no
-//! one runs, and this will emit it), and item constrains moves (Choice Scarf +
-//! Swords Dance likewise). `nature_spread_coherence` exists to damp the first;
-//! the second is unmodelled. Both are biases in *which* legal world you get, not
-//! soundness bugs.
+//! one runs), and item constrains moves (Choice Scarf + Swords Dance likewise).
+//!
+//! The first is modelled. `nature_spread_coherence` damps pairs whose nature
+//! fights their investment, applied *within* each nature's row of the joint
+//! table rather than across it — so it reshapes `P(spread | nature)` and leaves
+//! `P(nature)` at the rate the cache reports, which is the one number the usage
+//! data actually pins down. The second is unmodelled. Neither is a soundness
+//! bug: both are biases in *which* legal world you get.
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,15 +48,17 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::compositions::sample_bounded_composition;
-use crate::information::cps::sample_fixed_size_subset;
-use crate::information::inference::{InferenceConfig, percent_bucket, unknown_is_excluded};
+use crate::information::cps::{max_exact_pool, sample_fixed_size_subset};
+use crate::information::inference::{
+    InferenceConfig, percent_bucket, promote_illusion_to_primary, unknown_is_excluded,
+};
 use crate::information::subset_check::collect_true_state_subset_violations;
 use crate::information::unknowns::{
-    PokemonHP, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+    PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
 };
 use crate::meta::dex::{MetaDex, SpeciesMeta, StatPoints};
 use crate::meta::names::ALL_NATURES;
-use crate::simulator::helpers::sample_one_weighted;
+use crate::simulator::helpers::{sample_one_weighted, transform_into};
 use crate::simulator::scoped_sample_rng;
 use crate::state::battle::{BattleState, Player};
 use crate::state::dex_data::{MoveData, PokemonData, PokemonType};
@@ -99,9 +105,11 @@ pub struct DeterminizeConfig {
     /// before accepting it with a warning.
     pub max_repair_passes: u8,
     /// Weight multiplier for (nature, spread) pairs that disagree — a nature
-    /// nerfing a heavily-invested stat, or boosting an uninvested one. `1.0`
-    /// leaves the plain independent product, which is the documented default;
-    /// smaller values suppress incoherent builds.
+    /// nerfing a heavily-invested stat, or boosting an uninvested one. Applied
+    /// inside a single nature's row of the joint table, so it reshapes
+    /// `P(spread | nature)` and leaves the nature marginal at the usage rate.
+    /// Clamped to `[0, 1]`; `1.0` disables it and restores the plain
+    /// independent product.
     pub nature_spread_coherence: f64,
     pub timer_policy: TimerPolicy,
     /// When false, an attribute whose meta options are all excluded is an error
@@ -116,7 +124,7 @@ impl Default for DeterminizeConfig {
             observer: Player::P1,
             invent_missing_bench: true,
             max_repair_passes: 8,
-            nature_spread_coherence: 1.0,
+            nature_spread_coherence: 0.15,
             timer_policy: TimerPolicy::MaxPlausible,
             allow_uniform_fallback: true,
         }
@@ -145,6 +153,16 @@ pub enum DeterminizeWarning {
     },
     /// An opponent Pokemon was invented to fill a bench the belief could not.
     InventedBenchMon { species: Species },
+    /// The belief said this Pokemon was Transformed, but the engine refused the
+    /// splice (`transform_into` rejects an Illusion/Imposter copy target). The
+    /// mon is returned in its real, untransformed form rather than as a
+    /// half-applied hybrid.
+    TransformNotApplied { mon_idx: usize, species: Species },
+    /// A slot was drawn as the side's disguised Zoroark, but the disguise could
+    /// not be made self-consistent — the decoy species is not on the concrete
+    /// bench for `compute_illusion_disguise` to find. The Zoroark's true
+    /// identity still stands; only the appearance is dropped.
+    IllusionUncommitted { decoy: Species },
     /// A cross-Pokemon constraint (item clause, speed ordering, a CNF clause)
     /// still failed after the redraw budget was exhausted. The world is returned
     /// anyway: a warned-but-usable world beats an error in exactly the mid-game
@@ -427,13 +445,48 @@ pub(crate) fn enumerate_nature_spreads(
 
     let mut out = Vec::new();
     for (nature, nature_pct) in &natures {
-        for (points, spread_pct) in &spreads {
-            let Some(mut candidate) =
-                build_spread_candidate(unk, base_stats, *nature, *points, cfg)
-            else {
+        // Coherence is a statement about P(spread | nature), not about P(nature).
+        // Folding it into the joint product would shift mass *between* natures,
+        // since natures differ in how many of their cells get damped — and the
+        // nature marginal is exactly what the usage data pins down. Normalizing
+        // each nature's row on its own suppresses incoherent pairs while leaving
+        // that marginal at the rate the cache reports.
+        //
+        // This also removes a distortion that predates coherence:
+        // `build_spread_candidate` feasibility is itself nature-dependent (it
+        // checks pre-nature *and* post-nature stat bounds), so an unnormalized
+        // joint product already skewed the marginal on any constrained belief.
+        let mut row: Vec<(SpreadCandidate, f64)> = spreads
+            .iter()
+            .filter_map(|(points, spread_pct)| {
+                let mut candidate =
+                    build_spread_candidate(unk, base_stats, *nature, *points, cfg)?;
+                candidate.weight = spread_pct * coherence(*nature, points, cfg);
+                Some((candidate, *spread_pct))
+            })
+            .collect();
+        if row.is_empty() {
+            // The belief admits no spread for this nature. Dropping it lets
+            // `draw_weighted` renormalize over the survivors, which is the
+            // correct belief-driven shift.
+            continue;
+        }
+        let mut row_total: f64 = row.iter().map(|(c, _)| c.weight).sum();
+        if row_total <= 0.0 {
+            // Every feasible spread here is incoherent *and* the config is 0.0.
+            // Re-weight on plain usage rather than deleting a nature the data
+            // says people run — we just cannot say which spread they pair it
+            // with, which is a reason to stay agnostic, not to rule it out.
+            for (candidate, spread_pct) in &mut row {
+                candidate.weight = *spread_pct;
+            }
+            row_total = row.iter().map(|(c, _)| c.weight).sum();
+            if row_total <= 0.0 {
                 continue;
-            };
-            candidate.weight = nature_pct * spread_pct * coherence(*nature, points, cfg);
+            }
+        }
+        for (mut candidate, _) in row {
+            candidate.weight = candidate.weight / row_total * nature_pct;
             out.push(candidate);
         }
     }
@@ -445,8 +498,11 @@ pub(crate) fn enumerate_nature_spreads(
 /// A Bold (−Atk) nature alongside 32 Attack points is a combination essentially
 /// nobody runs, but the independent product model has no way to know that — the
 /// cache reports natures and spreads as separate marginals. The `stat_up` /
-/// `stat_down` columns do carry the signal, so this is recoverable; it ships
-/// disabled (`1.0`) so the default behaviour is the plain documented product.
+/// `stat_down` columns do carry the signal, so this is recoverable, and the
+/// nature's own enum already encodes it (`nature_stat_modifiers`).
+///
+/// This is applied *within* a nature's row by `enumerate_nature_spreads`, never
+/// across natures — see the comment there for why. `1.0` disables it entirely.
 fn coherence(nature: Nature, points: &StatPoints, cfg: &DeterminizeConfig) -> f64 {
     if (cfg.nature_spread_coherence - 1.0).abs() < f64::EPSILON {
         return 1.0;
@@ -463,7 +519,9 @@ fn coherence(nature: Nature, points: &StatPoints, cfg: &DeterminizeConfig) -> f6
         }
     }
     if incoherent {
-        cfg.nature_spread_coherence.max(0.0)
+        // Clamped, not just floored: a value above 1.0 would *boost* incoherent
+        // builds, which is the opposite of what this knob is for.
+        cfg.nature_spread_coherence.clamp(0.0, 1.0)
     } else {
         1.0
     }
@@ -507,8 +565,23 @@ fn build_spread_candidate(
     if !within(&evs, &unk.min_evs, &unk.max_evs) {
         return None;
     }
-    if let Some(cap) = cfg.inference.ev_total_cap {
-        let total: u16 = evs.iter().map(|e| *e as u16).sum();
+    // Check the budget in the unit the build was authored in.
+    //
+    // Under stat points the real constraint is 66 points, and it does NOT
+    // translate to any fixed EV total: `ev = max(0, 8p − 4)` charges the −4 once
+    // per *nonzero* stat, so a fully-spent 66-point spread totals `528 − 4k` EVs
+    // across k invested stats — 516 over three, 504 over six. Comparing scaled
+    // EVs against a single cap therefore rejects legal builds: the 510 default
+    // (a Gen-6 convention, and below the 516 floor a 66-point spread hits)
+    // rejected every fully-spent spread in the cache, leaving Garchomp with
+    // exactly one feasible spread out of eight and identical EVs on every draw.
+    if cfg.inference.use_stat_points {
+        let spent: u16 = points.iter().map(|p| u16::from(*p)).sum();
+        if spent > STAT_POINT_BUDGET as u16 {
+            return None;
+        }
+    } else if let Some(cap) = cfg.inference.ev_total_cap {
+        let total: u16 = evs.iter().map(|e| u16::from(*e)).sum();
         if total > cap {
             return None;
         }
@@ -1111,6 +1184,10 @@ fn apply_belief_overlay(
 
     mon.boosts = unk.boosts;
     mon.status = unk.status.clone();
+    // Without this every determinized Rest-sleep would be played back as a
+    // natural one, which is a live divergence: the sim's wake check is
+    // deterministic for Rest and 1/3-vs-2/3 weighted otherwise.
+    mon.rest_sleep = unk.rest_sleep;
     mon.volatiles = unk.volatiles.clone();
 
     mon.consumed_item = unk.consumed_item.clone();
@@ -1170,6 +1247,54 @@ fn hp_to_raw(hp: &PokemonHP, max_hp: u16) -> u16 {
 /// drawn from the belief's own candidates, weighted by the only co-occurrence
 /// signal the dataset has (teammate rows), and that `check_determinization`
 /// verifies every committed bench member really was a candidate.
+/// How much one teammate-list appearance multiplies a candidate's weight. A
+/// rank-1 edge (score 1.0) makes a species 2.5x likelier per known teammate.
+const AFFINITY_GAIN: f64 = 1.5;
+
+/// Softens the popularity base rate. Without it the raw indegree spread is wide
+/// enough that co-occurrence cannot move the ranking, and the prior collapses
+/// back into "the format's most common Pokemon".
+const POPULARITY_EXPONENT: f64 = 0.5;
+
+/// Floor for species the summary has no teammate count for. Nearly half the
+/// format has indegree 0; a hard zero would make them unreachable rather than
+/// merely unlikely, and the belief has said nothing to rule them out.
+const POPULARITY_FLOOR: f64 = 0.02;
+
+/// Prior weight for "this species is on the opponent's team, given the ones we
+/// have already seen".
+///
+/// Multiplicative rather than additive. The additive form's balance drifts with
+/// how much of the team is known — at zero known species affinity is 0 and
+/// popularity is the whole signal, at four known it is swamped — so the prior
+/// silently changed character as a battle progressed. A product is the
+/// naive-Bayes shape, so evidence accumulates correctly and needs no `1/|K|`
+/// normalizer.
+///
+/// **Both directions of each edge count.** The cache lists only ten teammates
+/// per species and the graph is hub-dominated (Sinistcha appears in 182 of 235
+/// lists), so the forward direction alone is largely a popularity proxy. Only
+/// ~13% of edges are mutual, meaning forward and reverse are near-complementary
+/// rather than redundant; including both roughly doubles the number of
+/// candidates carrying real evidence.
+///
+/// **Do not divide by the base rate.** `teammate_score(candidate, known)` is
+/// already a lift estimate — `P(k|c) = P(c|k)·P(k)/P(c)` and `P(k)` is constant
+/// across candidates — so a PMI-style correction double-counts and floats
+/// zero-indegree species to the top. This is worth re-deriving before
+/// "improving" it.
+fn roster_affinity(candidate: &Species, known: &[Species], meta_dex: &MetaDex) -> f64 {
+    let mut weight = meta_dex
+        .popularity(candidate)
+        .max(POPULARITY_FLOOR)
+        .powf(POPULARITY_EXPONENT);
+    for k in known {
+        let edge = meta_dex.teammate_score(k, candidate) + meta_dex.teammate_score(candidate, k);
+        weight *= 1.0 + AFFINITY_GAIN * edge;
+    }
+    weight
+}
+
 fn select_bench_indices(
     possible: &[UnknownPokemonState],
     slots: usize,
@@ -1188,14 +1313,12 @@ fn select_bench_indices(
         .iter()
         .map(|unk| {
             let Some(species) = known_species_of(unk) else {
-                return 0.01;
+                // Species still ambiguous, so there is nothing to score it on.
+                // Sit it at the floor rather than at an arbitrary literal, so
+                // it stays in the same units as every other candidate.
+                return POPULARITY_FLOOR.powf(POPULARITY_EXPONENT);
             };
-            let affinity: f64 = known_species
-                .iter()
-                .map(|k| meta_dex.teammate_score(k, &species))
-                .sum();
-            // Popularity only breaks ties; co-occurrence is the real signal.
-            affinity + 0.05 * meta_dex.popularity(&species)
+            roster_affinity(&species, known_species, meta_dex)
         })
         .collect();
 
@@ -1435,6 +1558,20 @@ fn build_one(
     cfg: &DeterminizeConfig,
     log: &mut DrawLog,
 ) -> Result<PokemonState, DeterminizeError> {
+    if let Some(pre) = &unk.pre_transform {
+        return build_transformed(
+            hidden,
+            mon_idx,
+            unk,
+            pre,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            used_items,
+            cfg,
+            log,
+        );
+    }
     if hidden {
         determinize_pokemon(
             mon_idx,
@@ -1448,6 +1585,201 @@ fn build_one(
         )
     } else {
         copy_known_pokemon(mon_idx, unk, pokemon_dex, move_dex)
+    }
+}
+
+/// Build a Pokemon that is currently Transformed.
+///
+/// After a Transform the belief's *primary* fields describe the copy target —
+/// that is what the observer sees — while `pre_transform` holds the mon's real
+/// identity. Building straight from the primary view is therefore not merely
+/// imprecise, it produces the wrong Pokemon: it takes the **target's** base HP,
+/// which Transform explicitly does not copy, and leaves `pre_transform` empty so
+/// the mon can never revert on switch-out. Both were silent — a Ditto
+/// transformed into Garchomp came out as a 185 HP Garchomp with no warning.
+///
+/// The splice is delegated to `simulator::helpers::transform_into` rather than
+/// reimplemented, so the copied set (species, types, gender, weight,
+/// `stats[1..=5]`, boosts, moves, PP capped at 5, ability) and the preserved set
+/// (hp, `stats[0]`, level, item, status, nature, EVs/IVs, tera) cannot drift
+/// from the engine's.
+#[allow(clippy::too_many_arguments)]
+fn build_transformed(
+    hidden: bool,
+    mon_idx: usize,
+    unk: &UnknownPokemonState,
+    pre: &UnknownPokemonState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    used_items: &mut HashSet<Item>,
+    cfg: &DeterminizeConfig,
+    log: &mut DrawLog,
+) -> Result<PokemonState, DeterminizeError> {
+    // The real Pokemon, from its own belief entry. The belief only ever
+    // snapshots when `pre_transform` is empty, so this cannot nest — cleared
+    // defensively anyway, since a recursive build has no other stopping rule.
+    let mut real = pre.clone();
+    real.pre_transform = None;
+    let mut original = build_one(
+        hidden,
+        mon_idx,
+        &real,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        used_items,
+        cfg,
+        log,
+    )?;
+
+    // What it currently looks like. Transform copies no item, so this draw must
+    // not spend one from the side's item-clause budget — hence the scratch set,
+    // which is thrown away.
+    let mut shown = unk.clone();
+    shown.pre_transform = None;
+
+    // This draw exists only to supply the fields Transform *copies*. The bounds
+    // that describe the transformer rather than the target have to come off
+    // first, or the build is infeasible by construction: `unk`'s HP window is
+    // the Ditto's, and no Garchomp spread lands inside it. Widening is safe
+    // because `transform_into` discards every one of these — HP, EVs and IVs
+    // are all on its preserved-from-the-original list, so nothing drawn here
+    // reaches the result. The `stats[1..6]` bounds, which *are* the target's,
+    // are deliberately left in place: they are the real constraint on this draw.
+    shown.min_stats[0] = 0;
+    shown.max_stats[0] = u16::MAX;
+    shown.min_pre_nature_stat[0] = 0;
+    shown.max_pre_nature_stat[0] = u16::MAX;
+    shown.hp = PokemonHP::Percent(100);
+    shown.min_evs = [0; 6];
+    shown.max_evs = [252; 6];
+    shown.min_ivs = [0; 6];
+    shown.max_ivs = [31; 6];
+    let mut scratch = used_items.clone();
+    let target = build_one(
+        hidden,
+        mon_idx,
+        &shown,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        &mut scratch,
+        cfg,
+        log,
+    )?;
+
+    if transform_into(&mut original, &target) {
+        // Re-overlay from the *transformed* belief: HP, status and boosts are
+        // the live values for the mon as it stands now, and `stats[0]` is the
+        // original's, which is what `percent_bucket` must invert against.
+        apply_belief_overlay(&mut original, unk, None);
+    } else {
+        // `transform_into` refuses an Illusion/Imposter target. Leaving the mon
+        // untransformed is legal and honest; silently pretending otherwise is
+        // what got us here.
+        log.warnings.push(DeterminizeWarning::TransformNotApplied {
+            mon_idx,
+            species: target.species.clone(),
+        });
+    }
+    Ok(original)
+}
+
+/// Decide which active slots are really this side's disguised Zoroark.
+///
+/// **A side-level draw, not a per-slot coin flip.** `p*_unresolved_zoroark_count`
+/// means "exactly this many of the side's real roster members are an Illusion
+/// forme currently disguised somewhere". Flipping independently per slot would
+/// produce worlds with none or two, neither of which the belief allows.
+///
+/// Every candidate is weighted equally: the hypotheses are mirrored through all
+/// six inference passes, so any that survived is exactly as consistent with the
+/// observations as any other, and the usage cache has nothing to say about
+/// which slot a Zoroark chose to hide in.
+fn choose_illusion_slots(
+    actives: &[UnknownPokemonState],
+    unresolved: u8,
+    log: &mut DrawLog,
+) -> HashSet<usize> {
+    if unresolved == 0 {
+        return HashSet::new();
+    }
+    let candidates: Vec<usize> = actives
+        .iter()
+        .enumerate()
+        .filter(|(_, unk)| unk.possible_illusion_state.is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if candidates.is_empty() {
+        // The Zoroark is on the bench, not the field. Nothing to commit — and
+        // nothing wrong, so no warning.
+        return HashSet::new();
+    }
+    let take = (unresolved as usize).min(candidates.len());
+    let weights = vec![1.0f64; candidates.len()];
+    let (picked, probability) = sample_fixed_size_subset(&weights, take);
+    log.observe(probability);
+    picked.into_iter().map(|i| candidates[i]).collect()
+}
+
+/// Finish an Illusion commitment once the whole roster exists.
+///
+/// Two things have to line up, and neither can be settled before the bench is
+/// final (invention appends to it):
+///
+/// 1. `illusion_disguise` must be the species the observer has been *seeing*,
+///    which is the belief's primary hypothesis for that slot.
+/// 2. `compute_illusion_disguise` derives the disguise from the concrete roster
+///    — "the last non-fainted party member" — so the decoy has to actually sit
+///    at the end of the bench, or the world disagrees with itself the moment
+///    the Zoroark re-enters and the engine recomputes.
+///
+/// If the decoy is not on the bench at all the belief is inconsistent with what
+/// Illusion can do; that is warned about rather than papered over by inventing
+/// a decoy, which would fabricate a roster member to justify a guess.
+fn apply_illusion_disguises(
+    active: &mut [PokemonState],
+    back: &mut Vec<PokemonState>,
+    back_ids: &mut Vec<Option<u8>>,
+    actives: &[UnknownPokemonState],
+    illusion_slots: &HashSet<usize>,
+    log: &mut DrawLog,
+) {
+    for &i in illusion_slots {
+        let Some(Unknown::Known(decoy)) = actives.get(i).map(|u| &u.possible_species) else {
+            continue;
+        };
+        let Some(pos) = back
+            .iter()
+            .position(|m| m.species == *decoy && !m.fainted)
+        else {
+            log.warnings.push(DeterminizeWarning::IllusionUncommitted {
+                decoy: decoy.clone(),
+            });
+            continue;
+        };
+        // Move the decoy to the very end. Fainted entries after it do not
+        // matter — the engine's scan skips them.
+        let mon = back.remove(pos);
+        let id = back_ids.remove(pos);
+        back.push(mon);
+        back_ids.push(id);
+
+        if let Some(zoroark) = active.get_mut(i) {
+            // Transform and Illusion are mutually exclusive (Bulbapedia: a mon
+            // cannot transform while disguised, and one that gains Illusion via
+            // Transform does not disguise). The engine enforces both directions,
+            // so never hand it a state carrying both.
+            if zoroark.pre_transform.is_some() {
+                log.warnings.push(DeterminizeWarning::IllusionUncommitted {
+                    decoy: decoy.clone(),
+                });
+                continue;
+            }
+            zoroark.ability = Ability::Illusion;
+            zoroark.illusion_disguise = Some(decoy.clone());
+        }
     }
 }
 
@@ -1501,13 +1833,34 @@ fn build_side(
     // keeps the set of items already handed out and removes them from later
     // pools before the weights are renormalized.
     let mut used_items: HashSet<Item> = HashSet::new();
+
+    // Which active slots are really the side's disguised Zoroark. Decided up
+    // front because a committed slot is built from a *different* belief entry,
+    // and rebuilding it afterwards would double-spend the item budget.
+    let unresolved_zoroark = match player {
+        Player::P1 => belief.p1_unresolved_zoroark_count,
+        Player::P2 => belief.p2_unresolved_zoroark_count,
+    };
+    let illusion_slots = choose_illusion_slots(actives, unresolved_zoroark, log);
+
     let mut active = Vec::with_capacity(actives.len());
     let mut active_ids = Vec::with_capacity(actives.len());
     for (i, unk) in actives.iter().enumerate() {
+        // A committed slot builds from the promoted hypothesis — the Zoroark's
+        // own species, ability, moves and stat bounds — not from the shown one.
+        let mut promoted;
+        let entry = match (illusion_slots.contains(&i), &unk.possible_illusion_state) {
+            (true, Some(sub)) => {
+                promoted = unk.clone();
+                promote_illusion_to_primary(&mut promoted, (**sub).clone());
+                &promoted
+            }
+            _ => unk,
+        };
         active.push(build_one(
             hidden,
             active_start + i,
-            unk,
+            entry,
             meta_dex,
             pokemon_dex,
             move_dex,
@@ -1593,10 +1946,22 @@ fn build_side(
             meta_dex,
             pokemon_dex,
             move_dex,
+            &mut used_items,
             cfg,
             log,
         );
     }
+
+    // Last, because the disguise is a function of the finished bench and
+    // invention appends to it.
+    apply_illusion_disguises(
+        &mut active,
+        &mut back,
+        &mut back_ids,
+        actives,
+        &illusion_slots,
+        log,
+    );
 
     Ok(SideRoster {
         active,
@@ -1613,6 +1978,12 @@ fn build_side(
 /// hence the warning on every one. Candidates are drawn rather than taken
 /// greedily: an argmax would give every seed the same bench, defeating the point
 /// of seeding.
+///
+/// `used_items` is the caller's live set covering the *whole* side. It must be
+/// threaded in rather than rebuilt from `back`: an invented Pokemon is still a
+/// team member, so it competes for the item clause with the actives too, and
+/// nothing downstream would catch a duplicate (the subset oracle sees no
+/// contradiction because the invented mon has no belief entry to contradict).
 #[allow(clippy::too_many_arguments)]
 fn invent_bench(
     back: &mut Vec<PokemonState>,
@@ -1622,25 +1993,29 @@ fn invent_bench(
     meta_dex: &MetaDex,
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    used_items: &mut HashSet<Item>,
     cfg: &DeterminizeConfig,
     log: &mut DrawLog,
 ) {
+    let needed = target.saturating_sub(back.len());
+    if needed == 0 {
+        return;
+    }
+
     let mut taken: HashSet<Species> = known_species.iter().cloned().collect();
     taken.extend(back.iter().map(|m| m.species.clone()));
 
     // Rank the format's roster by affinity with what is already known, then
     // truncate — `sample_fixed_size_subset` is only exact for small pools, and
     // 235 candidates would fall back to its approximate path.
+    //
+    // The cap depends on how many we are drawing, which the old fixed 24 did
+    // not: C(24,4) fits under the enumeration threshold but C(24,5) is double
+    // it, so a five-slot invention was silently taking the approximate path.
     let mut pool: Vec<(Species, f64)> = meta_dex
         .species()
         .filter(|s| !taken.contains(s))
-        .map(|s| {
-            let affinity: f64 = known_species
-                .iter()
-                .map(|k| meta_dex.teammate_score(k, s))
-                .sum();
-            (s.clone(), affinity + 0.05 * meta_dex.popularity(s))
-        })
+        .map(|s| (s.clone(), roster_affinity(s, known_species, meta_dex)))
         .collect();
     pool.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
@@ -1649,21 +2024,14 @@ fn invent_bench(
             // make the result irreproducible under a fixed seed.
             .then_with(|| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)))
     });
-    pool.truncate(24);
+    pool.truncate(max_exact_pool(needed));
 
-    let needed = target.saturating_sub(back.len());
-    if needed == 0 || pool.is_empty() {
+    if pool.is_empty() {
         return;
     }
     let scores: Vec<f64> = pool.iter().map(|(_, w)| *w).collect();
     let (picked, probability) = sample_fixed_size_subset(&scores, needed.min(pool.len()));
     log.observe(probability);
-
-    let mut used_items: HashSet<Item> = back
-        .iter()
-        .map(|m| m.item.clone())
-        .filter(|i| *i != Item::None)
-        .collect();
 
     for idx in picked {
         let species = pool[idx].0.clone();
@@ -1678,7 +2046,7 @@ fn invent_bench(
             meta_dex,
             pokemon_dex,
             move_dex,
-            &mut used_items,
+            used_items,
             cfg,
             log,
         ) {

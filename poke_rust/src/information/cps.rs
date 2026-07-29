@@ -254,6 +254,25 @@ fn binomial(k: usize, n: usize) -> usize {
     acc
 }
 
+/// The largest pool from which a size-`n` draw still takes the exact
+/// enumeration path in `sample_fixed_size_subset`.
+///
+/// Callers that pre-truncate their candidate pool to keep the exactness
+/// guarantee need this number, and it depends on `MAX_ENUMERATED_SUBSETS` —
+/// deriving it at the call site means hardcoding a constant that silently goes
+/// wrong if the threshold moves, and it is easy to get wrong per `n` besides
+/// (the caps fall off fast: 200 for pairs, 50 for triples, 27 for quads).
+pub(crate) fn max_exact_pool(n: usize) -> usize {
+    if n <= 1 {
+        return usize::MAX;
+    }
+    let mut k = n;
+    while binomial(k + 1, n) <= MAX_ENUMERATED_SUBSETS {
+        k += 1;
+    }
+    k
+}
+
 /// Draw a size-`n` subset whose per-item inclusion probabilities match
 /// `marginals` as closely as a fixed-size draw allows.
 ///

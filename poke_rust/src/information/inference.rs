@@ -74,8 +74,21 @@ pub struct InferenceConfig {
     /// `possible_species`. Empty map disables this narrowing (default for tests).
     pub learnset_dex: HashMap<Species, HashSet<PokemonMove>>,
     /// Total EV budget across all six stats. When `Some(n)`, Pass 5 applies
-    /// cross-stat tightening: `max_evs[i] ≤ n − Σ_{j≠i} min_evs[j]`. Standard
-    /// competitive value is 510. `None` disables the cap check.
+    /// cross-stat tightening: `max_evs[i] ≤ n − Σ_{j≠i} min_evs[j]`.
+    /// `None` disables the cap check.
+    ///
+    /// **This must be an upper bound, never the typical value.** Pass 5 uses it
+    /// to *tighten* `max_evs`, so a cap below what a legal build can reach
+    /// excludes a true value — the one thing this engine must never do.
+    ///
+    /// The default is 516, not the familiar 510. Under Champions' stat-point
+    /// authoring (`use_stat_points`), `ev = max(0, 8p − 4)` charges the −4 once
+    /// per *nonzero* stat, so spending the full 66-point budget yields
+    /// `528 − 4k` EVs across k invested stats. 66 points needs at least three
+    /// stats (32+32+2), so the maximum reachable total is `528 − 12 = 516`.
+    /// 510 is the Gen-6 convention and sits below that: it rejected every
+    /// fully-spent spread in the usage cache, and in Pass 5 it could clamp
+    /// `max_evs` under a real 252 investment.
     pub ev_total_cap: Option<u16>,
 }
 
@@ -88,7 +101,7 @@ impl Default for InferenceConfig {
             legal_items: None,
             allow_repeat_items: false,
             learnset_dex: HashMap::new(),
-            ev_total_cap: Some(510),
+            ev_total_cap: Some(516),
         }
     }
 }
@@ -2557,6 +2570,28 @@ fn pass1_apply_event(
                 pass1_choice_exclusion(mon, move_used);
                 mon.last_used_move = Some(move_used.clone());
 
+                // Rest's sleep is a deterministic 2 blocked turns (1 with Early
+                // Bird), not the 1/3-vs-2/3 weighted random duration, and the
+                // enclosing move is the only thing that distinguishes them.
+                // `StatusInflicted` cannot do this itself — it has no view of
+                // the move that caused it.
+                //
+                // Order-independent by construction: this arm only ever *sets*
+                // the flag, and only on a Sleep reaction; `StatusInflicted` only
+                // ever *clears* it, and only on a non-Sleep status. So it does
+                // not matter which of the two runs first.
+                if *move_used == PokemonMove::Rest
+                    && event.reactions.iter().any(|r| {
+                        matches!(
+                            &r.kind,
+                            EventKind::StatusInflicted { target, status }
+                                if target == user && matches!(status, Status::Sleep(_))
+                        )
+                    })
+                {
+                    mon.rest_sleep = true;
+                }
+
                 // S27: mirror the sim's zero-effective-damage reset (simulator/mod.rs:
                 // total_effective_dmg == 0 → count = 0, last_used_move = None). A damaging
                 // move dealing no damage to any non-user target (miss/immune/blocked) breaks
@@ -2749,6 +2784,13 @@ fn pass1_apply_event(
                     }
                 }
                 mon.status = Some(status.clone());
+                // A fresh non-Sleep status ends whatever sleep this was
+                // tracking, Rest-induced or not. Sleep itself is deliberately
+                // left alone — see the `MoveUsed` arm, which is what tells a
+                // Rest sleep from a natural one and may run either side of this.
+                if !matches!(status, Status::Sleep(_)) {
+                    mon.rest_sleep = false;
+                }
             }
         }
 
@@ -2757,6 +2799,9 @@ fn pass1_apply_event(
                 && let Some(mon) = get_mon_mut_by_idx(state, idx)
             {
                 mon.status = None;
+                // Mirrors the sim clearing the flag on wake-up, so a later
+                // natural sleep never inherits a stale value.
+                mon.rest_sleep = false;
             }
         }
 
@@ -2774,6 +2819,7 @@ fn pass1_apply_event(
                 };
                 if matches_side && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.status = None;
+                    mon.rest_sleep = false;
                 }
             }
         }
@@ -12650,7 +12696,8 @@ pub fn pass5_back_solve(
     }
 
     // ── Global EV total-cap cross-stat tightening ─────────────────────────────
-    // Applies only when a cap is configured (default 510 for Pokémon Champions).
+    // Applies only when a cap is configured (default 516 — see `ev_total_cap`,
+    // which derives that number; it is deliberately NOT the familiar 510).
     // Sound: only ever tightens max_evs; never raises min_evs.
     // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} min_evs[j].
     if let Some(cap) = config.ev_total_cap {

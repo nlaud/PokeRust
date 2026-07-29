@@ -321,6 +321,17 @@ triggers learnset-based species narrowing (below). A contradiction — e.g. an
 panics immediately via `inference_contradiction!`, since it means the observed
 events are jointly impossible and something upstream is wrong.
 
+One field is derived from an event's *context* rather than its contents:
+`rest_sleep`. Rest puts its user to sleep for a deterministic 2 blocked turns
+(1 with Early Bird) instead of the weighted random duration, and a bare
+`StatusInflicted { Sleep }` cannot tell the two apart — so the `MoveUsed` arm
+sets the flag when the move is Rest and one of its own reactions is a Sleep on
+the user. The two halves are deliberately split so their order does not matter:
+`MoveUsed` only ever *sets* the flag (and only for Sleep), while
+`StatusInflicted`/`StatusCured`/`TeamStatusCured` only ever *clear* it (and
+never for Sleep). `false` is the safe default — it under-claims, treating a
+Rest sleep as an ordinary one, never the reverse.
+
 Ability tracking has two extra wrinkles handled here:
 
 - If a revealed ability is inside the current candidate set, it narrows to

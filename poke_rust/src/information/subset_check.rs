@@ -446,6 +446,17 @@ fn field_violations(
         }
     }
 
+    // S26 (as in `pass5_back_solve` and the Pass 3 inversions): a Transformed
+    // mon's `stats[1..=5]` are COPIED from the copy source, not produced by the
+    // stat formula, and its species is the target's while its EVs/IVs are still
+    // its own. Re-deriving pre-nature stats from `species + evs/ivs` therefore
+    // mixes two Pokemon and reports a violation on a perfectly legal state. The
+    // `stats` window above stays in force — the belief keeps index 0 describing
+    // the transformer and 1..6 the target, which is exactly what the truth holds.
+    if truth.pre_transform.is_some() {
+        return v;
+    }
+
     if let Some(data) = pdex.get(&truth.species) {
         let base = data.base_stats;
         let true_pre_nature: [u16; 6] = [
