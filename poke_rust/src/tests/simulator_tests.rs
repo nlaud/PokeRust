@@ -19458,14 +19458,14 @@ mod tests {
                 battle_state_from_lists(vec![banded.clone()], vec![], vec![dummy.clone()], vec![]);
             let initial_cmds =
                 get_possible_commands_for_active_slot(&state, Player::P1, 0, move_dex, pokemon_dex);
-            let initial_attack_count = initial_cmds
-                .iter()
-                .filter(|c| matches!(c, BattleCommand::Attack(_)))
-                .count();
-            assert_eq!(
-                initial_attack_count, 2,
-                "both moves should be available before locking"
-            );
+            for move_slot in [0, 1] {
+                assert!(
+                    initial_cmds.iter().any(
+                        |c| matches!(c, BattleCommand::Attack(a) if a.move_slot == move_slot)
+                    ),
+                    "move slot {move_slot} should be available before locking"
+                );
+            }
 
             // After using Tackle (move 0): only Tackle should remain selectable.
             let state_after = extract_battle_state(run_single_turn(
@@ -51390,6 +51390,95 @@ mod fake_out_selectability {
             "Fake Out must be unselectable from turn 2"
         );
         assert!(offers_move_slot(&state, 1), "other moves stay selectable");
+    }
+
+    #[test]
+    fn transformation_commands_follow_regulation_and_remaining_resource() {
+        let p1_team = "Snorlax\nLevel: 50\nTera Type: Ghost\n- Tackle";
+        let p2_team = "Shuckle\nLevel: 50\n- Splash";
+        let mut preview = crate::simulator::team_preview_state_from_team_strings(
+            p1_team,
+            p2_team,
+            pokemon_dex(),
+            move_dex(),
+            1,
+            1,
+            true,
+        );
+        preview.mechanics = crate::state::battle::BattleMechanics {
+            tera_enabled: true,
+            mega_enabled: false,
+        };
+        let pv = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        });
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::TeamPreviewState(preview),
+            &pv,
+            &pv,
+            move_dex(),
+            pokemon_dex(),
+            false,
+            1,
+            None,
+        );
+        let mut state = outcomes
+            .into_iter()
+            .find_map(|(s, _, _)| match s {
+                MatchState::BattleState(bs) => Some(bs),
+                _ => None,
+            })
+            .expect("preview resolution yields a battle state");
+
+        assert!(state.p1_has_tera);
+        assert!(!state.p1_has_mega);
+        let commands = crate::simulator::get_possible_commands_for_active_slot(
+            &state,
+            Player::P1,
+            0,
+            move_dex(),
+            pokemon_dex(),
+        );
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                BattleCommand::Attack(AttackCommand {
+                    terastallize: true,
+                    ..
+                })
+            )),
+            "an unspent, regulation-enabled Tera resource must produce Tera commands"
+        );
+        assert!(
+            commands.iter().all(|command| !matches!(
+                command,
+                BattleCommand::Attack(AttackCommand {
+                    mega_evolve: true,
+                    ..
+                })
+            )),
+            "a regulation-disabled Mega resource must not produce Mega commands"
+        );
+
+        state.p1_has_tera = false;
+        let commands = crate::simulator::get_possible_commands_for_active_slot(
+            &state,
+            Player::P1,
+            0,
+            move_dex(),
+            pokemon_dex(),
+        );
+        assert!(
+            commands.iter().all(|command| !matches!(
+                command,
+                BattleCommand::Attack(AttackCommand {
+                    terastallize: true,
+                    ..
+                })
+            )),
+            "a spent Tera resource must not produce Tera commands"
+        );
     }
 }
 

@@ -57,6 +57,8 @@ export default function FormatsPage() {
               broughtPokemon: 3,
               bannedItems: [],
               forceMaxIvs: true,
+              teraEnabled: true,
+              megaEnabled: true,
               favorite: false,
             }}
             onSave={save}
@@ -141,6 +143,15 @@ function FormatCard({
           : `${format.bannedItems.length} item(s) banned`}
         {' · '}
         {format.forceMaxIvs ? 'Max IVs assumed' : 'IVs unknown'}
+      </p>
+      <p className="mt-1 text-xs text-ink-muted">
+        {format.teraEnabled && format.megaEnabled
+          ? 'Tera + Mega'
+          : format.teraEnabled
+            ? 'Tera only'
+            : format.megaEnabled
+              ? 'Mega only'
+              : 'No transformation mechanic'}
       </p>
     </div>
   )
@@ -232,6 +243,27 @@ function FormatEditor({
         />
         <span>Assume max IVs (31)</span>
       </label>
+
+      <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={draft.teraEnabled}
+            onChange={(e) => setDraft({ ...draft, teraEnabled: e.target.checked })}
+            className="h-4 w-4 rounded border-subtle"
+          />
+          <span>Allow Terastallization</span>
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={draft.megaEnabled}
+            onChange={(e) => setDraft({ ...draft, megaEnabled: e.target.checked })}
+            className="h-4 w-4 rounded border-subtle"
+          />
+          <span>Allow Mega Evolution</span>
+        </label>
+      </div>
 
       <div className="mb-2">
         <input

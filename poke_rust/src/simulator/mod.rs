@@ -7,9 +7,9 @@ use crate::information::information::{
 };
 use crate::information::unknowns::PokemonHP;
 use crate::state::battle::{
-    Action, AttackCommand, BattleCommand, BattleState, DoubleKo, FieldSlot, MatchState, MegaAction,
-    MoveAction, Player, PlayerCommand, SwitchAction, SwitchCommand, TeamPreviewCommand,
-    TeamPreviewState, TeraAction,
+    Action, AttackCommand, BattleCommand, BattleMechanics, BattleState, DoubleKo, FieldSlot,
+    MatchState, MegaAction, MoveAction, Player, PlayerCommand, SwitchAction, SwitchCommand,
+    TeamPreviewCommand, TeamPreviewState, TeraAction,
 };
 use crate::state::dex_data::{
     MoveCategory, MoveData, MoveFlag, MoveTarget, PokemonData, PokemonType, SelfDestructType,
@@ -8932,6 +8932,7 @@ pub fn team_preview_state_from_team_strings(
     TeamPreviewState {
         active_per_side,
         brought_per_side,
+        mechanics: BattleMechanics::default(),
         p1_mons,
         p2_mons,
     }
@@ -9283,7 +9284,9 @@ fn generate_commands_for_active(
         return cmds;
     }
 
-    let can_tera = !has_tera && !mon.is_tera;
+    // `p{1,2}_has_tera` is a remaining-resource flag: it starts true when the
+    // regulation permits Terastallization and becomes false after it is spent.
+    let can_tera = has_tera && !mon.is_tera;
     let can_mega = has_mega && mon.has_mega_form && {
         mon.mega_species
             .as_ref()
@@ -11933,10 +11936,10 @@ fn battle_state_from_preview_branching(
         turn_number: 0,
         turn_started: false,
         turn_ended: false,
-        p1_has_tera: true,
-        p2_has_tera: true,
-        p1_has_mega: true,
-        p2_has_mega: true,
+        p1_has_tera: preview.mechanics.tera_enabled,
+        p2_has_tera: preview.mechanics.tera_enabled,
+        p1_has_mega: preview.mechanics.mega_enabled,
+        p2_has_mega: preview.mechanics.mega_enabled,
         weather: None,
         weather_turns: None,
         pseudo_weathers: vec![],

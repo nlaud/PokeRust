@@ -16112,6 +16112,7 @@ fn test_team_preview_switch_updates_hp_and_level() {
     let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
         active_per_side: 1,
         brought_per_side: 3,
+        mechanics: crate::state::battle::BattleMechanics::default(),
         p1_mons: vec![],
         p2_mons: vec![p2_garchomp, p2_snorlax],
     });
@@ -16175,6 +16176,7 @@ fn test_team_preview_simultaneous_switch_two_leads() {
     let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
         active_per_side: 2,
         brought_per_side: 3,
+        mechanics: crate::state::battle::BattleMechanics::default(),
         p1_mons: vec![],
         p2_mons: vec![p2_garchomp, p2_snorlax, p2_charizard],
     });
@@ -18486,6 +18488,7 @@ mod information_mode_tests {
         let preview = UnknownTeamPreviewState {
             active_per_side: 1,
             brought_per_side: 4,
+            mechanics: crate::state::battle::BattleMechanics::default(),
             p1_mons: vec![unknown_mon_species(Species::Snorlax)],
             p2_mons,
         };
@@ -18549,6 +18552,7 @@ mod information_mode_tests {
         let preview = UnknownTeamPreviewState {
             active_per_side: 1,
             brought_per_side: 3,
+            mechanics: crate::state::battle::BattleMechanics::default(),
             p1_mons: vec![unknown_mon_species(Species::Snorlax)],
             p2_mons,
         };
@@ -18614,6 +18618,7 @@ mod information_mode_tests {
         let preview = UnknownTeamPreviewState {
             active_per_side: 1,
             brought_per_side: 3,
+            mechanics: crate::state::battle::BattleMechanics::default(),
             p1_mons: vec![unknown_mon_species(Species::Snorlax)],
             p2_mons,
         };

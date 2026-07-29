@@ -554,6 +554,12 @@ pub struct CreateBattleRequest {
     /// Champions competitive default). See `InferenceConfig::force_max_ivs`.
     #[serde(default = "default_true")]
     pub force_max_ivs: bool,
+    /// Whether the selected regulation permits each once-per-battle mechanic.
+    /// Both default to true for older clients and saved formats.
+    #[serde(default = "default_true")]
+    pub tera_enabled: bool,
+    #[serde(default = "default_true")]
+    pub mega_enabled: bool,
     #[serde(default = "default_damage_rolls")]
     pub damage_rolls: u8,
     /// `"closedSheet"` (default) | `"perfect"` | `"openSheet"` | `"openSheetNatures"`.
@@ -665,6 +671,10 @@ pub struct CreateTrackerRequest {
     pub stat_points: bool,
     #[serde(default = "default_true")]
     pub force_max_ivs: bool,
+    #[serde(default = "default_true")]
+    pub tera_enabled: bool,
+    #[serde(default = "default_true")]
+    pub mega_enabled: bool,
     /// `"closedSheet"` (default) | `"openSheet"` | `"openSheetNatures"`.
     /// `"perfect"` is rejected — Perfect Information has no meaning in tracker
     /// mode (there's no second simulated team to have perfect knowledge of).

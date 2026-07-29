@@ -448,10 +448,31 @@ impl std::fmt::Display for BattleState {
     }
 }
 
+/// Once-per-battle mechanics permitted by the selected regulation.
+///
+/// `BattleState::p{1,2}_has_{tera,mega}` then tracks whether each permitted
+/// resource remains unused. Keeping permission at team preview avoids
+/// re-enabling a banned mechanic when the preview transitions into battle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BattleMechanics {
+    pub tera_enabled: bool,
+    pub mega_enabled: bool,
+}
+
+impl Default for BattleMechanics {
+    fn default() -> Self {
+        Self {
+            tera_enabled: true,
+            mega_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TeamPreviewState {
     pub active_per_side: u8,
     pub brought_per_side: u8,
+    pub mechanics: BattleMechanics,
     pub p1_mons: Vec<PokemonState>,
     pub p2_mons: Vec<PokemonState>,
 }

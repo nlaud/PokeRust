@@ -343,7 +343,7 @@ fn render_top_level_event(
 }
 
 fn switch_line(sw: &SwitchState) -> Result<String, Unsupported> {
-    let line = format!(
+    let mut line = format!(
         "{} switch {} {} {}",
         slot_token(sw.slot),
         species_word(&sw.species),
@@ -354,6 +354,9 @@ fn switch_line(sw: &SwitchState) -> Result<String, Unsupported> {
             .transpose()?
             .unwrap_or("healthy")
     );
+    if let Some(tera_type) = &sw.tera_type {
+        let _ = write!(line, " tera-{}", type_word(tera_type));
+    }
     Ok(line)
 }
 
@@ -517,18 +520,7 @@ fn render_move_qualifier(
             slot_token(*slot),
             species_word(actual_species)
         )),
-        EventKind::Switch(switch) => Ok(format!(
-            "{} switch {} {} {}",
-            slot_token(switch.slot),
-            species_word(&switch.species),
-            hp_token(&switch.hp),
-            switch
-                .status
-                .as_ref()
-                .map(status_word)
-                .transpose()?
-                .unwrap_or("healthy")
-        )),
+        EventKind::Switch(switch) => switch_line(switch),
         EventKind::HitCount { target, hits } => Ok(format!("{} {hits}hits", slot_token(*target))),
         EventKind::DamageDealt { target, new_hp, .. } => Ok(format!(
             "{} damage {}",

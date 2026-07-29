@@ -111,6 +111,8 @@ export default function TrackerSetupPanel() {
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
       forceMaxIvs: format.forceMaxIvs,
+      teraEnabled: format.teraEnabled,
+      megaEnabled: format.megaEnabled,
       informationMode,
       legalItems: legalItemsFor(format),
     })

@@ -24,7 +24,7 @@ use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::meta::MetaFormat;
 use poke_rust::simulator;
-use poke_rust::state::battle::Player;
+use poke_rust::state::battle::{BattleMechanics, Player};
 
 use crate::dto::*;
 use crate::session::{self, BattleSession, Dexes, MetaDexes, SessionConfig};
@@ -189,7 +189,7 @@ pub async fn create_battle(
         Err(msg) => return unprocessable(msg),
     };
 
-    let preview = simulator::team_preview_state_from_team_strings(
+    let mut preview = simulator::team_preview_state_from_team_strings(
         &p1_team,
         &p2_team,
         &app.dexes.pokemon_dex,
@@ -198,6 +198,10 @@ pub async fn create_battle(
         req.brought_per_side,
         req.stat_points,
     );
+    preview.mechanics = BattleMechanics {
+        tera_enabled: req.tera_enabled,
+        mega_enabled: req.mega_enabled,
+    };
 
     for (label, mons) in [("p1Team", &preview.p1_mons), ("p2Team", &preview.p2_mons)] {
         if mons.is_empty() {
@@ -252,57 +256,64 @@ pub async fn create_battle(
                 learnset_dex: app.dexes.learnset_dex.clone(),
                 ..InferenceConfig::default()
             };
-            let (belief_p1, belief_p2) = if information_mode == InformationMode::ClosedTeamSheet {
-                let belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                    Player::P1,
-                    &preview.p1_mons,
-                    &preview.p2_mons,
-                    &app.dexes.pokemon_dex,
-                    req.active_per_side,
-                    req.brought_per_side,
-                    50,
-                    req.force_max_ivs,
-                );
-                // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
-                // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
-                let belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                    Player::P2,
-                    &preview.p2_mons,
-                    &preview.p1_mons,
-                    &app.dexes.pokemon_dex,
-                    req.active_per_side,
-                    req.brought_per_side,
-                    50,
-                    req.force_max_ivs,
-                );
-                (belief_p1, belief_p2)
-            } else {
-                let belief_p1 = UnknownMatchState::team_preview_open_sheet_from_perspective(
-                    Player::P1,
-                    &preview.p1_mons,
-                    &preview.p2_mons,
-                    &app.dexes.pokemon_dex,
-                    req.active_per_side,
-                    req.brought_per_side,
-                    50,
-                    information_mode,
-                    req.force_max_ivs,
-                );
-                // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
-                // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
-                let belief_p2 = UnknownMatchState::team_preview_open_sheet_from_perspective(
-                    Player::P2,
-                    &preview.p2_mons,
-                    &preview.p1_mons,
-                    &app.dexes.pokemon_dex,
-                    req.active_per_side,
-                    req.brought_per_side,
-                    50,
-                    information_mode,
-                    req.force_max_ivs,
-                );
-                (belief_p1, belief_p2)
-            };
+            let (mut belief_p1, mut belief_p2) =
+                if information_mode == InformationMode::ClosedTeamSheet {
+                    let belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                        Player::P1,
+                        &preview.p1_mons,
+                        &preview.p2_mons,
+                        &app.dexes.pokemon_dex,
+                        req.active_per_side,
+                        req.brought_per_side,
+                        50,
+                        req.force_max_ivs,
+                    );
+                    // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
+                    // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
+                    let belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                        Player::P2,
+                        &preview.p2_mons,
+                        &preview.p1_mons,
+                        &app.dexes.pokemon_dex,
+                        req.active_per_side,
+                        req.brought_per_side,
+                        50,
+                        req.force_max_ivs,
+                    );
+                    (belief_p1, belief_p2)
+                } else {
+                    let belief_p1 = UnknownMatchState::team_preview_open_sheet_from_perspective(
+                        Player::P1,
+                        &preview.p1_mons,
+                        &preview.p2_mons,
+                        &app.dexes.pokemon_dex,
+                        req.active_per_side,
+                        req.brought_per_side,
+                        50,
+                        information_mode,
+                        req.force_max_ivs,
+                    );
+                    // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
+                    // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
+                    let belief_p2 = UnknownMatchState::team_preview_open_sheet_from_perspective(
+                        Player::P2,
+                        &preview.p2_mons,
+                        &preview.p1_mons,
+                        &app.dexes.pokemon_dex,
+                        req.active_per_side,
+                        req.brought_per_side,
+                        50,
+                        information_mode,
+                        req.force_max_ivs,
+                    );
+                    (belief_p1, belief_p2)
+                };
+            for belief in [&mut belief_p1, &mut belief_p2] {
+                let UnknownMatchState::TeamPreview(fog_preview) = belief else {
+                    unreachable!("team-preview belief constructor returned a battle state");
+                };
+                fog_preview.mechanics = preview.mechanics;
+            }
             (Some(belief_p1), Some(belief_p2), Some(config))
         };
 
@@ -567,10 +578,7 @@ pub async fn run_benchmark(
         // indistinguishable from a dropped connection.
         let reported = match outcome {
             Ok(rows) => event("result", into_result(rows)),
-            Err(message) => event(
-                "failed",
-                BenchmarkSweepErrorDto { sweep, message },
-            ),
+            Err(message) => event("failed", BenchmarkSweepErrorDto { sweep, message }),
         };
         let _ = tx.blocking_send(reported);
     }
@@ -646,7 +654,9 @@ pub async fn run_benchmark(
     tokio::spawn(async move {
         let _ = sweeps.await;
         running.store(false, Ordering::SeqCst);
-        let _ = done_tx.send(Event::default().event("done").data("{}")).await;
+        let _ = done_tx
+            .send(Event::default().event("done").data("{}"))
+            .await;
     });
 
     let stream = ReceiverStream::new(rx).map(Ok);

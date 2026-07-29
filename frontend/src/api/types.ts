@@ -271,6 +271,8 @@ export interface CreateBattleRequest {
   /** Pin all opponent IVs to 31 for the fog-of-war inference engine (Champions
    * competitive default). Mirrors `InferenceConfig::force_max_ivs` in the Rust engine. */
   forceMaxIvs?: boolean
+  teraEnabled?: boolean
+  megaEnabled?: boolean
   damageRolls?: number
   informationMode?: InformationMode
   /** The selected format's full item catalog minus its banned items (slugs from
@@ -420,6 +422,8 @@ export interface CreateTrackerRequest {
   broughtPerSide: number
   statPoints?: boolean
   forceMaxIvs?: boolean
+  teraEnabled?: boolean
+  megaEnabled?: boolean
   /** `'closedSheet'` (default) | `'openSheet'` | `'openSheetNatures'` — no
    * `'perfect'` option here, it has no meaning without a simulated opponent. */
   informationMode?: 'closedSheet' | 'openSheet' | 'openSheetNatures'

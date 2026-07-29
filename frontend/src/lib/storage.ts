@@ -21,6 +21,9 @@ export interface StoredFormat {
   /** Pin all opponent IVs to 31 for the fog-of-war inference engine (Champions
    * competitive default). Mirrors `InferenceConfig::force_max_ivs` in the Rust engine. */
   forceMaxIvs: boolean
+  /** Once-per-battle mechanics permitted by this regulation. */
+  teraEnabled: boolean
+  megaEnabled: boolean
   favorite: boolean
 }
 
@@ -59,6 +62,8 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     broughtPokemon: 4,
     bannedItems: [],
     forceMaxIvs: true,
+    teraEnabled: true,
+    megaEnabled: true,
     favorite: false,
   },
   {
@@ -69,6 +74,8 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     broughtPokemon: 3,
     bannedItems: [],
     forceMaxIvs: true,
+    teraEnabled: true,
+    megaEnabled: true,
     favorite: false,
   },
 ]
@@ -84,6 +91,8 @@ export function loadFormats(): StoredFormat[] {
     ...f,
     favorite: f.favorite ?? false,
     forceMaxIvs: f.forceMaxIvs ?? true,
+    teraEnabled: f.teraEnabled ?? true,
+    megaEnabled: f.megaEnabled ?? true,
   }))
 }
 

@@ -2,7 +2,7 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::state::battle::{FieldSlot, Player};
+use crate::state::battle::{BattleMechanics, FieldSlot, Player};
 use crate::state::dex_data::{
     PokemonBoostTable, PokemonData, PokemonStat, PokemonType, PseudoWeather, SelfSwitchType,
     SideCondition, SlotCondition, Status, Terrain, Weather,
@@ -476,6 +476,7 @@ pub enum Statement {
 pub struct UnknownTeamPreviewState {
     pub active_per_side: u8,
     pub brought_per_side: u8,
+    pub mechanics: BattleMechanics,
     pub p1_mons: Vec<UnknownPokemonState>,
     pub p2_mons: Vec<UnknownPokemonState>,
 }
@@ -609,10 +610,10 @@ impl UnknownTeamPreviewState {
             turn_started: false,
             turn_ended: false,
 
-            p1_has_tera: true,
-            p2_has_tera: true,
-            p1_has_mega: true,
-            p2_has_mega: true,
+            p1_has_tera: self.mechanics.tera_enabled,
+            p2_has_tera: self.mechanics.tera_enabled,
+            p1_has_mega: self.mechanics.mega_enabled,
+            p2_has_mega: self.mechanics.mega_enabled,
 
             weather: None,
             weather_turns: None,
@@ -1199,6 +1200,7 @@ impl UnknownMatchState {
         UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
             active_per_side,
             brought_per_side,
+            mechanics: BattleMechanics::default(),
             p1_mons,
             p2_mons,
         })
@@ -1249,6 +1251,7 @@ impl UnknownMatchState {
         UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
             active_per_side,
             brought_per_side,
+            mechanics: BattleMechanics::default(),
             p1_mons,
             p2_mons,
         })
@@ -1306,6 +1309,7 @@ impl UnknownMatchState {
         UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
             active_per_side,
             brought_per_side,
+            mechanics: BattleMechanics::default(),
             p1_mons,
             p2_mons,
         })

@@ -79,6 +79,8 @@ export default function SetupPanel() {
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
       forceMaxIvs: format.forceMaxIvs,
+      teraEnabled: format.teraEnabled,
+      megaEnabled: format.megaEnabled,
       damageRolls: 16,
       informationMode,
       legalItems: legalItemsFor(format),

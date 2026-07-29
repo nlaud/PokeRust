@@ -989,14 +989,22 @@ fn parse_line(
         // This matters for a previously-damaged/statused Pokémon returning from
         // the bench; `leads` are always fresh and need neither payload.
         for tok in &tokens[3..] {
+            let normalized = norm(tok);
             if let Some(hp_tok) = parse_hp_token(tok) {
                 switch.hp = match hp_tok {
                     HpToken::Percent(p) => PokemonHP::Percent(p),
                     HpToken::Number(n) => PokemonHP::Number(n),
                 };
-            } else if matches!(norm(tok).as_str(), "healthy" | "nostatus") {
+            } else if let Some(type_word) = normalized.strip_prefix("tera") {
+                switch.tera_type = Some(parse_type_word(type_word).ok_or_else(|| {
+                    err(
+                        line_no,
+                        format!("unrecognized Tera type observation '{tok}'"),
+                    )
+                })?);
+            } else if matches!(normalized.as_str(), "healthy" | "nostatus") {
                 switch.status = None;
-            } else if let Some(status) = status_from_word(&norm(tok)) {
+            } else if let Some(status) = status_from_word(&normalized) {
                 switch.status = Some(status);
             } else {
                 return Err(err(
@@ -2344,7 +2352,7 @@ mod tests {
     fn switch_and_ability_and_item_lines() {
         let belief = test_belief();
         let lines = parse_tracker_text(
-            "o1 switch garchomp 100%\no1 intimidate\np1 leftovers",
+            "o1 switch garchomp 100% tera-Ground\no1 intimidate\np1 leftovers",
             &belief,
             move_dex(),
             pokemon_dex(),
@@ -2354,7 +2362,10 @@ mod tests {
         assert!(matches!(
             &lines[0],
             TrackerLine::Event(InformationEvent {
-                kind: EventKind::Switch(_),
+                kind: EventKind::Switch(SwitchState {
+                    tera_type: Some(PokemonType::Ground),
+                    ..
+                }),
                 ..
             })
         ));

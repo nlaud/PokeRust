@@ -40,11 +40,13 @@ use uuid::Uuid;
 
 use poke_rust::data::item::Item;
 use poke_rust::data::species::Species;
-use poke_rust::information::inference::{InferenceConfig, apply_information, apply_structural_preview};
+use poke_rust::information::inference::{
+    InferenceConfig, apply_information, apply_structural_preview,
+};
 use poke_rust::information::information::{EventKind, InformationEvent};
 use poke_rust::information::unknowns::{InformationMode, UnknownBattleState, UnknownMatchState};
 use poke_rust::simulator;
-use poke_rust::state::battle::{FieldSlot, Player};
+use poke_rust::state::battle::{BattleMechanics, FieldSlot, Player};
 use poke_rust::user::{humanize_identifier, move_name};
 
 use crate::dto::*;
@@ -52,7 +54,9 @@ use crate::mapping;
 use crate::routes::AppState;
 use crate::session::Dexes;
 use crate::tracker_effects::augment_turn;
-use crate::tracker_parse::{ParseError, TrackerLine, fold_leads_and_entry_abilities, parse_tracker_text};
+use crate::tracker_parse::{
+    ParseError, TrackerLine, fold_leads_and_entry_abilities, parse_tracker_text,
+};
 
 pub struct TrackerSession {
     pub belief: UnknownBattleState,
@@ -91,7 +95,9 @@ pub(crate) enum SubmitTrackerError {
 }
 
 fn lock(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, TrackerSession>> {
-    app.tracker_sessions.lock().unwrap_or_else(|e| e.into_inner())
+    app.tracker_sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -179,7 +185,7 @@ pub async fn create_tracker(
     };
 
     let opponent_text = normalize_opponent_text(&req.opponent);
-    let preview = simulator::team_preview_state_from_team_strings(
+    let mut preview = simulator::team_preview_state_from_team_strings(
         &req.my_team,
         &opponent_text,
         &app.dexes.pokemon_dex,
@@ -188,6 +194,10 @@ pub async fn create_tracker(
         req.brought_per_side,
         req.stat_points,
     );
+    preview.mechanics = BattleMechanics {
+        tera_enabled: req.tera_enabled,
+        mega_enabled: req.mega_enabled,
+    };
     for (label, mons) in [("myTeam", &preview.p1_mons), ("opponent", &preview.p2_mons)] {
         if mons.is_empty() {
             return unprocessable(format!("{label}: no valid Pokemon parsed"));
@@ -219,7 +229,7 @@ pub async fn create_tracker(
         ..InferenceConfig::default()
     };
 
-    let team_preview_belief = if information_mode == InformationMode::ClosedTeamSheet {
+    let mut team_preview_belief = if information_mode == InformationMode::ClosedTeamSheet {
         UnknownMatchState::team_preview_closed_sheet_from_perspective(
             Player::P1,
             &preview.p1_mons,
@@ -243,9 +253,10 @@ pub async fn create_tracker(
             req.force_max_ivs,
         )
     };
-    let UnknownMatchState::TeamPreview(team_preview_belief) = team_preview_belief else {
+    let UnknownMatchState::TeamPreview(team_preview_belief) = &mut team_preview_belief else {
         return internal_error("team preview belief constructor returned the wrong variant");
     };
+    team_preview_belief.mechanics = preview.mechanics;
 
     // Nobody is sent out yet on EITHER side — leads are conveyed by the first
     // `leads p … o …` tracker-text event, not chosen up front (see this
@@ -261,8 +272,7 @@ pub async fn create_tracker(
     // derives this from that roster. Tracker setup deliberately passes the
     // full six-mon sheet so leads can be entered later, so restore the
     // format's actual bench size explicitly.
-    battle_belief.back_mons_per_side =
-        req.brought_per_side.saturating_sub(req.active_per_side);
+    battle_belief.back_mons_per_side = req.brought_per_side.saturating_sub(req.active_per_side);
 
     let mut roster_species: Vec<Species> = Vec::new();
     for mon in preview.p1_mons.iter().chain(preview.p2_mons.iter()) {
@@ -385,9 +395,8 @@ fn validate_turn_completeness(
     });
     let replacement_batch = !has_regular_action
         && [Player::P1, Player::P2].into_iter().any(|player| {
-            (0..active_per_side).any(|slot_index| {
-                slot_needs_replacement(belief, FieldSlot { player, slot_index })
-            })
+            (0..active_per_side)
+                .any(|slot_index| slot_needs_replacement(belief, FieldSlot { player, slot_index }))
         });
     let battle_ended = [Player::P1, Player::P2]
         .into_iter()
@@ -454,13 +463,20 @@ fn side_has_no_healthy_reserve(belief: &UnknownBattleState, player: Player) -> b
 /// belief — no in-flight `events` to cross-check, unlike the turn-validation
 /// caller above) and the bench holds no possible survivor either. Used by
 /// `mapping::battle_view_from_belief` to decide `PhaseDto::GameOver`.
-pub(crate) fn side_eliminated(belief: &UnknownBattleState, player: Player, active_per_side: u8) -> bool {
+pub(crate) fn side_eliminated(
+    belief: &UnknownBattleState,
+    player: Player,
+    active_per_side: u8,
+) -> bool {
     let active = match player {
         Player::P1 => &belief.p1_active_mons,
         Player::P2 => &belief.p2_active_mons,
     };
-    let all_active_fainted = (0..active_per_side)
-        .all(|slot_index| active.get(slot_index as usize).is_some_and(|mon| mon.fainted));
+    let all_active_fainted = (0..active_per_side).all(|slot_index| {
+        active
+            .get(slot_index as usize)
+            .is_some_and(|mon| mon.fainted)
+    });
     all_active_fainted && side_has_no_healthy_reserve(belief, player)
 }
 
@@ -667,7 +683,10 @@ fn apply_turns_from(
         });
     }
 
-    Ok(AppliedTurns { belief: working, log })
+    Ok(AppliedTurns {
+        belief: working,
+        log,
+    })
 }
 
 /// Apply a tracker-text request through the exact production pipeline. Work is
@@ -741,8 +760,12 @@ pub async fn preview_tracker_events(
     let events = fold_leads_and_entry_abilities(events);
 
     let mut working = session.belief.clone();
-    let events: Vec<InformationEvent> =
-        augment_turn(events, &working, &app.dexes.move_dex, &app.dexes.pokemon_dex);
+    let events: Vec<InformationEvent> = augment_turn(
+        events,
+        &working,
+        &app.dexes.move_dex,
+        &app.dexes.pokemon_dex,
+    );
     apply_structural_preview(
         &mut working,
         &events,
@@ -788,7 +811,10 @@ pub async fn rebuild_tracker_history(
     };
 
     let applied = if req.text.trim().is_empty() {
-        AppliedTurns { belief: session.initial_belief.clone(), log: Vec::new() }
+        AppliedTurns {
+            belief: session.initial_belief.clone(),
+            log: Vec::new(),
+        }
     } else {
         match apply_turns_from(
             &session.initial_belief,
@@ -808,7 +834,11 @@ pub async fn rebuild_tracker_history(
     session.belief = applied.belief;
     session.turn_count = applied.log.len() as u16;
     session.log = applied.log;
-    session.script = if req.text.trim().is_empty() { Vec::new() } else { vec![req.text] };
+    session.script = if req.text.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![req.text]
+    };
 
     let view = mapping::battle_view_from_belief(
         &session.belief,
@@ -831,7 +861,10 @@ pub async fn rebuild_tracker_history(
 /// Held items are deliberately NOT returned here — they aren't
 /// species-constrained, and the frontend already has the full item catalog
 /// (`frontend/src/lib/items.ts`).
-pub async fn get_tracker_completions(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn get_tracker_completions(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
     let sessions = lock(&app);
     let Some(session) = sessions.get(&id) else {
         return not_found();
@@ -865,7 +898,12 @@ pub async fn get_tracker_completions(State(app): State<AppState>, Path(id): Path
     moves.sort();
     abilities.sort();
 
-    Json(TrackerCompletionsDto { species, moves, abilities }).into_response()
+    Json(TrackerCompletionsDto {
+        species,
+        moves,
+        abilities,
+    })
+    .into_response()
 }
 
 #[cfg(test)]
@@ -880,7 +918,9 @@ mod tests {
 
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     fn pokemon_dex() -> &'static HashMap<Species, PokemonData> {
-        POKEMON_DEX.get_or_init(|| poke_rust::state::dex_data::parse_pokemon_dex("../pokemon_info/showdownDex.txt"))
+        POKEMON_DEX.get_or_init(|| {
+            poke_rust::state::dex_data::parse_pokemon_dex("../pokemon_info/showdownDex.txt")
+        })
     }
 
     static DEXES: OnceLock<Dexes> = OnceLock::new();
@@ -971,13 +1011,22 @@ mod tests {
     }
 
     fn p1() -> FieldSlot {
-        FieldSlot { player: Player::P1, slot_index: 0 }
+        FieldSlot {
+            player: Player::P1,
+            slot_index: 0,
+        }
     }
     fn o1() -> FieldSlot {
-        FieldSlot { player: Player::P2, slot_index: 0 }
+        FieldSlot {
+            player: Player::P2,
+            slot_index: 0,
+        }
     }
     fn leaf(kind: EventKind) -> InformationEvent {
-        InformationEvent { kind, reactions: Vec::new() }
+        InformationEvent {
+            kind,
+            reactions: Vec::new(),
+        }
     }
 
     #[test]
@@ -1103,7 +1152,9 @@ mod tests {
     fn does_not_skip_fainted_slot_with_a_healthy_reserve_available() {
         let mut belief = belief_1v1();
         belief.p2_active_mons[0].fainted = true;
-        belief.p2_known_back_mons.push(make_active(Species::Tyranitar, false));
+        belief
+            .p2_known_back_mons
+            .push(make_active(Species::Tyranitar, false));
         let events = vec![leaf(EventKind::MoveUsed {
             user: p1(),
             move_used: PokemonMove::Protect,
@@ -1244,7 +1295,11 @@ mod tests {
             }
             assert_eq!(session.turn_count, 0, "seed={seed}");
             assert!(session.log.is_empty(), "seed={seed}");
-            assert_eq!(format!("{:?}", session.belief), belief_before, "seed={seed}");
+            assert_eq!(
+                format!("{:?}", session.belief),
+                belief_before,
+                "seed={seed}"
+            );
         }
     }
 
@@ -1255,7 +1310,8 @@ mod tests {
     /// rather than just a different (and possibly diverging) code path.
     #[test]
     fn rebuild_from_initial_belief_reproduces_the_equivalent_append_sequence() {
-        let text = "p1 protect\no1 protect\nendofturn\np1 thunderbolt o1 62%\no1 protect\nendofturn";
+        let text =
+            "p1 protect\no1 protect\nendofturn\np1 thunderbolt o1 62%\no1 protect\nendofturn";
 
         let mut appended = tracker_session_1v1();
         apply_tracker_text(&mut appended, text, dexes()).expect("append path should succeed");
@@ -1270,7 +1326,10 @@ mod tests {
         )
         .expect("rebuild path should succeed");
 
-        assert_eq!(format!("{:?}", appended.belief), format!("{:?}", rebuilt.belief));
+        assert_eq!(
+            format!("{:?}", appended.belief),
+            format!("{:?}", rebuilt.belief)
+        );
         assert_eq!(appended.log.len(), rebuilt.log.len());
         assert_eq!(appended.turn_count, rebuilt.log.len() as u16);
     }
@@ -1328,7 +1387,10 @@ mod tests {
         // The same turn, completed for real through the full pipeline.
         let complete_events = vec![
             move_used.clone(),
-            leaf(EventKind::Cant { slot: o1(), reason: CantReason::Other }),
+            leaf(EventKind::Cant {
+                slot: o1(),
+                reason: CantReason::Other,
+            }),
             leaf(EventKind::EndOfTurn),
         ];
         let full_belief = match apply_information(
@@ -1344,7 +1406,10 @@ mod tests {
             other => panic!("expected Battle, got {other:?}"),
         };
 
-        assert_eq!(preview_belief.p2_active_mons[0].hp, full_belief.p2_active_mons[0].hp);
+        assert_eq!(
+            preview_belief.p2_active_mons[0].hp,
+            full_belief.p2_active_mons[0].hp
+        );
         assert!(
             preview_belief.p1_active_mons[0]
                 .known_moves
@@ -1352,8 +1417,7 @@ mod tests {
             "the preview should already have revealed the move Pass 1 applies directly"
         );
         assert_eq!(
-            preview_belief.p1_active_mons[0].known_moves,
-            full_belief.p1_active_mons[0].known_moves,
+            preview_belief.p1_active_mons[0].known_moves, full_belief.p1_active_mons[0].known_moves,
             "a fact Pass 1 confirms from a partial turn must never be contradicted by the full turn"
         );
     }
