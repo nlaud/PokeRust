@@ -55,6 +55,7 @@ use crate::information::inference::{
 use crate::information::subset_check::collect_true_state_subset_violations;
 use crate::information::unknowns::{
     PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+    is_illusion_capable_species,
 };
 use crate::meta::dex::{MetaDex, SpeciesMeta, StatPoints};
 use crate::meta::names::ALL_NATURES;
@@ -1689,21 +1690,24 @@ fn build_transformed(
 /// Decide which active slots are really this side's disguised Zoroark.
 ///
 /// **A side-level draw, not a per-slot coin flip.** `p*_unresolved_zoroark_count`
-/// means "exactly this many of the side's real roster members are an Illusion
-/// forme currently disguised somewhere". Flipping independently per slot would
-/// produce worlds with none or two, neither of which the belief allows.
+/// means "this many real Illusion formes are not pinned to a field location."
+/// They may be active under one of the live hypotheses, on the bench, or not
+/// among the brought Pokemon at all. Flipping independently per active slot
+/// would produce worlds with two copies of the same Zoroark; forcing exactly one
+/// active commitment would wrongly erase the bench/unbrought possibilities.
 ///
 /// Every candidate is weighted equally: the hypotheses are mirrored through all
 /// six inference passes, so any that survived is exactly as consistent with the
 /// observations as any other, and the usage cache has nothing to say about
-/// which slot a Zoroark chose to hide in.
+/// which slot a Zoroark chose to hide in. One synthetic off-field candidate per
+/// unresolved forme preserves the possibility that it is not currently active.
 fn choose_illusion_slots(
     actives: &[UnknownPokemonState],
     unresolved: u8,
     log: &mut DrawLog,
-) -> HashSet<usize> {
+) -> Vec<usize> {
     if unresolved == 0 {
-        return HashSet::new();
+        return Vec::new();
     }
     let candidates: Vec<usize> = actives
         .iter()
@@ -1711,16 +1715,15 @@ fn choose_illusion_slots(
         .filter(|(_, unk)| unk.possible_illusion_state.is_some())
         .map(|(i, _)| i)
         .collect();
-    if candidates.is_empty() {
-        // The Zoroark is on the bench, not the field. Nothing to commit — and
-        // nothing wrong, so no warning.
-        return HashSet::new();
-    }
-    let take = (unresolved as usize).min(candidates.len());
-    let weights = vec![1.0f64; candidates.len()];
+    let off_field = unresolved as usize;
+    let take = off_field.min(candidates.len() + off_field);
+    let weights = vec![1.0f64; candidates.len() + off_field];
     let (picked, probability) = sample_fixed_size_subset(&weights, take);
     log.observe(probability);
-    picked.into_iter().map(|i| candidates[i]).collect()
+    picked
+        .into_iter()
+        .filter_map(|i| candidates.get(i).copied())
+        .collect()
 }
 
 /// Finish an Illusion commitment once the whole roster exists.
@@ -1743,7 +1746,7 @@ fn apply_illusion_disguises(
     back: &mut Vec<PokemonState>,
     back_ids: &mut Vec<Option<u8>>,
     actives: &[UnknownPokemonState],
-    illusion_slots: &HashSet<usize>,
+    illusion_slots: &[usize],
     log: &mut DrawLog,
 ) {
     for &i in illusion_slots {
@@ -1841,7 +1844,35 @@ fn build_side(
         Player::P1 => belief.p1_unresolved_zoroark_count,
         Player::P2 => belief.p2_unresolved_zoroark_count,
     };
-    let illusion_slots = choose_illusion_slots(actives, unresolved_zoroark, log);
+    let roster_templates = match player {
+        Player::P1 => &belief.p1_roster_templates,
+        Player::P2 => &belief.p2_roster_templates,
+    };
+    let find_decoy_template = |shown: &UnknownPokemonState| {
+        let shown_species = known_species_of(shown);
+        let shown_id = known_mon_id(shown);
+        roster_templates.iter().find(|candidate| {
+            shown_id
+                .zip(known_mon_id(candidate))
+                .is_some_and(|(left, right)| left == right)
+                || shown_species
+                    .as_ref()
+                    .is_some_and(|species| known_species_of(candidate).as_ref() == Some(species))
+        })
+    };
+    let mut illusion_slots = choose_illusion_slots(actives, unresolved_zoroark, log);
+    illusion_slots.retain(|slot| {
+        let shown = &actives[*slot];
+        if find_decoy_template(shown).is_some() {
+            true
+        } else {
+            if let Some(decoy) = known_species_of(shown) {
+                log.warnings
+                    .push(DeterminizeWarning::IllusionUncommitted { decoy });
+            }
+            false
+        }
+    });
 
     let mut active = Vec::with_capacity(actives.len());
     let mut active_ids = Vec::with_capacity(actives.len());
@@ -1868,12 +1899,48 @@ fn build_side(
             cfg,
             log,
         )?);
-        active_ids.push(known_mon_id(unk));
+        active_ids.push(known_mon_id(entry));
     }
 
     let mut back = Vec::new();
     let mut back_ids = Vec::new();
+
+    // Committing an active hypothesis swaps two physical identities in the
+    // belief's unresolved representation: the active shown-species record is
+    // really Zoroark, while the roster's explicit Zoroark record is really the
+    // decoy that Illusion selected. Materialize that decoy from its pristine
+    // team-preview template and later omit the stale Zoroark bench record.
+    for &slot in &illusion_slots {
+        let shown = &actives[slot];
+        let template =
+            find_decoy_template(shown).expect("illusion slots were filtered to backed templates");
+        let mut decoy = template.clone();
+        decoy.possible_illusion_state = None;
+        back.push(build_one(
+            hidden,
+            usize::MAX,
+            &decoy,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            &mut used_items,
+            cfg,
+            log,
+        )?);
+        back_ids.push(known_mon_id(&decoy));
+    }
+
+    let active_illusion_committed = !illusion_slots.is_empty();
+    let stale_illusion_baseline = |unk: &UnknownPokemonState| {
+        active_illusion_committed
+            && known_species_of(unk).is_some_and(|species| {
+                is_illusion_capable_species(&species)
+            })
+    };
     for (i, unk) in known_back.iter().enumerate() {
+        if stale_illusion_baseline(unk) {
+            continue;
+        }
         back.push(build_one(
             hidden,
             known_start + i,
@@ -1894,16 +1961,29 @@ fn build_side(
         .saturating_sub(fainted.len())
         .saturating_sub(back.len());
 
-    let known_species: Vec<Species> = actives
+    let known_species: Vec<Species> = active
         .iter()
-        .chain(known_back.iter())
-        .filter_map(known_species_of)
+        .chain(back.iter())
+        .map(|mon| mon.species.clone())
         .collect();
-    for idx in select_bench_indices(possible_back, live_slots, &known_species, meta_dex, log) {
+    let eligible_possible: Vec<(usize, UnknownPokemonState)> = possible_back
+        .iter()
+        .enumerate()
+        .filter(|(_, unk)| !stale_illusion_baseline(unk))
+        .map(|(idx, unk)| (idx, unk.clone()))
+        .collect();
+    let eligible_entries: Vec<UnknownPokemonState> = eligible_possible
+        .iter()
+        .map(|(_, unk)| unk.clone())
+        .collect();
+    for eligible_idx in
+        select_bench_indices(&eligible_entries, live_slots, &known_species, meta_dex, log)
+    {
+        let (idx, unk) = &eligible_possible[eligible_idx];
         back.push(build_one(
             hidden,
-            possible_start + idx,
-            &possible_back[idx],
+            possible_start + *idx,
+            unk,
             meta_dex,
             pokemon_dex,
             move_dex,
@@ -1911,7 +1991,7 @@ fn build_side(
             cfg,
             log,
         )?);
-        back_ids.push(known_mon_id(&possible_back[idx]));
+        back_ids.push(known_mon_id(unk));
     }
 
     // Fainted Pokemon belong on the concrete bench. `build_mon_idx_map` skips
@@ -2100,13 +2180,25 @@ pub fn check_determinization(
     ] {
         // Active slots are positional, so they can be paired directly.
         for (slot, (unk, mon)) in actives.iter().zip(concrete_active.iter()).enumerate() {
+            let label = format!("{player:?} active slot {slot}");
+            let mut direct = Vec::new();
             check_one(
-                &format!("{player:?} active slot {slot}"),
+                &label,
                 unk,
                 mon,
                 pokemon_dex,
-                &mut problems,
+                &mut direct,
             );
+            if !direct.is_empty()
+                && let Some(hypothesis) = unk.possible_illusion_state.as_deref()
+            {
+                let mut alternate = Vec::new();
+                check_one(&label, hypothesis, mon, pokemon_dex, &mut alternate);
+                if alternate.is_empty() {
+                    continue;
+                }
+            }
+            problems.extend(direct);
         }
 
         // `mon_id` collisions would make `build_mon_idx_map` pair belief entries
@@ -2142,12 +2234,24 @@ pub fn check_determinization(
                 _ => None,
             })
             .collect();
-        let candidates: HashSet<Species> = known_back
+        let mut candidates: HashSet<Species> = known_back
             .iter()
             .chain(possible_back.iter())
             .chain(fainted.iter())
             .filter_map(known_species_of)
             .collect();
+        // When an active Illusion hypothesis is committed, the active primary
+        // is the real decoy on the bench. The unresolved belief represents that
+        // identity swap as "shown species active + explicit Zoroark back", so
+        // the decoy is offered by the active entry rather than a back bucket.
+        for (unk, mon) in actives.iter().zip(concrete_active.iter()) {
+            if unk.possible_illusion_state.is_some()
+                && known_species_of(unk).as_ref() != Some(&mon.species)
+                && let Some(decoy) = known_species_of(unk)
+            {
+                candidates.insert(decoy);
+            }
+        }
         for mon in concrete_back {
             if !candidates.contains(&mon.species) && !invented.contains(&mon.species) {
                 problems.push(format!(
@@ -2206,7 +2310,15 @@ fn check_one(
     // EVs and stats must be mutually consistent — the specific inconsistency
     // `materialize_pokemon` has, where hardcoded EVs sit beside an unrelated
     // stat override.
-    if let Some(data) = pokemon_dex.get(&mon.species) {
+    //
+    // S26: this relationship deliberately does not hold while Transformed.
+    // `species` and `stats[1..=5]` belong to the copy target, while EVs, IVs,
+    // nature, and `stats[0]` still belong to the transformer. Recomputing here
+    // would mix those two Pokemon and make this determinizer-specific checker
+    // repeat the false positive already carved out of `subset_check`.
+    if mon.pre_transform.is_none()
+        && let Some(data) = pokemon_dex.get(&mon.species)
+    {
         let recomputed =
             calc_stats_for_level(data.base_stats, mon.ivs, mon.evs, mon.level, &mon.nature);
         if recomputed != mon.stats {

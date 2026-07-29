@@ -597,10 +597,13 @@ that has no surviving pair for any stat it touches is excluded outright. The
 global EV range per stat is the union across all surviving natures.
 
 **Cross-stat EV-total tightening.** When `config.ev_total_cap` is set
-(510 by default for competitive play), each stat's ceiling is additionally
-capped at `cap − Σ(other stats' floors)` — this only ever lowers a ceiling,
-never raises a floor, so it's always sound, and gets tighter as more stats
-develop high confirmed minimums.
+(516 by default for Champions stat-point builds), each stat's ceiling is
+additionally capped at `cap − Σ(other stats' floors)` — this only ever lowers a
+ceiling, never raises a floor, so it is sound as long as the configured cap is a
+true upper bound, and gets tighter as more stats develop high confirmed
+minimums. Champions' 66 authoring points do not map to the familiar 510:
+`ev = max(0, 8p − 4)` charges the `−4` once per nonzero stat, so a fully-spent
+three-stat spread can reach `528 − 12 = 516`.
 
 **The stat-points EV lattice** (`EV_LATTICE`, 33 values: `0, 4, 12, 20, …, 252`)
 mirrors `scale_evs_for_stat_points`'s `ev = max(0, 8×points − 4)` mapping, used
@@ -816,7 +819,7 @@ Passed to `apply_information` to control inference behaviour:
 | `legal_items` | `None` | Optional item whitelist; a revealed item outside it panics. `None` = every item possible |
 | `allow_repeat_items` | `false` | `false`: each non-`None` item can appear on at most one teammate, and confirming it on one excludes it from the rest. `true`: no cross-teammate exclusion |
 | `learnset_dex` | `{}` | Per-species legal movesets; non-empty enables learnset-based Illusion narrowing |
-| `ev_total_cap` | `Some(510)` | Total EV budget used for Pass 5's cross-stat ceiling tightening; `None` disables it |
+| `ev_total_cap` | `Some(516)` | Upper bound used for Pass 5's cross-stat EV ceiling tightening; `None` disables it |
 
 ---
 

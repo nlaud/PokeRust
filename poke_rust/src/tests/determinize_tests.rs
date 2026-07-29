@@ -391,6 +391,13 @@ fn a_transformed_opponent_keeps_its_own_hp_and_can_revert() {
             }
         }
 
+        let check_problems = check_determinization(&world, &belief, pokemon_dex());
+        assert!(
+            check_problems.is_empty(),
+            "seed {seed}: the determinizer's own checker rejected a legal \
+             Transformed world: {:?}",
+            check_problems
+        );
         assert!(
             !world.warnings.iter().any(|w| matches!(
                 w,
@@ -459,24 +466,37 @@ fn an_unresolved_zoroark_becomes_a_self_consistent_disguise() {
     with_meta!(meta);
     let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 2);
 
-    // The active slot LOOKS like Garchomp; the hypothesis says it is really a
-    // Zoroark. The genuine Garchomp — the decoy — is on the bench, which is
-    // what makes the disguise possible in the first place.
-    belief.p2_active_mons[0].possible_illusion_state =
-        Some(Box::new(opponent(Species::Zoroark)));
+    // This is the real unresolved representation produced by inference. The
+    // active record LOOKS like Garchomp and carries the alternate Zoroark
+    // identity; the explicit Zoroark roster record remains in possible_back.
+    // If the alternate is committed, those identities must be swapped: the
+    // active becomes Zoroark and the pristine Garchomp template becomes the
+    // concrete decoy on the bench.
+    belief.p2_active_mons[0].possible_mon_id = Unknown::Known(1);
+    let mut zoroark = opponent(Species::Zoroark);
+    zoroark.possible_mon_id = Unknown::Known(2);
+    belief.p2_active_mons[0].possible_illusion_state = Some(Box::new(zoroark.clone()));
     belief.p2_unresolved_zoroark_count = 1;
-    // Deliberately NOT last: bench order follows belief order, so the decoy
-    // starts in the wrong place and the commitment has to move it. Listing it
-    // last would make the ordering assertion below pass for free.
-    belief.p2_known_back_mons.push(opponent(Species::Garchomp));
-    belief.p2_known_back_mons.push(opponent(Species::Incineroar));
+    let mut incineroar = opponent(Species::Incineroar);
+    incineroar.possible_mon_id = Unknown::Known(3);
+    belief.p2_possible_back_mons = vec![zoroark.clone(), incineroar.clone()];
+    belief.p2_roster_templates = vec![
+        belief.p2_active_mons[0].clone(),
+        zoroark,
+        incineroar,
+    ];
+    for template in &mut belief.p2_roster_templates {
+        template.possible_illusion_state = None;
+    }
 
     let slot = FieldSlot {
         player: Player::P2,
         slot_index: 0,
     };
 
-    for seed in 0..25u64 {
+    let mut active_commits = 0;
+    let mut off_field_draws = 0;
+    for seed in 0..50u64 {
         let world = determinize_seeded(
             seed,
             &belief,
@@ -488,33 +508,62 @@ fn an_unresolved_zoroark_becomes_a_self_consistent_disguise() {
         .unwrap();
         let mon = &world.state.p2_active_mons[0];
 
-        assert_eq!(
-            mon.species,
-            Species::Zoroark,
-            "seed {seed}: the hypothesis was drawn, so the true species is the Zoroark"
-        );
-        assert_eq!(mon.ability, Ability::Illusion, "seed {seed}");
-        assert_eq!(
-            mon.illusion_disguise,
-            Some(Species::Garchomp),
-            "seed {seed}: must appear as what the observer has been seeing"
-        );
-        // Illusion and Transform are mutually exclusive.
-        assert!(mon.pre_transform.is_none(), "seed {seed}");
-
-        assert_eq!(
-            crate::simulator::helpers::compute_illusion_disguise(&world.state, slot),
-            mon.illusion_disguise,
-            "seed {seed}: the engine derives a different disguise than the one stored — \
-             bench order {:?}",
-            world
-                .state
-                .p2_back_mons
-                .iter()
-                .map(|m| (m.species.clone(), m.fainted))
-                .collect::<Vec<_>>()
+        if mon.species == Species::Zoroark {
+            active_commits += 1;
+            assert_eq!(mon.ability, Ability::Illusion, "seed {seed}");
+            assert_eq!(
+                mon.illusion_disguise,
+                Some(Species::Garchomp),
+                "seed {seed}: must appear as what the observer has been seeing"
+            );
+            assert!(mon.pre_transform.is_none(), "seed {seed}");
+            assert_eq!(
+                world
+                    .state
+                    .p2_back_mons
+                    .iter()
+                    .filter(|back| back.species == Species::Zoroark)
+                    .count(),
+                0,
+                "seed {seed}: the stale explicit Zoroark record was duplicated"
+            );
+            assert_eq!(
+                crate::simulator::helpers::compute_illusion_disguise(&world.state, slot),
+                mon.illusion_disguise,
+                "seed {seed}: the engine derives a different disguise than the one stored — \
+                 bench order {:?}",
+                world
+                    .state
+                    .p2_back_mons
+                    .iter()
+                    .map(|m| (m.species.clone(), m.fainted))
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            off_field_draws += 1;
+            assert_eq!(mon.species, Species::Garchomp, "seed {seed}");
+            assert_eq!(mon.illusion_disguise, None, "seed {seed}");
+            assert!(
+                world
+                    .state
+                    .p2_back_mons
+                    .iter()
+                    .any(|back| back.species == Species::Zoroark),
+                "seed {seed}: the off-field draw lost the real Zoroark"
+            );
+        }
+        let check_problems = check_determinization(&world, &belief, pokemon_dex());
+        assert!(
+            check_problems.is_empty(),
+            "seed {seed}: checker rejected an admitted Illusion world: {:?}",
+            check_problems
         );
     }
+    assert!(active_commits > 0, "no seed committed the active hypothesis");
+    assert!(
+        off_field_draws > 0,
+        "unresolved Zoroark was forced active; bench/off-field mass disappeared"
+    );
 }
 
 /// ...and with the count already at zero, nothing may be invented: the side's
