@@ -4,15 +4,12 @@ Remove items when the work is complete.
 
 ## Determinizer
 
-- [ ] Split `nature_spread_coherence` into two controls.
-  - Use about `0.10` when a nature lowers an invested stat.
-  - Use about `0.35` when a nature raises a stat with no points.
 - [ ] Apply the coherence rules in `sample_uniform_spread`.
 - [ ] Make `meta/team_gen.rs` sample a spread after it samples the nature.
 - [ ] Merge duplicate nature rows in `collect_natures`.
 - [ ] Add an item-clause check to `check_determinization`.
 
-The current coherence control combines two rules with different evidence.
+Two controls now damp these two faults separately.
 Across 235 species, the full incoherent rate is 19.4%.
 A raised stat with no points accounts for 12.9 percentage points.
 A lowered invested stat accounts for 3.9 percentage points.

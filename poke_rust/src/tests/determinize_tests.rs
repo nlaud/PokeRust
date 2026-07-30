@@ -763,9 +763,10 @@ fn incoherent_builds_are_suppressed_without_moving_the_nature_marginal() {
             })
     };
 
-    let sweep = |coherence: f64| {
+    let sweep = |lowers_invested: f64, raises_unused: f64| {
         let cfg = DeterminizeConfig {
-            nature_spread_coherence: coherence,
+            nature_lowers_invested: lowers_invested,
+            nature_raises_unused: raises_unused,
             ..config_with_learnsets()
         };
         let mut incoherent = 0usize;
@@ -782,8 +783,8 @@ fn incoherent_builds_are_suppressed_without_moving_the_nature_marginal() {
         (incoherent as f64 / DRAWS as f64 * 100.0, natures)
     };
 
-    let (off_rate, off_natures) = sweep(1.0);
-    let (on_rate, on_natures) = sweep(0.15);
+    let (off_rate, off_natures) = sweep(1.0, 1.0);
+    let (on_rate, on_natures) = sweep(0.10, 0.35);
 
     // The gap is the point. `1.0` must actually emit these, or the fixture has
     // stopped exercising the case and the comparison below is vacuous. Measured
@@ -795,10 +796,13 @@ fn incoherent_builds_are_suppressed_without_moving_the_nature_marginal() {
         "with coherence off only {off_rate:.2}% of builds were incoherent — \
          this fixture no longer exercises the case, pick another species"
     );
-    // Measured ratio ~0.31. Asserting merely `on < off` would pass on noise.
+    // Measured ratio ~0.11 (44.9% -> 5.0%). Asserting merely `on < off` would
+    // pass on noise. The defaults bite harder here than a single flat 0.15 did
+    // because most of Dragonite's incoherent draws commit *both* faults and so
+    // take both factors: 0.10 * 0.35.
     assert!(
-        on_rate < off_rate * 0.5,
-        "coherence 0.15 left {on_rate:.2}% incoherent, barely down from {off_rate:.2}%"
+        on_rate < off_rate * 0.2,
+        "the default coherence left {on_rate:.2}% incoherent, barely down from {off_rate:.2}%"
     );
 
     // ...and the nature marginal must survive both settings.
@@ -819,6 +823,100 @@ fn incoherent_builds_are_suppressed_without_moving_the_nature_marginal() {
             );
         }
     }
+}
+
+/// Each coherence rule must damp its own fault while the other rule is off.
+///
+/// The combined test above cannot tell the two apart: Dragonite's incoherent
+/// draws mostly commit both faults at once, so a single knob doing all the work
+/// would look identical there. Splitting the controls is only worth anything if
+/// each one moves its own fault on its own, which is what these two measure.
+///
+/// Predicates are re-derived in EV units for the same reason as above — sharing
+/// the sampler's own predicate would prove nothing. `ev = max(0, 8p - 4)`, so 8
+/// authoring points is 60 EVs and 0 stays 0.
+fn lowers_an_invested_stat(mon: &PokemonState) -> bool {
+    nature_stat_modifiers(&mon.nature)
+        .iter()
+        .enumerate()
+        .any(|(i, m)| *m < 1.0 && mon.evs[i + 1] >= 60)
+}
+
+fn raises_an_unused_stat(mon: &PokemonState) -> bool {
+    nature_stat_modifiers(&mon.nature)
+        .iter()
+        .enumerate()
+        .any(|(i, m)| *m > 1.0 && mon.evs[i + 1] == 0)
+}
+
+/// Runs `DRAWS` determinizations and returns the percentage matching `fault`.
+///
+/// `None` means the usage cache is absent, which skips the caller the same way
+/// `with_meta!` skips a test body.
+fn fault_rate(
+    lowers_invested: f64,
+    raises_unused: f64,
+    fault: fn(&PokemonState) -> bool,
+) -> Option<f64> {
+    let meta = doubles_meta()?;
+    const DRAWS: usize = 4_000;
+    let belief = belief_1v1(Species::Charizard, Species::Dragonite, 0);
+    let cfg = DeterminizeConfig {
+        nature_lowers_invested: lowers_invested,
+        nature_raises_unused: raises_unused,
+        ..config_with_learnsets()
+    };
+    let mut hits = 0usize;
+    for seed in 0..DRAWS as u64 {
+        let world =
+            determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &cfg).unwrap();
+        if fault(&world.state.p2_active_mons[0]) {
+            hits += 1;
+        }
+    }
+    Some(hits as f64 / DRAWS as f64 * 100.0)
+}
+
+#[test]
+fn lowering_an_invested_stat_is_damped_on_its_own() {
+    let Some(off) = fault_rate(1.0, 1.0, lowers_an_invested_stat) else {
+        return;
+    };
+    let on = fault_rate(0.10, 1.0, lowers_an_invested_stat).expect("cache was present above");
+
+    // The fixture has to produce the fault before suppressing it means anything.
+    assert!(
+        off > 10.0,
+        "only {off:.2}% of undamped draws lowered an invested stat — \
+         this fixture no longer exercises the rule, pick another species"
+    );
+    // Measured 44.5% -> 9.8%, a ratio of ~0.22. The ratio does not reach the
+    // 0.10 factor itself: the row renormalization in `enumerate_nature_spreads`
+    // gives back some of the mass a damped cell loses.
+    assert!(
+        on < off * 0.35,
+        "nature_lowers_invested=0.10 left {on:.2}%, barely down from {off:.2}%"
+    );
+}
+
+#[test]
+fn raising_an_unused_stat_is_damped_on_its_own() {
+    let Some(off) = fault_rate(1.0, 1.0, raises_an_unused_stat) else {
+        return;
+    };
+    let on = fault_rate(1.0, 0.35, raises_an_unused_stat).expect("cache was present above");
+
+    assert!(
+        off > 10.0,
+        "only {off:.2}% of undamped draws raised an unused stat — \
+         this fixture no longer exercises the rule, pick another species"
+    );
+    // 0.35 is deliberately the gentler factor, so the drop here is smaller than
+    // the one above. Measured 38.5% -> 20.9%, a ratio of ~0.54.
+    assert!(
+        on < off * 0.7,
+        "nature_raises_unused=0.35 left {on:.2}%, barely down from {off:.2}%"
+    );
 }
 
 /// A revealed move must survive into every world, keep its slot, and never be

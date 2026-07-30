@@ -27,8 +27,8 @@
 //! The cache contains only marginal rates.
 //! Real builds can contain correlations that the cache does not describe.
 //!
-//! `nature_spread_coherence` reduces the weight of conflicting nature and spread pairs.
-//! It keeps each reported nature rate unchanged.
+//! Two coherence controls reduce the weight of conflicting nature and spread pairs.
+//! They keep each reported nature rate unchanged.
 //! The sampler does not model item and move correlations.
 //! These limits affect selection probability, not soundness.
 
@@ -88,10 +88,14 @@ pub struct DeterminizeConfig {
     /// How many times to redraw a world that violates a cross-Pokemon constraint
     /// before accepting it with a warning.
     pub max_repair_passes: u8,
-    /// Reduces weights for conflicting nature and spread pairs.
+    /// Damping for a nature that lowers a stat the build invests in.
     /// The value stays from zero through one.
-    /// One disables this adjustment.
-    pub nature_spread_coherence: f64,
+    /// One disables this rule.
+    pub nature_lowers_invested: f64,
+    /// Damping for a nature that raises a stat with no points.
+    /// The value stays from zero through one.
+    /// One disables this rule.
+    pub nature_raises_unused: f64,
     pub timer_policy: TimerPolicy,
     /// When false, an attribute whose meta options are all excluded is an error
     /// rather than a uniform draw.
@@ -105,7 +109,8 @@ impl Default for DeterminizeConfig {
             observer: Player::P1,
             invent_missing_bench: true,
             max_repair_passes: 8,
-            nature_spread_coherence: 0.15,
+            nature_lowers_invested: 0.10,
+            nature_raises_unused: 0.35,
             timer_policy: TimerPolicy::MaxPlausible,
             allow_uniform_fallback: true,
         }
@@ -481,30 +486,34 @@ pub(crate) fn enumerate_nature_spreads(
 /// `stat_down` columns do carry the signal, so this is recoverable, and the
 /// nature's own enum already encodes it (`nature_stat_modifiers`).
 ///
+/// Two faults, two factors. Lowering an invested stat is the rarer fault in the
+/// cache — 3.9 of the 19.4 incoherent percentage points across 235 species,
+/// against 12.9 for raising an unused one — so it is damped harder. A build
+/// committing both earns both factors. They are separate evidence, and the 2.6
+/// points that split leaves over are exactly that both-fault group.
+///
 /// This is applied *within* a nature's row by `enumerate_nature_spreads`, never
-/// across natures — see the comment there for why. `1.0` disables it entirely.
+/// across natures — see the comment there for why. `1.0` disables a rule.
 fn coherence(nature: Nature, points: &StatPoints, cfg: &DeterminizeConfig) -> f64 {
-    if (cfg.nature_spread_coherence - 1.0).abs() < f64::EPSILON {
+    // Clamped, not just floored: a value above 1.0 would *boost* incoherent
+    // builds, which is the opposite of what these knobs are for.
+    let lowers_invested = cfg.nature_lowers_invested.clamp(0.0, 1.0);
+    let raises_unused = cfg.nature_raises_unused.clamp(0.0, 1.0);
+    if (lowers_invested - 1.0).abs() < f64::EPSILON && (raises_unused - 1.0).abs() < f64::EPSILON {
         return 1.0;
     }
     let modifiers = nature_stat_modifiers(&nature);
-    let mut incoherent = false;
+    let mut factor = 1.0;
     for (i, modifier) in modifiers.iter().enumerate() {
         let points_here = points[i + 1]; // modifiers are [atk..spe]; points are [hp, atk..spe]
         if *modifier < 1.0 && points_here >= 8 {
-            incoherent = true; // nerfing a stat the build invests in
+            factor *= lowers_invested; // nerfing a stat the build invests in
         }
         if *modifier > 1.0 && points_here == 0 {
-            incoherent = true; // boosting a stat the build ignores
+            factor *= raises_unused; // boosting a stat the build ignores
         }
     }
-    if incoherent {
-        // Clamped, not just floored: a value above 1.0 would *boost* incoherent
-        // builds, which is the opposite of what this knob is for.
-        cfg.nature_spread_coherence.clamp(0.0, 1.0)
-    } else {
-        1.0
-    }
+    factor
 }
 
 /// Whether every entry of `values` lies within the matching `lo`/`hi` bounds.
