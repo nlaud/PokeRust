@@ -14,17 +14,12 @@ use crate::state::battle::BattleState;
 use crate::state::dex_data::{SideCondition, Status};
 use crate::state::pokemon::PokemonState;
 
-/// Scores a non-terminal position as P1's win probability, in `[0, 1]`.
-///
-/// Implementations must stay inside that range — the search's pruning bounds
-/// assume it — and should be antisymmetric in the two sides, so that evaluating
-/// a mirrored position returns one minus the original.
+/// Scores a nonterminal state as P1's win probability.
+/// Results must stay from zero through one.
+/// A mirrored state should return one minus the original score.
 pub type LeafEvaluator = fn(&BattleState) -> f64;
 
-/// Credit for merely being alive, as a fraction of a Pokemon's total worth; the
-/// remainder scales with remaining HP. Purely-HP-proportional scoring badly
-/// undervalues a Pokemon at 5% — which can still Protect, pivot, set up, or
-/// trade a KO — while pure headcount cannot see chip damage at all.
+/// Fraction of a Pokémon score that does not depend on remaining HP.
 const ALIVE_SHARE: f64 = 0.5;
 
 /// A full stat stage, in Pokemon-equivalents. A +1 is worth noticeably less than
@@ -40,28 +35,20 @@ const ACC_EVA_WEIGHT: f64 = 0.03;
 /// against the side that has to switch into it.
 const HAZARD_WEIGHT: f64 = 0.12;
 
-/// Steepness of the logistic squash, in units of one Pokemon. At 0.8 a one-mon
-/// lead reads as roughly 69% and a two-mon lead as 83% — deliberately short of
-/// certainty, because a Pokemon lead is a real but routinely reversible edge.
+/// Logistic scale in units of one Pokémon.
 const LOGISTIC_SCALE: f64 = 0.8;
 
-/// The default positional heuristic.
-///
-/// Sums a per-side score in Pokemon-equivalents — remaining team, active-slot
-/// boosts and status, entry hazards — takes the difference, and squashes it
-/// through a logistic. Everything it measures is symmetric between the sides, so
-/// an even position scores exactly 0.5.
+/// Calculates the default position score.
+/// Uses team health, active boosts, status, and entry hazards.
+/// An even state returns 0.5.
 pub fn heuristic(state: &BattleState) -> f64 {
     let p1 = side_score(&state.p1_active_mons, &state.p1_back_mons, &state.p1_side_conditions);
     let p2 = side_score(&state.p2_active_mons, &state.p2_back_mons, &state.p2_side_conditions);
     logistic(p1 - p2)
 }
 
-/// A constant 0.5 for every position.
-///
-/// Turns the search into a pure terminal-detector: any value it reports comes
-/// from lines that actually end the game within the horizon. Used by tests that
-/// need the search's structure isolated from the heuristic's judgement.
+/// Returns 0.5 for each nonterminal state.
+/// Tests use it to isolate search behavior from the heuristic.
 pub fn even(_state: &BattleState) -> f64 {
     0.5
 }
@@ -77,12 +64,8 @@ fn side_score(
     team + field - hazard_penalty(side_conditions)
 }
 
-/// A Pokemon's contribution: nothing if fainted, otherwise a floor for being
-/// alive plus a share scaling with remaining HP, less whatever its status costs.
-///
-/// Status is charged here rather than in [`active_slot_score`] because it
-/// survives switching — a burned Pokemon on the bench is still burned when it
-/// comes back in.
+/// Scores one Pokémon from health and status.
+/// Status stays relevant on the bench.
 fn mon_score(mon: &PokemonState) -> f64 {
     if mon.fainted || mon.hp == 0 {
         return 0.0;
@@ -98,11 +81,8 @@ fn mon_score(mon: &PokemonState) -> f64 {
     ALIVE_SHARE + (1.0 - ALIVE_SHARE) * hp_fraction - status_penalty(mon.status.as_ref())
 }
 
-/// What is true only while a Pokemon is on the field.
-///
-/// Just stat stages: unlike status, boosts are wiped on switch-out, so they are
-/// worth nothing to a benched Pokemon. A fainted slot contributes nothing at
-/// all — its boosts are about to vanish with it.
+/// Scores active stat stages.
+/// Bench and fainted Pokémon receive no boost score.
 fn active_slot_score(mon: &PokemonState) -> f64 {
     if mon.fainted {
         return 0.0;
@@ -113,11 +93,7 @@ fn active_slot_score(mon: &PokemonState) -> f64 {
     offensive_defensive as f64 * BOOST_WEIGHT + accuracy_evasion as f64 * ACC_EVA_WEIGHT
 }
 
-/// Cost of a non-volatile status, in Pokemon-equivalents.
-///
-/// Ordered by how much of a Pokemon's usefulness it removes rather than by
-/// damage dealt: sleep and freeze remove whole turns, paralysis removes speed
-/// and a quarter of turns, burn halves physical output, poison is a clock.
+/// Returns the score cost of a nonvolatile status.
 fn status_penalty(status: Option<&Status>) -> f64 {
     match status {
         None => 0.0,

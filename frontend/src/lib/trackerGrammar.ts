@@ -5,9 +5,7 @@
 // Keep the keyword tables and parser order synchronized with the Rust parser.
 // Also keep `api/types.ts` synchronized with the Rust DTOs.
 
-/** Mirrors `tracker_parse.rs::norm` exactly: alphanumeric-only, lowercased —
- * the same normalization `Species::from_str`/`PokemonMove::from_str`/
- * `Item::from_str`/`Ability::from_str` all do internally on the Rust side. */
+/** Converts text to the same lowercase alphanumeric form as the Rust parser. */
 export function norm(s: string): string {
   return s
     .toLowerCase()
@@ -16,24 +14,15 @@ export function norm(s: string): string {
     .join('')
 }
 
-/** Grammar tokens that are self-evidently complete the moment they parse as
- * themselves — numeric HP specs (`50`, `50%`, `120/200`) — and so are never
- * looked up in a word pool. `completionsAt` has no candidate list to check
- * these against (no species/move/item name starts with a digit), and without
- * this check `rank`'s "autocorrect to the closest word" fallback (which never
- * returns an empty list for a non-empty partial) would keep surfacing a full
- * word list against a perfectly valid numeric token. Checked ahead of
- * `completionsAt`'s normal candidate lookup, not as a replacement for it. */
+/** Checks tokens that need no word completion.
+ * These tokens include HP values and hit counts. */
 export function isSelfCompleteToken(partial: string): boolean {
   return /^\d+%?$/.test(partial) || /^\d+\/\d+$/.test(partial) || /^\d+hits?$/i.test(partial)
 }
 
-/** Per-match name pools an autocomplete session needs: species/moves/
- * abilities come from `GET /api/tracker/{id}/completions` (scoped to the
- * Pokemon actually in this match — see that endpoint's doc comment in
- * `dto.rs`); items are NOT match-scoped (held items aren't
- * species-constrained) so they come straight from the existing
- * `lib/items.ts` catalog instead of a new backend round trip. */
+/** Stores the names that autocomplete can suggest.
+ * The server supplies match species, moves, and abilities.
+ * The item catalog supplies all items. */
 export interface CompletionPools {
   species: string[]
   moves: string[]
@@ -51,11 +40,8 @@ export const EMPTY_POOLS: CompletionPools = { species: [], moves: [], abilities:
 
 export type CasingStyle = 'pascal' | 'snake' | 'kebab' | 'camel'
 
-/** Classify the casing of one already-typed, whitespace-free token. Returns
- * `null` when the token carries no signal (no underscore/hyphen and no
- * internal capital — e.g. a single short word, or an all-lowercase
- * concatenation), so the caller can keep looking at earlier tokens instead of
- * locking onto an ambiguous guess. */
+/** Finds the case style of one token.
+ * Returns `null` when the token does not show a clear style. */
 function detectCasing(raw: string): CasingStyle | null {
   if (raw.includes('_')) return 'snake'
   if (raw.includes('-')) return 'kebab'
@@ -63,12 +49,9 @@ function detectCasing(raw: string): CasingStyle | null {
   return null
 }
 
-/** Which casing to render multi-word completions in: whatever convention the
- * user has already used for an earlier multi-word name on this SAME line
- * (scanned most-recent-first), or PascalCase — the grammar's own convention
- * (see `TYPE_WORDS`) — if no multi-word token has appeared yet. Only a token
- * that actually corresponds to a multi-word pool entry can set the style; a
- * naturally-single-word token (`tackle`, `p1`) carries no casing signal. */
+/** Selects the case style for multiword completions.
+ * Uses the latest clear style on the same line.
+ * Uses Pascal case when the line has no clear style. */
 export function styleFromTokens(tokens: string[], pools: CompletionPools): CasingStyle {
   const multiWordLabels = [...pools.species, ...pools.moves, ...pools.abilities, ...pools.items].filter((label) =>
     /\s/.test(label),
@@ -84,9 +67,7 @@ export function styleFromTokens(tokens: string[], pools: CompletionPools): Casin
   return 'pascal'
 }
 
-/** Render a human-readable, space-separated pool label in one of the
- * grammar's supported whitespace-free casings. Harmless (and still matches
- * the requested style) on an already-single-word label too. */
+/** Converts a label to a supported case style without spaces. */
 export function recase(label: string, style: CasingStyle): string {
   const words = label.split(/\s+/).filter((w) => w.length > 0)
   if (words.length === 0) return label
@@ -158,8 +139,8 @@ const CANT_REASON_WORDS: WordGroup[] = [
   group('beakblast'),
 ]
 
-// Bare-word volatiles accepted by `volatile_from_word`. Payload-bearing
-// Encore/Disable/Stockpile use their dedicated keywords below.
+// Lists simple volatile names.
+// Encore, Disable, and Stockpile use separate keywords.
 const VOLATILE_WORDS: WordGroup[] = [
   group('confusion', 'confused'),
   group('leechseed', 'seeded'),
@@ -348,12 +329,8 @@ function canonicalsOf(groups: WordGroup[]): string[] {
 
 // ── Levenshtein autocorrect fallback ────────────────────────────────────────
 
-/** Plain edit distance. Exported because the tracker setup form's species
- * picker (`pages/tracker/SpeciesPicker.tsx`) needs the same "autocorrect to the
- * closest possibility" fallback, but ranks its own hits alphabetically rather
- * than by `stableHash` — a thousand-entry species list reads far better in
- * alphabetical order than in the deliberately-scrambled order that suits these
- * small, fixed keyword pools. */
+/** Calculates the edit distance between two strings.
+ * The species picker also uses this function for spelling corrections. */
 export function levenshtein(a: string, b: string): number {
   const dp: number[] = Array.from({ length: b.length + 1 }, (_, j) => j)
   for (let i = 1; i <= a.length; i++) {
@@ -369,14 +346,8 @@ export function levenshtein(a: string, b: string): number {
   return dp[b.length]
 }
 
-/** Small deterministic string hash (FNV-1a) — gives the "nothing typed yet" /
- * "several prefix matches" suggestion lists a STABLE but non-alphabetical,
- * non-insertion order: every candidate's position is a pure function of its
- * own text, so (a) the same word always lands in the same relative slot
- * regardless of what else is in the pool — nothing "jumps" as the set narrows
- * while typing — and (b) line-start doesn't always show the same handful of
- * words first (`p`, `p1`, `p2`, ... in list order) just because they happen
- * to be declared first. */
+/** Calculates a stable FNV-1a hash.
+ * The hash gives suggestions a stable order that is not alphabetical. */
 function stableHash(s: string): number {
   let h = 2166136261
   for (let i = 0; i < s.length; i++) {
@@ -390,13 +361,8 @@ function byStableHash(candidates: string[]): string[] {
   return [...candidates].sort((a, b) => stableHash(norm(a)) - stableHash(norm(b)))
 }
 
-/** Rank `candidates` against `partial`: exact prefix matches first (stable-hash
- * order, not list order — see `stableHash`'s doc comment), then — only if NO
- * candidate has `partial` as a prefix — every candidate ranked by edit
- * distance to `partial`, closest first (ties broken by the same stable hash).
- * This is the "autocorrect spelling to the closest possibility" behavior: a
- * typo like `thunderblot` still surfaces `Thunderbolt` as the top (Tab-fillable)
- * suggestion instead of an empty list. */
+/** Ranks prefix matches by stable hash.
+ * If no prefix matches, ranks all candidates by edit distance. */
 function rank(candidates: string[], partial: string): string[] {
   const p = norm(partial)
   if (p === '') return byStableHash(candidates)
@@ -410,19 +376,8 @@ function rank(candidates: string[], partial: string): string[] {
 
 // ── Script (de)serialization ─────────────────────────────────────────────────
 
-/** Split a full raw tracker-text script (as returned by `GetTrackerResponse.script`
- * / sent to `PUT /history`) into one chunk of text per turn, each ending at
- * (and including) its `endofturn`/`eot` line. Lightweight and independent of
- * the real parser — used only to rehydrate the editor's per-turn navigation
- * after a page reload, never to decide correctness (the server is still the
- * sole authority on what's valid). Trailing text after the last `endofturn`
- * (a script that was never fully committed) is returned as a final,
- * not-yet-terminated chunk rather than dropped, so a reload never silently
- * loses typed-but-uncommitted text. */
-/** The content lines of one turn's raw text, with a trailing `endofturn`/`eot`
- * line (and any blank lines around it) stripped off — the addressable,
- * user-authored lines within that turn. Shared by the store (to rebuild a
- * corrected turn) and the input bar (to build its flat navigation history). */
+/** Returns the content lines from one turn.
+ * Removes the final end-of-turn line and adjacent blank lines. */
 export function contentLinesOf(turnText: string): string[] {
   const lines = turnText.split('\n')
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
@@ -433,6 +388,9 @@ export function contentLinesOf(turnText: string): string[] {
   return lines
 }
 
+/** Splits tracker text into turns.
+ * Keeps incomplete text as the final turn.
+ * The server remains the authority for valid text. */
 export function splitScriptIntoTurns(script: string): string[] {
   if (script.trim() === '') return []
   const turns: string[] = []
@@ -476,12 +434,9 @@ export type LinePosition =
   | { kind: 'moveBody' }
   | { kind: 'done' }
 
-/** Classify what the token AT `tokens[cursorIndex]` (the word being typed)
- * is for, from the already-completed tokens before it. Mirrors `parse_line`'s
- * dispatch order (`tracker_parse.rs:568-864`) and `parse_move_line`'s body
- * loop (`:962-1052`) closely enough to drive completion, without attempting
- * every validation branch the real parser runs (unresolvable species, mega
- * suffix disambiguation, etc. — those still surface as a real 422 on submit). */
+/** Classifies the token at `cursorIndex` from the earlier tokens.
+ * This order follows the Rust parser.
+ * The server performs all validation. */
 export function classifyPosition(tokens: string[], cursorIndex: number): LinePosition {
   if (cursorIndex === 0) return { kind: 'lineStart' }
 
@@ -519,7 +474,7 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   if (action === 'charging') {
     return cursorIndex === 2 ? { kind: 'chargingMove' } : { kind: 'done' }
   }
-  if (action === 'hp') return { kind: 'done' } // numeric hpspec — nothing to suggest from a word list
+  if (action === 'hp') return { kind: 'done' } // HP values need no word suggestion.
   if (action === 'illusion' || action === 'illusionended') {
     return cursorIndex === 2 ? { kind: 'switchSpecies' } : { kind: 'done' }
   }
@@ -565,10 +520,8 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   return { kind: 'moveBody' }
 }
 
-/** Ordered suggestions for the word currently being typed at `cursorIndex`
- * (0-based token index; the token being edited, not yet committed), given the
- * already-typed `tokens` before it and the current partial text. Top of the
- * returned array is the Tab-fill target. */
+/** Returns ordered suggestions for the token at `cursorIndex`.
+ * The first result is the Tab completion. */
 export function completionsAt(
   tokens: string[],
   cursorIndex: number,

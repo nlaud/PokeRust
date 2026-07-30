@@ -20,10 +20,7 @@ pub enum PlayerDto {
     P2,
 }
 
-/// HP as observed by a real player: exact for their own side, percent for the
-/// opponent's. Used both for the event stream and for `PokemonView.hp` — a real
-/// player's screen never shows the opponent's exact HP, so `PokemonView` must use
-/// this same observed/masked representation rather than a ground-truth pair.
+/// Stores exact ally HP or an opponent HP percentage.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedHpDto {
@@ -50,15 +47,10 @@ pub struct VolatileDto {
     pub turns: Option<u16>,
 }
 
-/// A field/side effect's name plus how long it has left. Under fog-of-war,
-/// the exact remaining count is frequently not knowable (e.g. weather's base
-/// 5 turns vs. 8 with an extension rock the setter's item hasn't revealed) —
-/// `turns` is always the lower bound (or the exact value once collapsed) and
-/// `turns_max` is the upper bound, present ONLY when it differs from `turns`.
-/// A real observer never gets to see more precision than this, so the
-/// belief-driven mapping (`mapping::field_view_from_belief` et al.) must
-/// never report a narrower range than the fog-of-war candidate set actually
-/// allows — see `mapping::turn_range`.
+/// Stores an effect name and its remaining duration.
+/// `turns` is the lower or exact value.
+/// `turns_max` is a different upper value when necessary.
+/// The range must include all values in the belief.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedTurnsDto {
@@ -81,7 +73,7 @@ pub struct MoveViewDto {
 #[serde(rename_all = "camelCase")]
 pub struct PokemonView {
     pub mon_id: u8,
-    /// Showdown display name, e.g. "Abomasnow-Mega" — also the sprite-slug source.
+    /// Showdown display name and sprite source.
     pub species: String,
     pub level: u8,
     pub gender: String,
@@ -90,19 +82,18 @@ pub struct PokemonView {
     pub fainted: bool,
     pub status: Option<StatusDto>,
     pub volatiles: Vec<VolatileDto>,
-    /// HP, Atk, Def, SpA, SpD, Spe. Under a masked (non-Perfect-Information) view
-    /// this is the LOWER bound of the stat range; equal to `stats_max` for ground
-    /// truth (ordinary P1 view, or any view under Perfect Information).
+    /// HP, Atk, Def, SpA, SpD, and Spe.
+    /// A masked view stores the lower bounds.
     pub stats: [u16; 6],
-    /// Upper bound of the stat range — equal to `stats` unless masked and the range
-    /// hasn't collapsed to a point yet.
+    /// Upper stat bounds.
+    /// Equal to `stats` when each stat is exact.
     pub stats_max: [u16; 6],
     /// Atk, Def, SpA, SpD, Spe, Acc, Eva stages.
     pub boosts: [i8; 7],
     pub nature: String,
-    /// HP, Atk, Def, SpA, SpD, Spe EVs — lower bound under a masked view, see `stats`.
+    /// Lower HP, Atk, Def, SpA, SpD, and Spe EV bounds.
     pub evs: [u8; 6],
-    /// Upper bound of the EV range, see `stats_max`.
+    /// Upper EV bounds.
     pub evs_max: [u8; 6],
     pub item: Option<String>,
     pub ability: String,
@@ -110,8 +101,7 @@ pub struct PokemonView {
     pub is_tera: bool,
     pub tera_type: String,
     pub is_mega: bool,
-    /// `true` when this mon's species is still an unresolved multi-candidate
-    /// Illusion disguise in the observer's belief (always `false` for ground truth).
+    /// True while the observer has multiple Illusion species candidates.
     pub is_illusion_suspected: bool,
 }
 
@@ -120,18 +110,12 @@ pub struct PokemonView {
 pub struct SideView {
     pub active: Vec<PokemonView>,
     pub back: Vec<PokemonView>,
-    /// Species shown at team preview but not brought into this battle (a bring-N-
-    /// of-M format gap) — "we have no info on them" beyond species, rendered
-    /// grayed-out. Always empty for P1 (the viewer's own side never has this gap)
-    /// and for any side under Perfect Information (no belief tracked).
+    /// Preview species that did not enter the selected team.
+    /// The frontend shows these species in gray.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub possible_back: Vec<PokemonView>,
-    /// Opponent mons that fainted and were then replaced — the fog belief keeps
-    /// their accumulated knowledge (species, revealed moves/item/ability) in a
-    /// dedicated bucket instead of discarding it (see
-    /// `UnknownBattleState::p1/p2_fainted_mons`). Always empty for P1 and for any
-    /// side under Perfect Information, where a fainted mon's knowledge already
-    /// rides in `active`/`back` with `fainted: true`.
+    /// Replaced fainted opponents and their revealed data.
+    /// Perfect information keeps them in the normal team lists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fainted: Vec<PokemonView>,
     pub can_tera: bool,
@@ -167,10 +151,8 @@ pub enum PhaseDto {
     GameOver,
 }
 
-/// The engine's CNF predicate store (`UnknownBattleState.predicates`), rendered as
-/// plain-English OR-clauses — literally "a list of ORs". `None`/absent under Perfect
-/// Information (no belief tracked) or during team preview (no predicates yet); the
-/// frontend's Predicates tab only appears when this is present.
+/// Stores CNF predicates as readable OR clauses.
+/// Perfect information and team preview omit this value.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BeliefView {
@@ -217,7 +199,7 @@ pub struct CommandOptionDto {
 #[serde(rename_all = "camelCase")]
 pub struct SlotCommandsDto {
     pub slot_index: usize,
-    /// True when the slot has no real choice (auto-Pass in self-switch/replacement phases).
+    /// True when the slot must pass.
     pub forced: bool,
     pub options: Vec<CommandOptionDto>,
 }
@@ -530,19 +512,16 @@ pub struct TurnLogEntry {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBattleRequest {
-    /// Ignored when the matching `TeamMode` is `"meta"` — send `""`.
+    /// Send an empty string when the matching team mode is `meta`.
     pub p1_team: String,
     pub p2_team: String,
-    /// `"sheet"` (default): use `p1_team` as pasted. `"meta"`: ignore
-    /// `p1_team` and generate a fresh team from Champions usage stats
-    /// instead (`meta::generate_meta_team`) — see `routes::resolve_team_text`.
+    /// Selects a pasted team or a generated team.
     #[serde(default = "default_team_mode")]
     pub p1_team_mode: String,
     #[serde(default = "default_team_mode")]
     pub p2_team_mode: String,
-    /// Seeds the Meta Team Generator's draw for reproducibility. `None` picks
-    /// a fresh random seed per request. Unused when both `TeamMode`s are
-    /// `"sheet"`.
+    /// Makes generated teams reproducible.
+    /// `None` selects a new random seed.
     pub meta_seed: Option<u64>,
     pub active_per_side: u8,
     pub brought_per_side: u8,
@@ -550,8 +529,7 @@ pub struct CreateBattleRequest {
     pub stat_points: bool,
     #[serde(default = "default_true")]
     pub consider_crit: bool,
-    /// Pin all opponent IVs to 31 for the fog-of-war inference engine (Pokémon
-    /// Champions competitive default). See `InferenceConfig::force_max_ivs`.
+    /// Sets all inferred opponent IVs to the Champions default of 31.
     #[serde(default = "default_true")]
     pub force_max_ivs: bool,
     /// Whether the selected regulation permits each once-per-battle mechanic.
@@ -562,19 +540,13 @@ pub struct CreateBattleRequest {
     pub mega_enabled: bool,
     #[serde(default = "default_damage_rolls")]
     pub damage_rolls: u8,
-    /// `"closedSheet"` (default) | `"perfect"` | `"openSheet"` | `"openSheetNatures"`.
-    /// Selects the fog-of-war starting baseline for P1's view of P2 — see
-    /// `InformationMode`. `closedSheet` is the traditional VGC/Champions competitive
-    /// format: only the opponent's species are visible at team preview.
+    /// Selects the initial opponent information for P1.
+    /// A closed sheet shows only opponent species at preview.
     #[serde(default = "default_info_mode")]
     pub information_mode: String,
-    /// Format item whitelist, as PokeAPI item slugs (`frontend/src/lib/items.ts`'s
-    /// `CatalogItem.name`) — the selected format's full catalog minus its banned
-    /// items (`StoredFormat.bannedItems`), resolved client-side. Empty means no
-    /// restriction (`InferenceConfig::legal_items` stays `None`) — the default for
-    /// any client that doesn't send this. Each entry must resolve via `Item::from_str`;
-    /// an unresolvable slug is a client bug (stale catalog, typo) and is rejected
-    /// with 422 rather than silently treated as "no such item is legal."
+    /// Permitted item slugs after format bans.
+    /// An empty list permits all items.
+    /// The server rejects an unknown slug with HTTP 422.
     #[serde(default)]
     pub legal_items: Vec<String>,
 }
@@ -601,9 +573,7 @@ pub struct CreateBattleResponse {
     pub battle_id: String,
     /// P1's fog-of-war view of the battle.
     pub state: BattleView,
-    /// P2's fog-of-war view of the same battle — mirrors `state` with the masked
-    /// side flipped. The frontend selects between the two based on whose perspective
-    /// is currently being shown (see `battleStore.ts`'s `currentPlayer`).
+    /// P2's masked view of the same battle.
     pub state_p2: BattleView,
 }
 
@@ -612,10 +582,9 @@ pub struct CreateBattleResponse {
 pub struct GetBattleResponse {
     pub state: BattleView,
     pub state_p2: BattleView,
-    /// P1's turn log — every turn's events masked for P1's perspective.
+    /// Turn events masked for P1.
     pub log: Vec<TurnLogEntry>,
-    /// P2's turn log — the same turns, masked for P2's perspective instead. Under
-    /// Perfect Information this is identical to `log` (no fog to differ on).
+    /// Turn events masked for P2.
     pub log_p2: Vec<TurnLogEntry>,
 }
 
@@ -631,9 +600,9 @@ pub struct TurnRequest {
 pub struct TurnResponse {
     pub state: BattleView,
     pub state_p2: BattleView,
-    /// This turn's events masked for P1's perspective.
+    /// This turn's events masked for P1.
     pub events: Vec<EventNode>,
-    /// This turn's events masked for P2's perspective instead.
+    /// This turn's events masked for P2.
     pub events_p2: Vec<EventNode>,
     pub probability: f64,
 }
@@ -645,25 +614,17 @@ pub struct ApiError {
 }
 
 // ── Tracker mode ─────────────────────────────────────────────────────────────
-// A second, simpler kind of session for following a real battle: no opponent is
-// simulated, so there is no `PlayerCommand`/turn-resolution flow here — the
-// user submits free text describing what happened and the server translates it
-// into the same `InformationEvent` vocabulary the inference engine already
-// consumes. See `bin/server/tracker.rs` and `bin/server/tracker_parse.rs`.
+// Tracker sessions record typed events from a real battle.
+// They do not simulate an opponent or resolve commands.
+// The server converts text to inference events.
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTrackerRequest {
-    /// The tracker viewer's own full roster, as a Showdown teamsheet — every
-    /// detail (item/ability/nature/EVs/moves) is genuinely known, exactly like
-    /// battle mode's `p1Team`.
+    /// The tracker viewer's complete Showdown teamsheet.
     pub my_team: String,
-    /// The opponent's roster: either a Showdown teamsheet, or 6 comma-separated
-    /// species names (the server normalizes commas into the blank-line-
-    /// separated blocks `parse_team_sheet_str` expects — see
-    /// `tracker::normalize_opponent_text`). Only species matters here; any
-    /// item/ability/moves the input happens to specify are discarded — closed/
-    /// open-sheet fog treats the opponent identically to battle mode.
+    /// Opponent teamsheet or comma-delimited species names.
+    /// The server keeps only species from this value.
     pub opponent: String,
     pub active_per_side: u8,
     pub brought_per_side: u8,
@@ -675,9 +636,8 @@ pub struct CreateTrackerRequest {
     pub tera_enabled: bool,
     #[serde(default = "default_true")]
     pub mega_enabled: bool,
-    /// `"closedSheet"` (default) | `"openSheet"` | `"openSheetNatures"`.
-    /// `"perfect"` is rejected — Perfect Information has no meaning in tracker
-    /// mode (there's no second simulated team to have perfect knowledge of).
+    /// Tracker information mode.
+    /// Tracker mode does not permit perfect information.
     #[serde(default = "default_info_mode")]
     pub information_mode: String,
     #[serde(default)]
@@ -696,19 +656,16 @@ pub struct CreateTrackerResponse {
 pub struct GetTrackerResponse {
     pub state: BattleView,
     pub log: Vec<TurnLogEntry>,
-    /// The full raw tracker-text script committed so far (every turn,
-    /// newline-joined) — lets the editor rehydrate its authored text (and
-    /// therefore per-turn navigation/editing) after a page reload, since `log`
-    /// alone can't be reversed back into tracker syntax. Empty string if
-    /// nothing has been committed yet.
+    /// Complete committed tracker text.
+    /// An empty string means that no turn is committed.
     pub script: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerEventsRequest {
-    /// One or more complete turns of tracker-syntax text, each terminated by an
-    /// `endofturn` line — see `tracker_parse`'s module doc for the grammar.
+    /// One or more complete turns.
+    /// Each turn ends with `endofturn`.
     pub text: String,
 }
 
@@ -723,44 +680,32 @@ pub struct TrackerParseErrorDto {
 #[serde(rename_all = "camelCase")]
 pub struct TrackerEventsResponse {
     pub state: BattleView,
-    /// The newly-committed turn(s) this submission produced, in order — append
-    /// these to the client's existing log rather than replacing it.
+    /// New committed turns.
+    /// Append them to the current log.
     pub log_delta: Vec<TurnLogEntry>,
 }
 
-/// `POST /api/tracker/{id}/preview` request — the current in-progress turn's
-/// tracker-syntax text so far. Unlike `TrackerEventsRequest`, this need not be
-/// a complete turn and need not end with `endofturn`.
+/// Contains tracker text for an incomplete turn preview.
+/// This text does not require `endofturn`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerPreviewRequest {
     pub text: String,
 }
 
-/// `POST /api/tracker/{id}/preview` response — a disposable, Pass-1-only
-/// structural view (see `poke_rust::information::inference::apply_structural_preview`'s
-/// doc comment for exactly what that does and doesn't include). Never
-/// persisted server-side; superseded the moment the turn is actually
-/// committed via `/events` or `/history`.
+/// Contains a temporary structural view for an incomplete turn.
+/// The server does not store this view.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerPreviewResponse {
     pub state: BattleView,
-    /// The in-progress turn's events, parsed and guaranteed-effect-augmented
-    /// exactly like a committed turn's `TurnLogEntry.events` — so the client
-    /// can render them through the same log-rendering path instead of raw text.
+    /// Parsed preview events with generated guaranteed effects.
     pub events: Vec<EventNode>,
 }
 
-/// `GET /api/tracker/{id}/completions` response — autocomplete name pools
-/// scoped to the species actually in THIS match (both rosters, from team
-/// preview — independent of fog-of-war, since a player always knows their own
-/// and the opponent's species even under Closed Team Sheet). `moves` is the
-/// union of those species' learnsets and `abilities` the union of their
-/// ability pools — suggesting a move or ability no Pokemon in the match could
-/// ever have would be actively unhelpful, unlike a global dex dump. Items are
-/// intentionally absent: they aren't species-constrained, and the frontend
-/// already owns the full item catalog (`frontend/src/lib/items.ts`).
+/// Contains autocomplete names for both match rosters.
+/// Moves and abilities come from the roster species.
+/// The frontend supplies items from its catalog.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerCompletionsDto {
@@ -769,17 +714,9 @@ pub struct TrackerCompletionsDto {
     pub abilities: Vec<String>,
 }
 
-/// `GET /api/dex/species` response — every species that can appear on a
-/// teamsheet, alphabetically, as display names.
-///
-/// Deliberately session-free, unlike `TrackerCompletionsDto`: this feeds the
-/// tracker SETUP form's opponent picker, which runs before any session exists.
-/// It is also the one place a full dex dump is the right answer — the user is
-/// naming arbitrary opponents, not picking from a known roster.
-///
-/// Battle-only formes (Mega, Primal, Ash-Greninja, …) are filtered out: they can
-/// never be written on a sheet, and listing them would offer "Charizard Mega X"
-/// as a lead.
+/// Contains alphabetical teamsheet species names.
+/// The setup page uses this list before it creates a session.
+/// The server removes battle-only forms.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeciesListDto {
@@ -787,24 +724,13 @@ pub struct SpeciesListDto {
 }
 
 // ── Benchmarking ─────────────────────────────────────────────────────────────
-// See `poke_rust::benchmarking` for the timing logic these DTOs wrap. Each
-// sweep is the full unbounded teamsheet-pairing grid (the same grid the offline
-// `cargo bench` binaries run — no request-configurable knobs), so
-// `GET /api/benchmark` takes no body.
-//
-// The three sweeps run **one at a time** but report independently: every sweep
-// streams its own `BenchmarkProgressDto` events tagged with its `stage`, then
-// emits a single `BenchmarkResultDto` the moment it finishes, so the UI renders
-// each chart as it lands instead of waiting for the whole run. A
-// `BenchmarkSweepErrorDto` fails one sweep without stopping the rest, and a
-// final `done` event closes the stream. See `routes.rs::run_benchmark`.
-//
-// Sequential is the point, not an accident: running the sweeps concurrently
-// finishes sooner but makes every reported time a contended measurement that no
-// longer reproduces `poke_rust/benches/RESULTS.md`. Streaming per sweep is what
-// buys the responsiveness instead.
+// The benchmark endpoint runs the same grids as the offline benchmarks.
+// It runs the three sweeps in sequence.
+// Each sweep sends progress and then a result or failure.
+// A final `done` event closes the stream.
+// Sequential runs prevent contended measurements.
 
-/// Which of the three concurrent sweeps an event belongs to.
+/// Identifies the sweep for one event.
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum BenchmarkSweepDto {
@@ -821,9 +747,8 @@ pub struct BenchmarkProgressDto {
     pub total: usize,
 }
 
-/// One finished sweep's rows. Tagged rather than a struct of three optional
-/// vectors, so a client cannot confuse "this sweep reported no rows" with "this
-/// sweep has not finished yet".
+/// Contains the rows from one completed sweep.
+/// The tag separates an empty result from an incomplete sweep.
 #[derive(Serialize)]
 #[serde(tag = "sweep", rename_all = "camelCase")]
 pub enum BenchmarkResultDto {
@@ -835,8 +760,8 @@ pub enum BenchmarkResultDto {
     Solver { rows: Vec<SolverRowDto> },
 }
 
-/// One sweep failed. The others keep running, so this is not terminal for the
-/// stream — only the `done` event is.
+/// Reports one failed sweep.
+/// Later sweeps continue.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkSweepErrorDto {
@@ -864,19 +789,13 @@ pub struct InferenceRowDto {
     pub calls: u64,
     pub avg_time_secs: f64,
     pub contradictions: u64,
-    /// A real caught panic message from the first contradiction — see
-    /// `poke_rust::benchmarking::InferenceRow::contradiction_sample`.
+    /// First caught contradiction message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contradiction_sample: Option<String>,
 }
 
-/// One `(scenario, algorithm, depth, rolls, chance)` cell of the game-tree
-/// solver sweep — see `poke_rust::benchmarking::SolverRow`.
-///
-/// `avg_turns_simulated` is the meaningful cost number: a `simulate_turn` call
-/// dominates a matrix LP by three orders of magnitude, so a configuration's
-/// wall-clock is very nearly its turn count times a constant — and unlike
-/// wall-clock, the count is immune to whatever else the machine is doing.
+/// Contains one solver benchmark configuration.
+/// `avg_turns_simulated` measures the main solver cost.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SolverRowDto {

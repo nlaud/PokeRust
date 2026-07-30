@@ -6,9 +6,9 @@ export interface SelectOption {
 }
 
 /**
- * Custom listbox with an animated dropdown (native <select> menus can't be
- * styled or transitioned). Closes on outside click and Escape; basic keyboard
- * support: Enter/Space toggles, arrows move the highlight, Enter picks.
+ * Shows a styled list box.
+ * An outside click or Escape closes it.
+ * Enter, Space, and arrow keys control the selection.
  */
 export default function Select({
   value,

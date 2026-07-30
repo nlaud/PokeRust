@@ -2,15 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTracker } from '../../store/trackerStore'
 import { completionsAt, isSelfCompleteToken, norm } from '../../lib/trackerGrammar'
 
-/** Cap on the rising suggestion list — the glass panel above the bar grows to
- * fit however many render, so this bounds how tall it can get. */
+/** Limits the height of the suggestion list. */
 const MAX_SUGGESTIONS = 6
 
-/** One addressable line in the flat, terminal-style navigation history — only
- * this turn's still-uncommitted draft lines. ArrowUp/Down deliberately never
- * crosses into an already-committed turn (a prior turn's belief has already
- * been sent to the server and folded into inference; walking into it here
- * would silently let an in-progress edit look like it's still live). */
+/** Stores one uncommitted draft line for keyboard navigation. */
 interface HistoryEntry {
   lineIndex: number
   text: string
@@ -20,9 +15,7 @@ function buildHistory(draftLines: string[]): HistoryEntry[] {
   return draftLines.map((text, lineIndex) => ({ lineIndex, text }))
 }
 
-/** Split `before` (the text up to the caret) into completed tokens and the
- * partial word currently being typed — the unit `completionsAt` ranks
- * suggestions for. */
+/** Splits text before the caret into complete tokens and one partial token. */
 function tokensAndPartial(before: string): { tokens: string[]; partial: string } {
   const parts = before.split(/\s+/)
   const partial = parts[parts.length - 1]
@@ -30,10 +23,9 @@ function tokensAndPartial(before: string): { tokens: string[]; partial: string }
   return { tokens, partial }
 }
 
-/** Replace the word under the caret with `suggestion`, inserting exactly one
- * separating space before whatever followed the caret (none if `after` is
- * empty or already starts with whitespace). Returns the new full text and
- * the caret position immediately after the inserted word. */
+/** Replaces the token at the caret with a suggestion.
+ * Adds one separator when necessary.
+ * Returns the new text and caret position. */
 function applyTopSuggestion(
   current: string,
   caret: number,
@@ -43,40 +35,20 @@ function applyTopSuggestion(
   const after = current.slice(caret)
   const { partial } = tokensAndPartial(before)
   const prefix = before.slice(0, before.length - partial.length)
-  // A trailing space is wanted whenever `after` doesn't already start with
-  // one — including (this is the common case) when `after` is empty, so the
-  // caret lands ready to type the next word immediately.
+  // Add a space unless the remaining text starts with one.
+  // This places the caret at the next word.
   const separator = /^\s/.test(after) ? '' : ' '
   const text = `${prefix}${suggestion}${separator}${after}`
   return { text, caret: prefix.length + suggestion.length + separator.length }
 }
 
-/**
- * The floating, glassy, single-line tracker input — replaces the plain
- * textarea `TrackerScreen.tsx` used to render directly. Minecraft-chat-style
- * word completion (ranked suggestion list rising above the bar, ghost text
- * for the top candidate, Tab to accept — both suppressed once the current
- * word already IS a complete valid token, so a finished word doesn't keep
- * dangling a redundant/autocorrected suggestion), terminal-style history
- * navigation scoped to the CURRENT turn's draft lines only (ArrowUp/Down never
- * crosses into an already-committed turn; Alt+Left/Right jumps by word), a
- * line-number gutter tracking the current draft line (matching the server's
- * own `Line N` error numbering), and the two-tier commit model: `Enter` saves
- * the current line locally and jumps to a fresh event — or, on an emptied
- * existing line, deletes that event instead and steps back to the previous
- * one — and, when editing a NON-last line, instead inserts a fresh empty
- * event immediately after it and lands the cursor there, so a missed event
- * can be slotted into the middle of a turn without disturbing anything after
- * it; `Shift+Enter` additionally ends the turn, appending `endofturn` and
- * rebuilding the whole script so inference recomputes for real; `Backspace`
- * on an already-empty existing line deletes it the same way Enter does;
- * `Escape` discards the current line's unsaved edits without jumping anywhere
- * new-content-wise; `Shift+Escape` first discards the whole in-progress draft.
- * When the draft is already empty it reopens the last COMMITTED turn for
- * editing by actually rolling the session back through `popLastCommittedTurn`
- * (a real `PUT /history` rebuild, not a local-only pop). Pressing it again
- * abandons that reopened draft without cascading into another rollback.
- */
+/** Edits tracker events one line at a time.
+ * Tab accepts the first completion.
+ * Arrow keys navigate draft lines and tokens.
+ * Enter saves or removes one draft line.
+ * Shift+Enter commits the turn and rebuilds inference.
+ * Escape discards line changes.
+ * Shift+Escape discards the draft or reopens the latest committed turn. */
 export default function TrackerInputBar() {
   const {
     view,
@@ -97,16 +69,13 @@ export default function TrackerInputBar() {
   const [text, setText] = useState('')
   const [caretPos, setCaretPos] = useState(0)
   const [historyIndex, setHistoryIndex] = useState(0)
-  // Set while the draft holds a committed turn popped back open by
-  // Shift+Escape; the next press abandons it instead of cascading.
+  // Records whether Shift+Escape reopened the last committed turn.
+  // The next press discards that draft.
   const [reopenedCommittedTurn, setReopenedCommittedTurn] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // `disabled={busy}` makes the browser auto-blur the input the instant a
-  // rebuild starts (native behavior for disabling a focused element) — it
-  // does NOT regain focus on its own once re-enabled, which would silently
-  // strand every subsequent keystroke (ArrowUp/Enter/etc.) with nothing
-  // listening. Explicitly reclaim focus the moment busy work finishes.
+  // A disabled input loses focus during a rebuild.
+  // Restore focus when the rebuild finishes.
   useEffect(() => {
     if (!busy) inputRef.current?.focus()
   }, [busy])
@@ -121,14 +90,9 @@ export default function TrackerInputBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [text, caretPos, completions],
   )
-  // The current word is already a complete, valid token once it exactly
-  // matches (case/punctuation-insensitively) one of its own candidates —
-  // nothing left to autocomplete OR autocorrect, so suppress both the ghost
-  // and the suggestion panel entirely rather than keep dangling a redundant
-  // (or, worse, an unwanted autocorrect-away-from-what-was-just-typed) option.
-  // Numeric/percent/fraction HP tokens (`50%`, `120/200`) are self-complete —
-  // `completionsAt` already returns `[]` for them, so the candidate-match
-  // check alone would never catch them; check both.
+  // Hide suggestions when the current word matches a valid token.
+  // Match without case or punctuation differences.
+  // Also treat numeric HP values as complete tokens.
   const partialIsComplete =
     partial !== '' && (isSelfCompleteToken(partial) || suggestions.some((s) => norm(s) === norm(partial)))
   const ghost =
@@ -140,9 +104,7 @@ export default function TrackerInputBar() {
       ? suggestions[0].slice(partial.length)
       : ''
 
-  /** Load `newText` into the buffer with the caret at its end — every
-   * navigation/reset action (ArrowUp/Down, jump-to-append, delete-and-land-on-
-   * the-previous-line) wants exactly this. */
+  /** Loads text and moves the caret to its end. */
   function loadBuffer(newText: string) {
     setText(newText)
     setCaretPos(newText.length)
@@ -154,11 +116,8 @@ export default function TrackerInputBar() {
     loadBuffer('')
   }
 
-  /** Delete the draft line at `lineIndex` and land the buffer on whatever's
-   * now at the previous position (or a fresh append slot if that was the
-   * only line) — shared by Enter-on-empty and Backspace-on-empty (F6:
-   * "clicking enter on an empty text box should just delete that event, same
-   * thing for backspace on an empty event"). */
+  /** Deletes one draft line.
+   * Then loads the previous line or a new empty line. */
   function deleteDraftLine(lineIndex: number) {
     const next = draftLines.filter((_, i) => i !== lineIndex)
     setDraftLines(next)
@@ -207,11 +166,9 @@ export default function TrackerInputBar() {
       const insertIndex = currentEntry.lineIndex + 1
       const next = [...draftLines]
       next[currentEntry.lineIndex] = trimmed
-      // Insert a fresh empty slot right after the line just saved instead of
-      // jumping to the turn's end — lets a missed event be slotted into the
-      // middle of a turn without disturbing anything recorded after it.
-      // Saving that new slot empty deletes it again via the `trimmed === ''`
-      // branch above (same as any other existing line).
+      // Insert an empty line after the saved line.
+      // This lets the user add a missed event inside the turn.
+      // Saving the empty line removes it.
       next.splice(insertIndex, 0, '')
       setDraftLines(next)
       void previewDraft(next)
@@ -226,8 +183,7 @@ export default function TrackerInputBar() {
   }
 
   function handleEscape() {
-    // Discard whatever's in the buffer (including an in-progress edit to an
-    // existing line) and land on a fresh event — content never changes.
+    // Discard the input buffer and select a new event line.
     jumpToAppend(draftLines)
   }
 
@@ -235,9 +191,7 @@ export default function TrackerInputBar() {
     const trimmed = text.trim()
     let finalDraft = draftLines
     if (currentEntry && trimmed === '') {
-      // Emptying an existing line and ending the turn: drop that event
-      // (mirrors Enter's delete-on-empty — F6) rather than silently keeping
-      // its old text.
+      // Remove an existing empty line before the turn ends.
       finalDraft = draftLines.filter((_, i) => i !== currentEntry.lineIndex)
     } else if (currentEntry && trimmed !== '') {
       finalDraft = [...draftLines]
@@ -245,10 +199,7 @@ export default function TrackerInputBar() {
     } else if (trimmed !== '') {
       finalDraft = [...draftLines, trimmed]
     }
-    // Drop any OTHER still-blank slots left over from an insert-after (issue
-    // 3) the user never came back to fill in — harmless to the parser
-    // (blank lines are skipped, `tracker_parse.rs:158`) but tidier not to
-    // persist a stray empty content line into the committed script.
+    // Remove other empty inserted lines before the server stores the turn.
     finalDraft = finalDraft.filter((l) => l.trim() !== '')
     if (finalDraft.length === 0) return
     const ok = await endTurn(finalDraft)
@@ -261,8 +212,8 @@ export default function TrackerInputBar() {
 
   async function handleShiftEscape() {
     if (draftLines.length > 0 || text.trim() !== '' || reopenedCommittedTurn) {
-      // The first Shift+Escape always abandons the current draft. In
-      // particular, don't pop a committed turn while unsaved lines exist.
+      // The first Shift+Escape discards the current draft.
+      // Do not reopen a committed turn while unsaved lines exist.
       clearPreview()
       setDraftLines([])
       setReopenedCommittedTurn(false)
@@ -271,17 +222,14 @@ export default function TrackerInputBar() {
     }
     const popped = await popLastCommittedTurn()
     if (!popped) {
-      // Nothing committed yet to reopen — same as the old "restart" behavior:
-      // discard whatever's in progress and start fresh.
+      // If no committed turn exists, discard the draft and start a new one.
       clearPreview()
       setDraftLines([])
       jumpToAppend([])
       return
     }
-    // `popLastCommittedTurn` already rolled the session back one turn on the
-    // server (a real `PUT /history` rebuild, not a local-only pop), so the
-    // belief `previewDraft` below previews against genuinely excludes this
-    // turn's effects — load its lines back into the draft and land at the end.
+    // `popLastCommittedTurn` rebuilds the server session without the last turn.
+    // Restore that turn's lines to the draft.
     setDraftLines(popped)
     setReopenedCommittedTurn(true)
     jumpToAppend(popped)
@@ -296,9 +244,8 @@ export default function TrackerInputBar() {
       return
     }
     if (e.key === 'Backspace' && text === '' && currentEntry) {
-      // Backspace on an already-empty EXISTING line deletes that event (F6),
-      // mirroring Enter-on-empty; on the fresh append slot there's nothing to
-      // delete, so fall through to the native (no-op) behavior.
+      // Backspace removes an existing empty line.
+      // Let the browser handle Backspace on the new append line.
       e.preventDefault()
       deleteDraftLine(currentEntry.lineIndex)
       return
@@ -350,11 +297,8 @@ export default function TrackerInputBar() {
     <div className="glass-soft absolute inset-x-0 bottom-3 z-20 mx-auto w-full max-w-3xl rounded-card px-1 py-1 shadow-lg">
       <div>
         {suggestions.length > 0 && !partialIsComplete && (
-          // Its own glass-soft layer (same treatment as the outer bar, no
-          // gap below) so the blur/tint visually continues upward over every
-          // option, sitting directly against the input with nothing between
-          // them. Positioned `bottom-full` against the OUTER bar (this
-          // element has no `relative` of its own — see below).
+          // Continue the input bar background behind the suggestion list.
+          // Position the list directly above the outer bar.
           <div className="glass-soft absolute inset-x-3 bottom-full flex flex-col-reverse gap-0.5 rounded-t-card px-1 pb-1 pt-1.5">
             {suggestions.slice(0, MAX_SUGGESTIONS).map((s, i) => (
               <div

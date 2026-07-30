@@ -75,43 +75,28 @@ use crate::state::dex_data::{MoveData, PokemonData};
 use chance::ChanceMode;
 use eval::LeafEvaluator;
 
-/// Which of the paper's algorithms to run. All three compute the same value —
-/// that equivalence is the search's central regression test — and differ only in
-/// how much work they do to get there.
+/// Selects one solver algorithm.
+/// All algorithms must compute the same value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverAlgorithm {
-    /// Algorithm 1. Evaluate every cell of every matrix, solve every LP. The
-    /// reference implementation: no pruning, nothing to be subtly wrong.
+    /// Evaluates every matrix cell and solves every linear program.
     BackwardInduction,
-    /// Algorithm 2 (BIαβ). Before recursing into a successor, bound its value
-    /// with alpha-beta search on the two *serializations* of the subgame — the
-    /// variants where one player moves first and the other second. Letting a
-    /// player move second can only help them, so those searches bracket the true
-    /// simultaneous value; when the brackets meet, the subgame has a pure
-    /// equilibrium and needs no recursion at all.
-    ///
-    /// This trades LP solves for extra turn simulations, which is the wrong
-    /// direction given where this engine's cost actually sits. Included so the
-    /// benchmark can measure that rather than assume it.
+    /// Bounds successors with both serialized move orders.
+    /// Equal bounds identify a pure equilibrium.
+    /// This method replaces some matrix solves with more turn simulations.
     SerializedBounds,
-    /// Algorithm 3 (DOαβ), the default. Rather than filling the whole matrix,
-    /// grow a *restricted* game from one action per player: solve the small LP,
-    /// find each player's best response over the full action set, add those, and
-    /// repeat until neither player can improve. Equilibria have small support in
-    /// practice, so this typically touches a small fraction of the cells — and a
-    /// cell is a `simulate_turn` call, which is the whole cost of the search.
+    /// Grows a restricted game from one action per player.
+    /// Adds each player's best response until neither player can improve.
     DoubleOracle,
 }
 
 /// Everything the search needs beyond the position itself.
 #[derive(Debug, Clone, Copy)]
 pub struct SolveConfig {
-    /// Turns of lookahead. Mid-turn decision points — replacements after a
-    /// faint, self-switch pivots — do not consume a ply; see
-    /// [`SolveConfig::max_forced_chain`].
+    /// Turns of lookahead.
+    /// Replacement and self-switch choices do not consume depth.
     pub depth: u8,
-    /// Damage rolls per attack, passed through to `simulate_turn`. The single
-    /// biggest influence on both fidelity and cost.
+    /// Damage rolls per attack.
     pub damage_rolls: u8,
     /// Whether to branch on critical hits, likewise passed through.
     pub consider_crit: bool,
@@ -120,36 +105,24 @@ pub struct SolveConfig {
     pub algorithm: SolverAlgorithm,
     /// Scores positions at the depth horizon; see [`eval::LeafEvaluator`].
     pub eval: LeafEvaluator,
-    /// Whether [`SolverAlgorithm::DoubleOracle`] should also compute serialized
-    /// alpha-beta bounds. They sharpen its best-response pruning but cost a full
-    /// auxiliary search per successor. Off by default, and
-    /// [`SolverAlgorithm::SerializedBounds`] computes them regardless.
+    /// Enables serialized bounds during double-oracle search.
+    /// Each bound requires an auxiliary search.
     pub use_serialized_bounds: bool,
-    /// Cap on each player's joint-action count. `None` means no cap, which is
-    /// right for singles; doubles reaches a few hundred joint actions and tens
-    /// of thousands of matrix cells, where a cap is the difference between
-    /// tractable and not. Capping makes the equilibrium approximate and is
-    /// reported as [`SolveWarning::ActionsTruncated`].
+    /// Maximum joint actions for each player.
+    /// `None` keeps the complete action set.
+    /// A cap makes the result approximate.
     pub max_actions_per_player: Option<usize>,
-    /// Stop expanding after this many nodes and fall back to evaluating
-    /// statically. Exhausting the budget is reported as
-    /// [`SolveWarning::BudgetExhausted`] and never panics.
+    /// Maximum expanded nodes.
+    /// Static evaluation replaces later search.
     pub node_budget: Option<u64>,
-    /// Transposition-table size in entries, rounded up to a power of two. Cheap
-    /// — an entry is a hash, a depth and a bounded value — so this defaults
-    /// generously. Zero disables it.
+    /// Transposition-table capacity.
+    /// Zero disables the table.
     pub tt_capacity: usize,
-    /// Turn-resolution cache size, in *successor states* rather than entries.
-    ///
-    /// Defaults to zero (disabled), because entries hold whole `MatchState`s and
-    /// a single turn at high damage-roll counts can produce hundreds of them.
-    /// It pays for itself only under [`SolverAlgorithm::SerializedBounds`] or
-    /// `use_serialized_bounds`, where the auxiliary searches revisit the same
-    /// `(state, action, action)` triples the main search already resolved.
+    /// Turn-cache capacity in successor states.
+    /// Zero disables the cache.
+    /// Serialized searches can reuse these results.
     pub turn_cache_capacity: usize,
-    /// How many consecutive mid-turn decision points may pass without consuming
-    /// a ply, before one is charged anyway. A safety valve: replacements always
-    /// make progress, so this should never bind.
+    /// Maximum decision chain that does not consume depth.
     pub max_forced_chain: u8,
 }
 
@@ -187,8 +160,8 @@ pub struct JointActionProb {
 pub struct SolveStats {
     /// Decision nodes whose matrix was constructed.
     pub nodes_expanded: u64,
-    /// `simulate_turn` calls that actually ran. **The cost metric that matters**
-    /// — everything else in this struct is noise beside it.
+    /// Completed `simulate_turn` calls.
+    /// This is the main cost metric.
     pub turns_simulated: u64,
     /// Matrix cells whose value was computed.
     pub matrix_cells_evaluated: u64,
@@ -207,8 +180,7 @@ pub struct SolveStats {
     pub elapsed: Duration,
 }
 
-/// A non-fatal degradation: the answer is still returned, but is approximate in
-/// the stated way.
+/// Describes why a returned answer is approximate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveWarning {
     /// The node budget ran out; nodes past that point were scored statically
@@ -249,9 +221,8 @@ impl fmt::Display for SolveWarning {
 /// Why a position could not be solved at all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveError {
-    /// Team preview is a simultaneous move too, but over lead selections rather
-    /// than battle commands, and its action space is a different combinatorial
-    /// problem. Resolve the preview first, then solve the battle.
+    /// Team preview has a different action space.
+    /// Resolve it before the battle.
     TeamPreviewUnsupported,
     /// The battle is already decided; there is nothing to choose.
     GameAlreadyOver { winner: Player },
@@ -291,10 +262,8 @@ pub struct SolveResult {
 }
 
 impl SolveResult {
-    /// The single likeliest joint action for `player`, or `None` in a position
-    /// with no choices. Convenient for a bot that will not mix; note that
-    /// playing it deterministically forfeits the unexploitability that made the
-    /// equilibrium worth computing.
+    /// Returns the most probable joint action for one player.
+    /// Returns `None` when the player has no choices.
     pub fn most_likely_action(&self, player: Player) -> Option<&JointActionProb> {
         let strategy = match player {
             Player::P1 => &self.p1_strategy,
@@ -306,15 +275,10 @@ impl SolveResult {
     }
 }
 
-/// Solve `state` to `config.depth` turns of lookahead.
-///
-/// Uses whatever RNG is ambient, which only matters for
-/// [`ChanceMode::Sample`]; every other mode is deterministic. Use
-/// [`solve_seeded`] when reproducibility is required.
-///
-/// Set `VERBOSITY` to 0 before calling. The engine's tracing is keyed off that
-/// global, and a search performs thousands of turn resolutions — leaving it high
-/// floods stdout and dominates the runtime.
+/// Solves `state` to the configured depth.
+/// Only sample chance mode uses the current random generator.
+/// Use [`solve_seeded`] for reproducible samples.
+/// Set `VERBOSITY` to zero before a large search.
 pub fn solve(
     state: &MatchState,
     pokemon_dex: &HashMap<Species, PokemonData>,

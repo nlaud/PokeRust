@@ -3,24 +3,17 @@ import type { PokemonView } from '../../api/types'
 import MonRow from '../simulate/MonRow'
 import { useTracker } from '../../store/trackerStore'
 
-// Recreates `pages/simulate/TeamInfoSidebar.tsx`'s tab shell and roster
-// derivation for tracker mode, reusing the same `MonRow` (item/ability/
-// nature/EVs/stat-ranges/boosts/volatiles — exactly what the fog-of-war
-// engine narrows) so a tracked opponent's belief visibly tightens the same
-// way an in-progress simulated battle's does. Two differences from battle
-// mode's sidebar:
-//   - No `currentPlayer`-driven tab auto-switching (tracker has no hotseat
-//     handoff between two players) — the default tab is just a constant.
-//   - The two roster tabs are labeled "Your Team"/"Opponent", not
-//     "Player 1"/"Player 2" — tracker mode is always one fixed perspective.
+// Uses the simulator team rows with tracker state.
+// Tracker mode has one fixed perspective and no hotseat tab change.
+// Its roster tabs use the labels Your Team and Opponent.
 
 type Tab = 'p1' | 'p2' | 'predicates'
 
 export default function TrackerTeamSidebar() {
   const view = useTracker((s) => s.view)
   const [tab, setTab] = useState<Tab>('p2')
-  // Expansion is keyed by player + monId at the sidebar level, so a mon stays
-  // expanded when flipping between "Your Team" and "Opponent" and back.
+  // Use the player and Pokémon ID as the expansion key.
+  // This keeps expansion state after a tab change.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggle = (key: string) => {
@@ -33,23 +26,18 @@ export default function TrackerTeamSidebar() {
   }
 
   const hasBelief = view?.belief !== undefined
-  // The Predicates tab only exists under a non-Perfect-Information mode; fall
-  // back to "Your Team" if it was selected in a previous session that's
-  // since ended (tracker mode never runs Perfect Information — see
-  // `CreateTrackerRequest.informationMode` — but a stale tab pick from a
-  // prior session is still worth guarding the same way battle mode does).
+  // Hide the Predicates tab during perfect information.
+  // Select Your Team when a previous session left this tab active.
   const activeTab: Tab = tab === 'predicates' && !hasBelief ? 'p1' : tab
 
   const side = activeTab === 'p1' ? view?.p1 : activeTab === 'p2' ? view?.p2 : undefined
   const active = side?.active ?? []
   const back = side?.back ?? []
   const possibleBack = side?.possibleBack ?? []
-  // Opponent mons that fainted and were then replaced: the fog belief tracks
-  // these in their own bucket (rather than dropping them) so their revealed
-  // info survives the switch that benched them.
+  // Show replaced fainted opponents from the belief's fainted list.
+  // This list keeps their revealed data.
   const faintedBack = side?.fainted ?? []
-  // Real hidden-slot count (not the possibleBack candidate-species count):
-  // how many of this side's brought mons we simply haven't seen yet.
+  // Count brought Pokémon that the player has not seen.
   const hiddenBack = Math.max(
     0,
     (view?.broughtPerSide ?? 0) - (active.length + back.length + faintedBack.length),
@@ -58,9 +46,8 @@ export default function TrackerTeamSidebar() {
   const liveActive = active.filter((mon) => !mon.fainted)
   const liveBack = back.filter((mon) => !mon.fainted)
 
-  // Keyed by section + list index, not just `mon.monId` — see
-  // `TeamInfoSidebar.tsx`'s identical comment for why (bench mons whose
-  // identity hasn't narrowed yet can share a fallback id).
+  // Use the section and list index as each row key.
+  // Unknown bench Pokémon can share a fallback ID.
   const row = (mon: PokemonView, isActive: boolean, section: string, idx: number) => {
     const key = `${activeTab}-${section}-${idx}-${mon.monId}`
     return (

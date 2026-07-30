@@ -9,7 +9,7 @@
 //!
 //! Normal phases use `validate_battle_command_combination`.
 //! Replacement phases use `replacement_commands_are_valid`.
-//! The replacement validator assigns each available bench Pokémon before it permits an empty slot.
+//! The replacement validator uses each available bench Pokémon before it permits an empty slot.
 
 use std::collections::HashMap;
 
@@ -23,19 +23,15 @@ use crate::state::dex_data::{MoveData, PokemonData};
 use crate::state::pokemon::PokemonState;
 use crate::user::replacement_commands_are_valid;
 
-/// Which input phase a battle is in.
-///
-/// The same dispatch the terminal driver performs in
-/// `user::choose_battle_commands_for_player`, promoted to a named type so the
-/// search and the server can share one definition.
+/// Identifies the current input phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
     /// Leads have not been chosen yet.
     TeamPreview,
     /// The ordinary case: every healthy slot picks a move or a switch.
     Normal,
-    /// A self-switch move (U-turn, Baton Pass, …) resolved mid-turn; only the
-    /// pending slot chooses, every other slot must Pass.
+    /// A self-switch waits for one slot choice.
+    /// Other slots must pass.
     SelfSwitch,
     /// The turn is over and fainted slots need replacements.
     Replacement,
@@ -55,8 +51,7 @@ pub struct JointActions {
 }
 
 impl JointActions {
-    /// Whether the action set was reduced to fit a cap — the search reports this
-    /// as a warning, since a capped set makes the equilibrium approximate.
+    /// Returns true when a cap removed actions.
     pub fn was_capped(&self) -> bool {
         self.actions.len() < self.total
     }
@@ -103,12 +98,9 @@ pub fn healthy_bench_switches(state: &BattleState, player: Player) -> Vec<Battle
         .collect()
 }
 
-/// The commands each active slot of `player` may legally submit, independently
-/// of what the other slots do. Slot `i` of the result corresponds to active slot
-/// `i`; a slot with no real choice yields a single `Pass`.
-///
-/// Cross-slot constraints are *not* applied here — that is
-/// [`joint_actions`]'s job.
+/// Returns independent legal commands for each active slot.
+/// A slot without a choice returns one Pass.
+/// This function does not apply cross-slot constraints.
 pub fn per_slot_commands(
     state: &BattleState,
     player: Player,
@@ -164,17 +156,9 @@ pub fn per_slot_commands(
         .collect()
 }
 
-/// Every legal joint action for `player`, optionally capped.
-///
-/// The cartesian product of the per-slot options, filtered by the joint
-/// validator for `phase`. In singles this is just the slot's own command list;
-/// in doubles it is where the cross-slot rules bite.
-///
-/// `cap` bounds the returned set. Exceeding it is realistic only in doubles,
-/// where ~15–20 options per slot multiply out to a few hundred joint actions and
-/// a matrix with tens of thousands of cells. Reduction is a deliberate
-/// approximation and is reported via [`JointActions::was_capped`]; see
-/// [`reduce_to_cap`] for what gets dropped and why.
+/// Returns every legal joint action for one player.
+/// Applies cross-slot validation after the Cartesian product.
+/// `cap` can reduce the result and make the solution approximate.
 pub fn joint_actions(
     state: &BattleState,
     player: Player,
@@ -201,10 +185,7 @@ pub fn joint_actions(
         })
         .collect();
 
-    // A player with no legal joint action would make the matrix game empty and
-    // the position unsolvable. The engine always leaves `Pass` available, but if
-    // the filters ever conspire to reject everything, an all-Pass fallback keeps
-    // the search running on a legal-by-construction action.
+    // Use an all-Pass fallback when validation removes every action.
     if actions.is_empty() {
         actions.push(vec![BattleCommand::Pass; actives.len()]);
     }
@@ -216,19 +197,10 @@ pub fn joint_actions(
     JointActions { actions, total }
 }
 
-/// Trim a joint-action set down to `cap` entries.
-///
-/// Two stages, because a blind truncation would be badly biased: the per-slot
-/// lists are emitted switches-first, so keeping a prefix would keep every switch
-/// and almost no attacks.
-///
-/// 1. **Drop Terastallization and Mega Evolution variants.** The engine
-///    enumerates the `(tera, mega)` cross product per move, so these are up to
-///    four near-duplicates of every attack. Removing them preserves one entry
-///    for every distinct move, target and switch — by far the least
-///    informationally costly cut available.
-/// 2. **Stride-sample.** If still over, keep every *n*-th action. Arbitrary, but
-///    it preserves the mix of switches and attacks that a prefix would destroy.
+/// Reduces a joint-action set to `cap` entries.
+/// First, removes Tera and Mega variants.
+/// Then keeps actions at a regular interval.
+/// This process keeps a mix of switches and attacks.
 fn reduce_to_cap(actions: Vec<Vec<BattleCommand>>, cap: usize) -> Vec<Vec<BattleCommand>> {
     let cap = cap.max(1);
     if actions.len() <= cap {

@@ -8,18 +8,16 @@ type Tab = 'p1' | 'p2' | 'predicates'
 export default function TeamInfoSidebar() {
   const view = useBattle((s) => s.view)
   const currentPlayer = useBattle((s) => s.currentPlayer)
-  // Default (and re-default) to whichever tab is NOT the player we're currently
-  // watching from — i.e. the opposing team — so the hotseat handoff always opens
-  // on the newly-active player's view of their opponent, not a stale manual pick.
+  // Show the opponent tab for the current player.
+  // Reset this tab after each hotseat handoff.
   const opponentTab: Tab = currentPlayer === 'p1' ? 'p2' : 'p1'
   const [tab, setTab] = useState<Tab>(opponentTab)
-  // Only re-trigger when the watched perspective actually changes — a manual
-  // tab click within the same perspective must not be clobbered.
+  // Do not reset a manual tab choice until the player changes.
   useEffect(() => {
     setTab(opponentTab)
   }, [opponentTab])
-  // Expansion is keyed by player + monId at the sidebar level, so a mon stays
-  // expanded when flipping between "Player 1" and "Player 2" and back.
+  // Use the player and Pokémon ID as the expansion key.
+  // This keeps expansion state after a tab change.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggle = (key: string) => {
@@ -32,15 +30,13 @@ export default function TeamInfoSidebar() {
   }
 
   const hasBelief = view?.belief !== undefined
-  // The Predicates tab only exists under a non-Perfect-Information mode; fall back
-  // to "Your Team" if it was selected in a previous battle that's since ended.
+  // Hide the Predicates tab during perfect information.
+  // Select Your Team when a previous battle left this tab active.
   const activeTab: Tab = tab === 'predicates' && !hasBelief ? 'p1' : tab
 
   const side = activeTab === 'p1' ? view?.p1 : activeTab === 'p2' ? view?.p2 : undefined
-  // During team preview there are no sides yet, but the preview payload already
-  // carries PokemonViews for both teams — the server masks p2Mons the same way it
-  // masks a battle-phase SideView (see `preview_view` in mapping.rs), so this is
-  // safe to show as-is even for the opponent tab.
+  // Team preview supplies masked Pokémon views for both teams.
+  // Show these views before the server creates battle sides.
   const previewMons =
     !side && view?.preview && activeTab !== 'predicates'
       ? (activeTab === 'p1' ? view.preview.p1Mons : view.preview.p2Mons)
@@ -48,35 +44,25 @@ export default function TeamInfoSidebar() {
   const active = side?.active ?? []
   const back = side?.back ?? previewMons
   const possibleBack = side?.possibleBack ?? []
-  // Opponent mons that fainted and were then replaced: the fog belief tracks these
-  // in their own bucket (rather than dropping them — see `SideView.fainted`'s doc
-  // comment) so their revealed info survives the switch that benched them.
+  // Show replaced fainted opponents from the belief's fainted list.
+  // This list keeps their revealed data.
   const faintedBack = side?.fainted ?? []
-  // Real hidden-slot count (not the possibleBack candidate-species count): how many
-  // of this side's brought mons we simply haven't seen yet. Decreases as mons are
-  // revealed and hits 0 once every brought mon has been seen (even if some brought
-  // species are still ambiguous within `possibleBack`). `faintedBack` mons are
-  // already-seen brought mons too, so they count toward "seen" the same as
-  // `active`/`back`.
+  // Count brought Pokémon that the player has not seen.
+  // Possible species do not change this count.
+  // Active, bench, and fainted entries count as seen.
   const hiddenBack = Math.max(
     0,
     (view?.broughtPerSide ?? 0) - (active.length + back.length + faintedBack.length),
   )
-  // Fainted mons get pulled out of the active/back/faintedBack lists into their own
-  // section below "Possibly in the back" — grouping them together (rather than
-  // leaving them dimmed in place) surfaces their revealed info in one predictable
-  // spot. The three source lists are disjoint (a mon lives in exactly one bucket at
-  // a time), so this can't double-count.
+  // Put all fainted Pokémon in one section.
+  // The source lists do not overlap, so this does not duplicate entries.
   const fainted = [...active, ...back, ...faintedBack].filter((mon) => mon.fainted)
   const liveActive = active.filter((mon) => !mon.fainted)
   const liveBack = back.filter((mon) => !mon.fainted)
 
-  // Keyed by section + list index, not just `mon.monId`: bench mons whose identity
-  // hasn't narrowed yet can share a fallback id (or, historically, all shared the
-  // same placeholder id — see mapping.rs's `bench_pokemon_view_from_belief`), and a
-  // duplicate React key merges those rows' expansion state and corrupts
-  // reconciliation across tab switches. The section+index pair is always unique
-  // within one render regardless of what the belief currently knows about monId.
+  // Use the section and list index as each row key.
+  // Unknown bench Pokémon can share a fallback ID.
+  // A unique row key prevents shared expansion state.
   const row = (mon: PokemonView, isActive: boolean, section: string, idx: number) => {
     const key = `${activeTab}-${section}-${idx}-${mon.monId}`
     return (

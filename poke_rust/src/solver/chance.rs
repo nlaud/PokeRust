@@ -16,44 +16,30 @@ use crate::simulator::helpers::sample_one_weighted;
 /// How much of a chance node's successor distribution to keep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChanceMode {
-    /// Every successor, at its true probability. The only exact mode: the value
-    /// the search returns is the game's real value under the configured damage
-    /// rolls and crit setting.
+    /// Keeps every successor at its true probability.
     Enumerate,
     /// The `k` most likely successors, renormalized to sum to 1.
     ///
-    /// Biased toward the middle of the damage distribution, which is where the
-    /// mass is; the tails it drops are exactly the rolls that decide whether a
-    /// borderline attack KOs, so this understates variance-driven lines. Never
-    /// drops the last branch — `TopK(0)` behaves as `TopK(1)`.
+    /// Favors common outcomes and can remove important tail outcomes.
+    /// Always keeps at least one branch.
     TopK(usize),
     /// Every successor at or above probability `t`, renormalized.
     ///
-    /// Unlike `TopK` this adapts to the shape of the node: a turn with two
-    /// roughly-even outcomes keeps both, while a turn smeared across hundreds of
-    /// near-identical damage rolls collapses hard. The risk is the mirror image
-    /// — a node whose branches are all individually unlikely keeps only its
-    /// single most likely branch, so that case is floored at one.
+    /// Adapts the kept count to the probability distribution.
+    /// Always keeps at least one branch.
     Threshold(f64),
     /// `n` successors drawn by weight, with replacement, each weighted by how
     /// often it came up.
     ///
-    /// Unbiased in expectation rather than mass-truncated, which is the right
-    /// choice when the tails matter. Costs variance and makes the result
-    /// seed-dependent, so a solve is only reproducible via `solve_seeded`.
+    /// Preserves tail outcomes in expectation.
+    /// Adds variance and requires `solve_seeded` for reproducibility.
     Sample(usize),
 }
 
 impl ChanceMode {
-    /// Reduce a weighted successor list according to this mode.
-    ///
-    /// Returns the surviving branches — whose weights always sum to 1 — and the
-    /// probability mass that was discarded before renormalization, which the
-    /// search surfaces as a warning. `Sample` reports zero discarded mass: it
-    /// reweights rather than truncates, so nothing is thrown away.
-    ///
-    /// `branches` is assumed to be sorted by descending probability, as
-    /// `simulate_turn` returns it.
+    /// Reduces a weighted successor list.
+    /// Returns normalized branches and the removed probability mass.
+    /// Input branches must use descending probability order.
     pub fn apply<T>(&self, mut branches: Vec<(T, f64)>) -> (Vec<(T, f64)>, f64) {
         if branches.len() <= 1 {
             return (renormalize(branches), 0.0);
@@ -95,10 +81,8 @@ impl ChanceMode {
     }
 }
 
-/// Draw `draws` branches by weight and return each distinct one weighted by how
-/// often it was drawn. Routed through `sample_one_weighted` so the draw obeys
-/// any `scoped_sample_rng` the caller installed, which is what makes
-/// `solve_seeded` reproducible.
+/// Draws branches with replacement.
+/// Weights each distinct result by its draw count.
 fn sample_with_replacement<T>(branches: Vec<(T, f64)>, draws: usize) -> Vec<(T, f64)> {
     let weights: Vec<f64> = branches.iter().map(|(_, p)| *p).collect();
 
@@ -122,9 +106,7 @@ fn sample_with_replacement<T>(branches: Vec<(T, f64)>, draws: usize) -> Vec<(T, 
     renormalize(kept)
 }
 
-/// Rescale weights to sum to 1, so a truncated node's children still form a
-/// distribution and the expectation over them stays an average rather than a
-/// silently shrunken sum.
+/// Rescales branch weights to sum to one.
 fn renormalize<T>(mut branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
     let total: f64 = branches.iter().map(|(_, p)| p).sum();
     if total <= 0.0 {
@@ -144,8 +126,7 @@ fn renormalize<T>(mut branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
     branches
 }
 
-/// Discarded mass as a fraction, guarding against a total that floating-point
-/// accumulation has nudged the wrong side of the kept mass.
+/// Returns the discarded probability fraction without negative rounding error.
 fn discarded(total: f64, kept: f64) -> f64 {
     if total <= 0.0 {
         0.0

@@ -1,14 +1,11 @@
 //! Competitive usage statistics from championsbattledata.com.
 //!
-//! `meta_scraper/update_meta.py` caches the site's API responses verbatim under
-//! `meta_scraper/data/<Season>/<Format>/<slug>.json`; this module parses that
-//! cache into a `MetaDex` the determinizer can sample from. See
-//! `meta_scraper/README.md` for the scraper, the on-disk layout, and the
-//! attribution the site's licence requires.
+//! `meta_scraper/update_meta.py` stores the API data.
+//! This module parses the cache into a `MetaDex`.
+//! See `meta_scraper/README.md` for layout and attribution.
 //!
-//! Sits at the top level rather than under `data/` because everything there is a
-//! generated enum with no I/O, whereas this module does filesystem work and
-//! fuzzy name resolution.
+//! This module performs file access and name resolution.
+//! Therefore, it does not belong in the generated `data` module.
 
 pub mod dex;
 pub mod names;

@@ -28,8 +28,7 @@ export class ApiError extends Error {
   }
 }
 
-/** Thrown by `postTrackerEvents` on a parse failure — `line` (1-based) lets the
- * caller point the editor at the offending line instead of just showing text. */
+/** Tracker parse error with a one-based line number. */
 export class TrackerParseApiError extends ApiError {
   line: number
   constructor(line: number, message: string) {
@@ -94,11 +93,7 @@ export function deleteTracker(trackerId: string): Promise<void> {
   return request(`/api/tracker/${trackerId}`, { method: 'DELETE' })
 }
 
-/** Shared by every tracker-TEXT endpoint (`/events`, `/preview`, `/history`):
- * a parse failure's body shape is `{ line, message }` (see
- * `TrackerParseApiError`), not the ordinary `{ message }` `ApiError` body
- * every other endpoint returns — so this can't just be the generic `request`
- * helper above. */
+/** Sends tracker text and handles its line-specific parse error format. */
 async function requestTrackerText<T>(path: string, method: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -127,9 +122,7 @@ export function postTrackerEvents(
   return requestTrackerText(`/api/tracker/${trackerId}/events`, 'POST', req)
 }
 
-/** Per-event structural preview — see `TrackerPreviewResponse`'s doc comment.
- * Never mutates the session; safe to call on every keystroke's committed word
- * (debounced by the caller). */
+/** Gets a structural preview without changing the session. */
 export function previewTrackerEvents(
   trackerId: string,
   req: TrackerPreviewRequest,
@@ -137,11 +130,8 @@ export function previewTrackerEvents(
   return requestTrackerText(`/api/tracker/${trackerId}/preview`, 'POST', req)
 }
 
-/** Rebuild the whole session from its initial (pre-first-turn) belief using a
- * corrected/edited FULL script — the only way an edit to an already-committed
- * turn takes effect (see `poke_rust::bin::server::tracker::rebuild_tracker_history`'s
- * doc comment). The response's `log` is the WHOLE log — replace the client's
- * local log with it, don't append. */
+/** Rebuilds a tracker session from its initial belief and complete script.
+ * Replace the local log with the returned complete log. */
 export function rebuildTrackerHistory(
   trackerId: string,
   req: TrackerEventsRequest,
@@ -153,35 +143,22 @@ export function getTrackerCompletions(trackerId: string): Promise<TrackerComplet
   return request(`/api/tracker/${trackerId}/completions`)
 }
 
-/** The full teamsheet-legal species list, for the tracker setup form's opponent
- * picker. Session-free on purpose — see `SpeciesListDto`. */
+/** Gets all teamsheet species for the tracker setup page. */
 export function listSpecies(): Promise<SpeciesListDto> {
   return request('/api/dex/species')
 }
 
-/** Consumes the `GET /api/benchmark` Server-Sent Events stream.
- *
- * Three unbounded sweeps run sequentially server-side and each reports
- * independently: `progress` throughout, then one `result` when it finishes or
- * one `failed` if it does not. Neither closes the stream — a failed sweep must
- * not cancel the two still waiting to run.
- * Only `done`, sent once all three have reported, ends it.
- *
- * `failed` is named that rather than `error` so it cannot be confused with
- * `EventSource`'s own built-in connection-level `error` (a plain `Event`, not a
- * `MessageEvent` with `.data`). That one is a whole-stream failure and is
- * reported through `onAborted`.
- *
- * Closing on `done` matters: `EventSource` auto-reconnects by default, which
- * would silently re-trigger the entire multi-minute run. The returned function
- * cancels early (e.g. on unmount). */
+/** Reads the benchmark event stream.
+ * Each test sends progress and then a result or failure.
+ * The `done` event closes the stream and prevents automatic reconnection.
+ * The returned function cancels the stream. */
 export function streamBenchmark(handlers: {
   onProgress: (progress: BenchmarkProgress) => void
   onResult: (result: BenchmarkResult) => void
   onSweepFailed: (failure: BenchmarkSweepError) => void
-  /** Every sweep has reported; the stream is closed. */
+  /** Called after all tests report and the stream closes. */
   onDone: () => void
-  /** The stream itself died, so sweeps still running will never report. */
+  /** Called when a connection failure closes the stream. */
   onAborted: (message: string) => void
 }): () => void {
   const es = new EventSource('/api/benchmark')

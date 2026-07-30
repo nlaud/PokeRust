@@ -1,13 +1,8 @@
-// EventNode → battle-log lines. Events carry slot references, not names, and
-// the Pokémon in a slot changes over the battle — so the log is rendered as a
-// single chronological walk that maintains a slot→species map, updated by the
-// switch events as they pass. That map starts EMPTY on every call, so any
-// event referencing a slot whose occupant was introduced before this walk
-// began (a prior turn's switch that isn't part of THIS render, most notably
-// the in-progress preview turn rendered in isolation — see
-// `TrackerLogSidebar.tsx`) falls back to the bare "P2 slot 2" form. `renderLog`
-// takes the current `BattleView` so callers can seed the resolver with every
-// active slot's already-known species before the walk starts, closing that gap.
+// Converts `EventNode` values to battle-log lines.
+// Events identify slots instead of Pokémon names.
+// The renderer updates a slot-to-species map as it reads switch events.
+// `BattleView` supplies active species that entered before the current event list.
+// Unknown occupants use a label such as `P2 slot 2`.
 
 import type { BattleView, EventNode, FieldSlot, ObservedHp, PlayerId, TurnLogEntry } from '../api/types'
 
@@ -61,14 +56,10 @@ class NameResolver {
   }
 }
 
-/** Pre-populate a resolver from the field's current occupants — every active
- * slot's species the belief already knows, indexed by its slot position
- * (`SideView.active[i]` <-> `FieldSlot { slotIndex: i }`). Skips the literal
- * "Unknown" placeholder `describe_unknown` renders for a still-fogged
- * opponent slot (see `information/describe.rs`) so an unresolved slot keeps
- * the more honest "P2 slot 2" fallback rather than a nonsensical "P2's
- * Unknown"; a narrowed-but-not-exact guess like "Charizard or Aerodactyl" is
- * still seeded, since that's more informative than the bare slot fallback. */
+/** Adds known active species to the slot resolver before event rendering.
+ * It ignores the `Unknown` placeholder.
+ * An unresolved slot then keeps a label such as `P2 slot 2`.
+ * It keeps a narrowed species list because that list gives useful information. */
 function seedResolverFromView(resolver: NameResolver, view: BattleView | null | undefined) {
   if (!view) return
   const sides: [PlayerId, typeof view.p1][] = [
@@ -141,8 +132,8 @@ function renderEvent(
       line(`${resolver.name(event.slot)} must recharge!`, 'muted')
       break
     case 'singleMoveOrTurn': {
-      // The protection family reads as the in-game line, not "used X!"
-      // (the MoveUsed event above already covers the "used" phrasing).
+      // Use the in-game protection message.
+      // The parent `MoveUsed` event already reports the move.
       const PROTECTS = ['Protect', 'Detect', 'Spiky Shield', 'Baneful Bunker', "King's Shield"]
       if (PROTECTS.includes(event.move)) {
         line(`${resolver.name(event.slot)} protected itself!`, 'primary')
@@ -187,9 +178,9 @@ function renderEvent(
       )
       break
     case 'statusCured': {
-      // Sleep/freeze recovery reads as "woke up"/"thawed out" in-game (this fires for
-      // BOTH a natural timer expiry and a cure effect — Champions has no separate event
-      // for the two), while the other four statuses keep the generic "cured of" phrasing.
+      // Use the in-game recovery text for sleep and freeze.
+      // Champions uses the same event for natural recovery and a cure.
+      // Other statuses use the general cure text.
       const text =
         event.status.code === 'SLP'
           ? `${resolver.name(event.target)} woke up!`
@@ -290,32 +281,23 @@ function renderEvent(
       line(`${resolver.name(event.slot)} transformed into ${event.intoSpecies}!`, 'primary')
       break
     default: {
-      // Unknown future event types must never crash the log.
+      // Ignore an unknown event type without a log failure.
       const unknown = event as { type: string }
       line(`${unknown.type} event`, 'muted')
     }
   }
 
-  // endOfTurn children render at the same visual depth as their header line.
+  // Render end-of-turn children at the header depth.
   const childDepth = event.type === 'endOfTurn' && event.reactions.length === 0 ? depth : depth + 1
   for (const reaction of event.reactions) {
     renderEvent(reaction, childDepth, resolver, out, showSlotOrder)
   }
 }
 
-/** Render the full battle log in one chronological pass. `seedView`, when
- * given, is the CURRENT `BattleView` — used to (a) pre-seed the slot→species
- * resolver with every already-known active mon, so a render that doesn't
- * start from turn 1 (most notably the in-progress preview turn, rendered in
- * isolation from the committed log — see `TrackerLogSidebar.tsx`) doesn't fall
- * back to "P2 slot 2" for a mon introduced before this call began, and (b)
- * decide whether send-out lines are worth annotating with their slot position
- * at all (`activePerSide > 1` — singles has only one slot per side, so
- * "slot 1" on every switch would be pure noise there).
- *
- * Consecutive entries with the same label (e.g. a U-turn self-switch that
- * arrives as a separate server round-trip at the same turn number) are
- * coalesced into a single RenderedTurn so the sidebar only draws one divider. */
+/** Renders the complete battle log in time order.
+ * `seedView` supplies occupants that entered before the event list.
+ * It also enables slot labels for formats with multiple active slots.
+ * Entries with the same turn label share one rendered turn. */
 export function renderLog(entries: TurnLogEntry[], seedView?: BattleView | null): RenderedTurn[] {
   const resolver = new NameResolver()
   seedResolverFromView(resolver, seedView)
@@ -328,7 +310,7 @@ export function renderLog(entries: TurnLogEntry[], seedView?: BattleView | null)
     }
     const prev = out[out.length - 1]
     if (prev && prev.label === entry.label) {
-      // Same turn — append to the existing block instead of opening a new one.
+      // Add events from the same turn to the current block.
       prev.lines.push(...lines)
     } else {
       out.push({ label: entry.label, lines })

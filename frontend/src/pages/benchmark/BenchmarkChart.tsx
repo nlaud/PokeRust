@@ -1,31 +1,29 @@
 import { Fragment } from 'react'
 import Tooltip from '../../components/common/Tooltip'
 
-/** A numeric column to the right of the bars. `title` is the explanation of what
- * the column measures — it lives on the header rather than on every cell, so a
- * metric is explained once instead of once per row. */
+/** Defines one numeric column beside the bars.
+ * `title` explains the metric in the header. */
 export interface ChartColumn {
   key: string
   header: string
   title?: string
 }
 
-/** One cell of one row. `title` carries row-specific detail the header can't —
- * a caught error message, the exact counts behind a ratio. */
+/** Defines one table cell.
+ * `title` gives details that apply only to this row. */
 export interface ChartCell {
   text: string
   title?: string
-  /** Renders in the warning colour (e.g. a nonzero contradiction count). */
+  /** Uses the warning color. */
   warn?: boolean
 }
 
 export interface ChartRow {
   key: string
   label: string
-  /** Explanation of the row's configuration — what "top4" or "BIαβ" mean. */
+  /** Explains the row configuration. */
   labelTitle?: string
-  /** The magnitude this row's bar encodes. Which column it corresponds to is
-   * the caller's business; the bar is a visual aid for the primary metric. */
+  /** Sets the bar magnitude for the primary metric. */
   value: number
   /** One entry per column in `columns`, aligned by index. */
   cells: ChartCell[]
@@ -33,23 +31,10 @@ export interface ChartRow {
   barTitle?: string
 }
 
-/** A horizontal bar per row plus a table of numeric columns.
- *
- * One linear scale per chart, deliberately: callers split e.g. singles from
- * doubles into separate charts rather than sharing a scale, because mixing
- * series that differ by two or three orders of magnitude flattens the smaller
- * one into an invisible sliver. Each chart is a single series, so it needs no
- * legend — its card title names it.
- *
- * Every column shares one CSS grid rather than each row being its own flex row,
- * so columns auto-size to their widest content across all rows and line up
- * everywhere, leaving the bar column identical on every row regardless of how
- * long one row's text happens to be. The template is inline rather than a
- * Tailwind class because the column count is data-driven and Tailwind's JIT
- * only emits classes it can see literally in the source.
- *
- * Hand-rolled inline SVG rather than a charting dependency — the codebase has
- * none today (see `frontend/README.md`). */
+/** Shows one horizontal bar and its numeric cells for each row.
+ * All rows use one linear scale.
+ * One CSS grid aligns all columns.
+ * Inline SVG draws the bars without a chart library. */
 export default function BenchmarkChart({
   rows,
   columns,
@@ -57,9 +42,7 @@ export default function BenchmarkChart({
 }: {
   rows: ChartRow[]
   columns: ChartColumn[]
-  /** Draws a recessive marker at this value on every bar. For a ratio chart the
-   * neutral point is the whole story — "is this bar past 1×?" should be
-   * answerable by looking, not by reading the number column. */
+  /** Draws a reference marker on each bar. */
   reference?: { value: number; label: string }
 }) {
   if (rows.length === 0) return null
@@ -70,9 +53,7 @@ export default function BenchmarkChart({
   return (
     <div className="overflow-x-auto">
       <div className="grid min-w-fit items-center gap-x-3 gap-y-1.5" style={{ gridTemplateColumns: template }}>
-        {/* Dotted underlines mark labels with an explanation. Tooltip renders
-            its own hover/focus popover instead of relying on the browser's
-            delayed title attribute. */}
+        {/* Dotted underlines mark labels that have a tooltip. */}
         <span />
         <span />
         {columns.map((column) => (
@@ -88,8 +69,7 @@ export default function BenchmarkChart({
         ))}
 
         {rows.map((row) => {
-          // Floored at 1% so a nonzero-but-tiny value still reads as present
-          // rather than as an empty track.
+          // Show each nonzero value with at least one percent width.
           const pct = row.value > 0 ? Math.max((row.value / max) * 100, 1) : 0
           return (
             <Fragment key={row.key}>
@@ -110,9 +90,7 @@ export default function BenchmarkChart({
                 <rect x={0} y={0} width={100} height={10} rx={2} fill="var(--border-subtle)" />
                 <rect x={0} y={0} width={pct} height={10} rx={2} fill="var(--primary)" />
                 {referencePct !== null && (
-                  // `non-scaling-stroke` keeps this 1px wide: the viewBox is
-                  // stretched horizontally by `preserveAspectRatio="none"`,
-                  // which would otherwise smear a vertical line into a band.
+                  // Keep this line one pixel wide when the view box stretches.
                   <line
                     x1={referencePct}
                     x2={referencePct}
@@ -150,9 +128,7 @@ export default function BenchmarkChart({
   )
 }
 
-/** Placeholder rows shaped like real ones, shown while a sweep is still
- * running. Deliberately uniform-width and unlabelled — a skeleton that varied
- * its bar widths would read as data that had already arrived. */
+/** Shows uniform placeholder rows while a sweep runs. */
 export function BenchmarkChartSkeleton({ rows = 6 }: { rows?: number }) {
   return (
     <div

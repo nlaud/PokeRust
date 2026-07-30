@@ -5,8 +5,7 @@ import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
 
-/** The format's legal-items whitelist: its full catalog minus whatever it bans.
- * Sent as-is to `CreateBattleRequest.legalItems` — see that field's doc comment. */
+/** Returns all catalog items that the format permits. */
 function legalItemsFor(format: StoredFormat): string[] {
   const banned = new Set(format.bannedItems)
   return CATALOG.filter((item) => !banned.has(item.name)).map((item) => item.name)
@@ -31,11 +30,9 @@ export default function SetupPanel() {
   const [formats] = useState(loadFormats)
   const { createBattle, busy, error, clearError } = useBattle()
 
-  // Restore the last-used configuration (ignoring ids that no longer exist);
-  // otherwise Doubles is the default format when present (covers stored
-  // format lists that still have Singles first). Absent a saved team, default
-  // to favorited teams first (falling back to storage order) rather than raw
-  // `teams[0]`/`teams[1]`, so a starred team is what's pre-selected.
+  // Restore valid values from the last configuration.
+  // Otherwise, select Doubles and the first favorite teams.
+  // Use storage order when no team is a favorite.
   const saved = loadBattleSetup()
   const sortedTeams = favoritesFirst(teams)
   const savedFormat = formats.find((f) => f.id === saved?.formatId)
@@ -61,16 +58,15 @@ export default function SetupPanel() {
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
   const team2 = teams.find((t) => t.id === team2Id)
-  // A "meta" side generates its own team server-side, so it never needs a
-  // saved team selected — only a "saved" side does.
+  // A meta side generates its team on the server.
+  // Only a saved side requires a selected team.
   const ready = format && (team1Source === 'meta' || team1) && (team2Source === 'meta' || team2)
 
   const start = () => {
     if (!ready) return
     clearError()
-    // The server resolves turns in sample mode (one weighted trajectory, not
-    // the full outcome tree), so full damage-roll granularity is cheap in any
-    // format.
+    // Sample mode resolves one weighted path.
+    // Full damage-roll detail is therefore practical in each format.
     void createBattle({
       p1Team: team1Source === 'saved' ? (team1?.sheet ?? '') : '',
       p2Team: team2Source === 'saved' ? (team2?.sheet ?? '') : '',

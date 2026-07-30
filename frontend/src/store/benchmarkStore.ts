@@ -2,16 +2,14 @@ import { create } from 'zustand'
 import * as api from '../api/client'
 import type { BenchmarkProgress, InferenceRow, SolverRow, TurnSpeedRow } from '../api/types'
 
-/** One sweep's lifecycle. Tracked per sweep rather than globally because the
- * three run sequentially server-side and finish at wildly different times — the
- * solver sweep takes minutes longer than turn speed — so the page renders each
- * chart the moment its own sweep lands. */
+/** Stores the state for one benchmark test.
+ * Each test can show its chart when its result arrives. */
 export type SweepStatus = 'idle' | 'running' | 'done' | 'failed'
 
 interface SweepState<Row> {
   status: SweepStatus
   rows: Row[]
-  /** Latest progress event for this sweep; `null` before its first one. */
+  /** Latest progress event, or `null` before the first event. */
   progress: BenchmarkProgress | null
   error: string | null
 }
@@ -24,27 +22,21 @@ interface BenchmarkStore {
   turnSpeed: SweepState<TurnSpeedRow>
   inference: SweepState<InferenceRow>
   solver: SweepState<SolverRow>
-  /** True while the stream is open, i.e. at least one sweep may still report. */
+  /** True while the stream can report another test. */
   busy: boolean
-  /** Whole-stream failure (connection lost), as opposed to one sweep failing. */
+  /** Error that closed the complete stream. */
   streamError: string | null
-  /** Start a new run, discarding any previous results. Safe to call while a
-   * previous stream is still open — it cancels that one first. */
+  /** Cancels the old stream and starts a new benchmark. */
   run: () => void
 }
 
-/** The SSE connection's cancel handle. Lives outside the store (not state)
- * since it's an imperative handle, not data to render. Module-level so it, like
- * the store itself, survives the page component unmounting on a tab switch. */
+/** Cancels the active event stream.
+ * The module value remains available after a page unmount. */
 let cancelStream: (() => void) | null = null
 
-/** Benchmark run state as a page-independent singleton store, not page-local
- * `useState`. `BenchmarkingPage` sits behind a react-router `<Route>` (see
- * `App.tsx`) and is unmounted on tab switch, which would otherwise discard
- * results and tear down the in-flight stream. Zustand stores are module
- * singletons (same pattern as `trackerStore.ts` / `battleStore.ts`), so results
- * and an in-flight run survive navigating away and back — only an explicit
- * `run()` resets them. */
+/** Stores benchmark state outside the page component.
+ * Results and the active stream remain after a route change.
+ * Only `run` clears the old results. */
 export const useBenchmark = create<BenchmarkStore>((set) => ({
   turnSpeed: idleSweep(),
   inference: idleSweep(),
@@ -86,8 +78,8 @@ export const useBenchmark = create<BenchmarkStore>((set) => ({
           },
         })),
 
-      // `done` is terminal even if a worker failed before it could emit its
-      // per-sweep event. Never leave a card spinning after the stream closes.
+      // Treat `done` as the terminal event for all tests.
+      // Stop any card that still shows progress.
       onDone: () =>
         set((state) => {
           const finish = <Row,>(sweep: SweepState<Row>): SweepState<Row> =>
@@ -102,9 +94,8 @@ export const useBenchmark = create<BenchmarkStore>((set) => ({
           }
         }),
 
-      // The stream died, so anything still running will never report. Mark
-      // those failed rather than leaving them spinning forever; sweeps that
-      // already landed keep their results.
+      // Mark each active test as failed after a stream failure.
+      // Keep results from completed tests.
       onAborted: (message) =>
         set((state) => {
           const abort = <Row,>(sweep: SweepState<Row>): SweepState<Row> =>

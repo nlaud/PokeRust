@@ -1,28 +1,15 @@
-//! Uniform sampling of bounded integer compositions.
+//! Samples bounded integer compositions uniformly.
 //!
-//! "Spend exactly `total` points across `k` slots, with slot `j` confined to
-//! `lo[j]..=hi[j]`" — the determinizer's fallback for EV spreads. It fires only
-//! when the belief has ruled out every spread the usage data lists, which means
-//! the observed stats are tight enough that the meta has nothing left to say;
-//! uniform over what remains feasible is then the honest maximum-entropy answer.
-//!
-//! The draw is exact, not a heuristic. Counting compositions by dynamic
-//! programming gives, for each slot in turn, the number of ways to complete the
-//! allocation for every value that slot could take; drawing proportionally to
-//! those counts yields a uniformly random point of the feasible set. Rejection
-//! sampling would also be uniform but degrades badly when the bounds are tight,
-//! which is exactly the regime this exists for.
-//!
-//! Be aware that a uniform draw *looks* nothing like a real EV spread: it
-//! produces smeared allocations like 11/11/11/11/11/11 where players run
-//! 32/0/0/0/2/32. That is intended. Anything lumpier would be inventing a prior
-//! the data does not support, and the caller has already established that no
-//! authored spread fits.
+//! The determinizer uses this fallback when no usage spread fits the belief.
+//! Dynamic programming counts the completions for each candidate value.
+//! These counts give each complete permitted allocation equal probability.
+//! Tight bounds do not cause the poor performance of rejection sampling.
+//! This distribution does not add an unsupported competitive-spread prior.
 
 use crate::simulator::helpers::sample_one_weighted;
 
-/// `table[j][s]` = the number of ways to fill slots `j..k` summing to exactly
-/// `s`. Saturating, since only ratios and zero-ness matter.
+/// Counts ways to fill slots `j..k` with a sum of `s`.
+/// Counts saturate because only ratios and zero values matter.
 fn count_table(lo: &[u32], hi: &[u32], total: u32) -> Vec<Vec<u64>> {
     let k = lo.len();
     let t = total as usize;
@@ -46,11 +33,9 @@ fn count_table(lo: &[u32], hi: &[u32], total: u32) -> Vec<Vec<u64>> {
     table
 }
 
-/// The number of allocations satisfying the bounds, saturating at `u64::MAX`.
-///
-/// Not used by the determinizer, which learns infeasibility from
-/// `sample_bounded_composition` returning `None`; kept because it is what the
-/// tests cross-check the DP against.
+/// Counts permitted allocations.
+/// The result saturates at `u64::MAX`.
+/// Tests use this function to check the dynamic program.
 #[allow(dead_code)]
 pub(crate) fn count_bounded_compositions(lo: &[u32], hi: &[u32], total: u32) -> u64 {
     if lo.len() != hi.len() || lo.iter().zip(hi).any(|(l, h)| l > h) {
@@ -59,9 +44,8 @@ pub(crate) fn count_bounded_compositions(lo: &[u32], hi: &[u32], total: u32) -> 
     count_table(lo, hi, total)[0][total as usize]
 }
 
-/// Draw one allocation uniformly at random, or `None` if the bounds admit none.
-///
-/// Panics-free: mismatched or inverted bounds simply yield `None`.
+/// Draws one permitted allocation uniformly.
+/// Returns `None` for invalid or infeasible bounds.
 pub(crate) fn sample_bounded_composition(lo: &[u32], hi: &[u32], total: u32) -> Option<Vec<u32>> {
     let k = lo.len();
     if k != hi.len() || lo.iter().zip(hi).any(|(l, h)| l > h) {
@@ -76,8 +60,7 @@ pub(crate) fn sample_bounded_composition(lo: &[u32], hi: &[u32], total: u32) -> 
     let mut remaining = total as usize;
     for j in 0..k {
         let ceiling = hi[j].min(remaining as u32);
-        // Weight each candidate value by how many completions it leaves; that
-        // ratio is what makes the overall draw uniform rather than merely legal.
+        // Weight each value by its remaining valid completions.
         let choices: Vec<(u32, f64)> = (lo[j]..=ceiling)
             .filter_map(|v| {
                 let ways = table[j + 1][remaining - v as usize];

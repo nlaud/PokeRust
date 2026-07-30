@@ -136,19 +136,14 @@ fn slot_condition_name(condition: &SlotCondition) -> String {
     }
 }
 
-/// `is_own_side`: `true` when rendering the mon for its OWNING player (they always
-/// see their own true identity, disguise or not — a player obviously knows their
-/// own Zoroark is Zoroark), `false` when rendering it for the OPPONENT (who only
-/// ever sees the physically-displayed appearance, i.e. the Illusion disguise when
-/// one is active). Getting this backwards was a real bug: `pokemon_view` used to
-/// apply the disguise unconditionally, so a player's own disguised Zoroark showed
-/// up to THEM as the disguise species instead of Zoroark.
+/// Builds an unmasked Pokémon view.
+/// The owner sees the true species.
+/// The opponent sees an active Illusion disguise.
 pub fn pokemon_view(mon: &PokemonState, is_own_side: bool) -> PokemonView {
     PokemonView {
         mon_id: mon.mon_id,
-        // `mon.types` still reflects the TRUE species since it drives damage calc;
-        // a fully faithful disguised-type display would need a dex lookup this
-        // function doesn't have, so it's left as a known gap.
+        // Types remain from the true species.
+        // This function has no dex for the disguise types.
         species: if is_own_side {
             mon.species.to_string()
         } else {
@@ -191,29 +186,18 @@ pub fn pokemon_view(mon: &PokemonState, is_own_side: bool) -> PokemonView {
     }
 }
 
-/// Overlay belief-derived masking onto an otherwise-ground-truth `PokemonView`: the
-/// fields a real open team sheet (or a real player's screen) keeps secret — nature,
-/// EVs/stats-as-ranges, item, ability, unrevealed moves, a pre-reveal Tera type, exact
-/// HP, and typing while a species disguise is unresolved — are replaced. Status,
-/// volatiles, boosts, the (already Illusion-aware) species/sprite, gender, fainted,
-/// isTera/isMega are directly observable in a real battle regardless of information
-/// mode, so those stay ground truth — with one exception: `ChoiceLock` (see
-/// `mon_volatiles`'s param doc below) is re-derived from the belief, not copied.
+/// Replaces hidden fields in a ground-truth Pokémon view with belief values.
+/// Keeps directly visible battle fields.
+/// Rebuilds Choice Lock because a hidden Choice item can cause it silently.
 fn mask_pokemon_view(
     mut view: PokemonView,
     unk: &UnknownPokemonState,
     legal_items: Option<&HashSet<Item>>,
-    // Ground-truth volatiles for this same mon, re-filtered here rather than trusted
-    // from `view.volatiles` (which `pokemon_view` already populated from the same
-    // source) — see the `ChoiceLock` handling below. `VolatileDto` is a display
-    // string with no variant tag, so the filter has to happen on the raw engine type.
+    // Use raw volatiles so this function can remove an unproved Choice Lock.
     mon_volatiles: &[VolatileStatusState],
 ) -> PokemonView {
-    // A live Zoroark hypothesis widens every hidden-attribute display (but never
-    // species/typing — those stay the shown/original identity; see this function's
-    // doc comment) to the union of the primary and the hypothesis. `hyp` is `None`
-    // for the overwhelming majority of mons (no suspected disguise), in which case
-    // every `_union` call below is identical to its non-union counterpart.
+    // An Illusion hypothesis widens each hidden field to include both identities.
+    // Species and types remain the displayed identity.
     let hyp = unk.possible_illusion_state.as_deref();
 
     view.nature = describe_unknown_union(&unk.possible_natures, hyp.map(|h| &h.possible_natures));
@@ -221,15 +205,9 @@ fn mask_pokemon_view(
     view.stats_max = merge_stats_max(&unk.max_stats, hyp.map(|h| &h.max_stats));
     view.evs = merge_evs_min(&unk.min_evs, hyp.map(|h| &h.min_evs));
     view.evs_max = merge_evs_max(&unk.max_evs, hyp.map(|h| &h.max_evs));
-    // A real player only ever sees the opponent's HP as a rounded percent, never the
-    // exact value — replace the true `mon.hp` set by `pokemon_view` with the belief's
-    // own observed representation (never compute a fake-precise number back out of a
-    // percent; that reintroduces the exact precision a real player never has).
+    // Replace exact opponent HP with the observed belief value.
     view.hp = observed_hp_dto(&unk.hp);
-    // Typing/species always stay the shown/original identity — a live hypothesis
-    // never widens these (see `possible_illusion_state`'s doc comment: species is
-    // always `Known` for the primary, and typing is public dex knowledge for
-    // whichever species is actually displayed).
+    // Keep types from the displayed identity.
     view.types = match &unk.possible_types {
         Unknown::Known(types) => types.iter().map(|t| format!("{:?}", t)).collect(),
         _ => Vec::new(),
@@ -242,15 +220,8 @@ fn mask_pokemon_view(
             legal_items,
         )),
     };
-    // TODO.md: Choice Lock is the one volatile in this codebase that's a SILENT
-    // consequence of a still-hidden held item — no in-game message announces "X is
-    // now locked into its move" the way Substitute/Leech Seed/Encore/Taunt/etc. all
-    // get their own announced message (see this function's doc comment on why every
-    // OTHER volatile is safe to copy from ground truth). A real opponent can only be
-    // sure of it once the item itself is confirmed as a Choice item — showing it
-    // earlier leaks information the belief hasn't actually earned. Re-derive
-    // `view.volatiles` from the raw ground truth here (rather than trust what
-    // `pokemon_view` already put there) so this is the one place that can drop it.
+    // Choice Lock can result from a hidden Choice item without a message.
+    // Show it only after the belief confirms a Choice item.
     let item_is_confirmed_choice = |it: &Unknown<Item>| {
         matches!(
             it,
@@ -284,8 +255,7 @@ fn mask_pokemon_view(
             })
         })
         .collect();
-    // A pre-reveal Tera type is genuinely secret in a real battle too (the Tera
-    // Orb icon only shows it once activated) — mask it until `is_tera` flips true.
+    // Hide the Tera type until the Pokémon Terastallizes.
     if !view.is_tera {
         view.tera_type =
             describe_unknown_union(&unk.possible_tera_type, hyp.map(|h| &h.possible_tera_type));
@@ -294,10 +264,7 @@ fn mask_pokemon_view(
     view
 }
 
-/// Element-wise minimum-of-minimums across a primary stat array and a live
-/// hypothesis's own array — the union's lower bound is the lower of the two
-/// hypotheses' lower bounds (whichever identity is real, the true value could be
-/// as low as the more permissive of the two).
+/// Merges lower stat bounds from the primary and Illusion hypotheses.
 fn merge_stats_min(primary: &[u16; 6], hyp: Option<&[u16; 6]>) -> [u16; 6] {
     let mut out = *primary;
     if let Some(h) = hyp {
@@ -339,18 +306,9 @@ fn merge_evs_max(primary: &[u8; 6], hyp: Option<&[u8; 6]>) -> [u8; 6] {
     out
 }
 
-/// Build a `PokemonView` for a benched Pokémon from the belief alone (no reliable
-/// concrete `PokemonState` pairing exists for bench mons — the inference engine's
-/// own bench bookkeeping doesn't preserve list order against `BattleState`'s). Boosts
-/// and volatiles are exactly `[0;7]`/empty for any benched mon (both reset on
-/// switch-out), so this is not an approximation for those two fields; HP is the
-/// belief's own observed representation (percent, same as an active opponent mon).
-///
-/// `mon_id` prefers the belief's own `possible_mon_id` (narrowed to `Known` once the
-/// party-order slot is pinned down); when it's still ambiguous, falls back to
-/// `fallback_id` — a caller-supplied id that must be unique across the whole side's
-/// bench render for this call (see `side_view`). Without this, every unresolved bench
-/// mon rendered `mon_id: 0` and collided on the frontend's `mon_id`-keyed rows.
+/// Builds a benched Pokémon view from belief data.
+/// Uses `fallback_id` when the party index remains unknown.
+/// The caller must give each unresolved row a unique fallback ID.
 fn bench_pokemon_view_from_belief(
     unk: &UnknownPokemonState,
     fallback_id: u8,
@@ -629,10 +587,8 @@ fn field_view_from_belief(belief: &UnknownBattleState) -> FieldView {
     }
 }
 
-/// The belief's battle-phase fog state for `player`, when one is being tracked and
-/// has already transitioned past team preview. `None` under Perfect Information, or
-/// (defensively) if the belief hasn't reached the `Battle` variant yet — masking is
-/// display-only and must never panic, so this just falls back to ground truth.
+/// Returns the battle belief.
+/// Returns `None` for perfect information or a non-battle belief.
 fn belief_battle_state(belief: Option<&UnknownMatchState>) -> Option<&UnknownBattleState> {
     match belief {
         Some(UnknownMatchState::Battle(b)) => Some(b),
@@ -640,15 +596,8 @@ fn belief_battle_state(belief: Option<&UnknownMatchState>) -> Option<&UnknownBat
     }
 }
 
-/// `belief` is always the fog state *for `perspective`* — but its `p1_*`/`p2_*`
-/// fields are **physically bound** to true Player::P1/P2 identity, exactly like
-/// ground truth (`UnknownMatchState::team_preview_open_sheet_from_perspective`'s
-/// `my_team`/`opponent_team` fog levels land in the physically correct bucket, not
-/// a "viewer's own" bucket — see `into_battle_state`'s doc comment). So masking a
-/// physical `player`'s side reads that SAME `player`'s belief fields
-/// (`belief.p1_*` for `player == P1`, `belief.p2_*` for `player == P2`) — the same
-/// `player`-keyed match already used to read ground truth above — whenever
-/// `player != perspective`.
+/// Builds one physical side for a selected perspective.
+/// Belief side fields always use the physical player identity.
 fn side_view(
     state: &BattleState,
     player: Player,
@@ -678,12 +627,9 @@ fn side_view(
             ),
         };
 
-    // Only the non-viewer side is ever masked — the belief's own viewer sees their
-    // team fully known. `active` is zipped by index with the belief's active mons
-    // (both stay in lockstep, actives-first, throughout the battle); known/possible
-    // back mons are rendered straight from the belief alone (see
-    // `bench_pokemon_view_from_belief`'s doc comment for why no concrete pairing is
-    // attempted there).
+    // Mask only the opponent side.
+    // Match active Pokémon by slot.
+    // Build bench rows from belief data.
     let fog = if player != perspective {
         belief_battle_state(belief)
     } else {
@@ -692,9 +638,7 @@ fn side_view(
 
     let (active_views, back_views, possible_back_views, fainted_views) = match fog {
         Some(fog) => {
-            // Belief fields are physically bound — read the SAME `player` this
-            // function is rendering, not a constant `p2_*` (see this function's doc
-            // comment).
+            // Read belief fields for the physical side that this function renders.
             let (fog_active, fog_known_back, fog_possible_back, fog_fainted) = match player {
                 Player::P1 => (
                     &fog.p1_active_mons,
@@ -720,11 +664,7 @@ fn side_view(
                     }
                 })
                 .collect();
-            // Fallback ids for mons whose `possible_mon_id` hasn't narrowed to `Known`
-            // yet: real party-order ids only ever range 0..=5, so offsetting each
-            // section's fallback base well above that (and apart from each other)
-            // guarantees no two bench rows ever collide on `mon_id` — see
-            // `bench_pokemon_view_from_belief`'s doc comment.
+            // Use distinct fallback ID ranges for unresolved bench sections.
             let back_views: Vec<PokemonView> = fog_known_back
                 .iter()
                 .enumerate()
@@ -753,19 +693,9 @@ fn side_view(
         ),
     };
 
-    // Side/slot conditions must come from the SAME source as the mon rows above: the
-    // belief when masking, ground truth only for the viewer's own side. Reading them
-    // off `state` unconditionally leaked a screen's exact remaining turns — Light Clay
-    // extends Reflect / Light Screen / Aurora Veil from 5 to 8, so `Reflect (8)` vs
-    // `Reflect (5)` told the opponent outright whether the setter was holding it. The
-    // belief has always modelled this correctly (`inference::side_condition_timer`
-    // seeds screens as `Possibly([5, 8])` and the Light-Clay CNF pair collapses it only
-    // once genuinely known); `side_view` just never asked. `turn_range` +
-    // `named_turns_ranged` are the same pair `field_view_from_belief` uses for
-    // weather/terrain, and render as e.g. "Reflect (5 or 8)" on the frontend.
-    //
-    // Tailwind is deliberately NOT ambiguous here: Light Clay doesn't touch it, so its
-    // 4 turns are flat and both tables say `Known(4)`.
+    // Read opponent conditions from the belief.
+    // This hides whether Light Clay extended a screen from five turns to eight.
+    // Tailwind always has one exact duration.
     let (side_condition_views, slot_condition_views): (Vec<NamedTurnsDto>, Vec<Vec<String>>) =
         match fog {
             Some(fog) => {
@@ -898,10 +828,8 @@ fn preview_view(
     }
 }
 
-/// Build a `BattleView` from `perspective`'s point of view: `belief` must be the fog
-/// state tracked *for that perspective* (session.rs holds one belief per physical
-/// player — pass the matching one). `state`/`active_per_side`/`brought_per_side` are
-/// ground truth and don't depend on perspective; only masking does.
+/// Builds a battle view for one player's perspective.
+/// `belief` must belong to that player.
 pub fn battle_view(
     state: &MatchState,
     active_per_side: u8,

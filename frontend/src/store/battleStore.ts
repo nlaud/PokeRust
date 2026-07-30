@@ -11,8 +11,7 @@ import type {
 } from '../api/types'
 import { megaFormeNames, preloadSprites } from '../lib/sprites'
 
-/** Warm the sprite caches for every mon in the battle (plus possible mega
- * formes from held stones) so in-battle sprites render without placeholders. */
+/** Loads sprites for each battle Pokémon and possible Mega form. */
 function preloadBattleSprites(view: BattleView) {
   const mons = [
     ...(view.preview ? [...view.preview.p1Mons, ...view.preview.p2Mons] : []),
@@ -23,24 +22,19 @@ function preloadBattleSprites(view: BattleView) {
 }
 
 /**
- * Hotseat command wizard. One user enters P1's commands slot by slot, then
- * P2's, and the pair is submitted as a single turn request. `draftCommands`
- * accumulates the current player's per-slot picks; a slot awaiting a doubles
- * target keeps its partial attack in `pendingAttack`.
+ * Stores commands for the hotseat turn process.
+ * P1 selects commands before P2.
+ * The store submits both command sets in one turn request.
  */
 export interface PendingAttack {
   moveSlot: number
   terastallize: boolean
   megaEvolve: boolean
-  /** Target options for this move, keyed from the server's pre-expanded list. */
+  /** Server-provided target options for this move. */
   targets: { command: BattleCommand; description: string }[]
 }
 
-/** Pick whichever perspective's value is currently shown: P1's own by default, P2's
- * once the hotseat wizard advances to P2's command entry — see TODO.md's "the
- * frontend should always display the information that player one would have,
- * although when choosing moves for player two it should display information that
- * player two would have." Shared by `view` and `log`, which both flip the same way. */
+/** Selects the view or log for the current hotseat player. */
 function pickForPlayer<T>(p1Value: T, p2Value: T, currentPlayer: PlayerId): T {
   return currentPlayer === 'p1' ? p1Value : p2Value
 }
@@ -51,18 +45,13 @@ interface BattleStore {
   viewP1: BattleView | null
   /** P2's fog-of-war view of the same battle (cached from the last response). */
   viewP2: BattleView | null
-  /** Derived: `viewP1` or `viewP2`, whichever matches `currentPlayer`. Recomputed
-   * at every `set()` that touches either the cached views or `currentPlayer` — see
-   * `pickForPlayer`. Kept as its own field (rather than requiring every consumer to
-   * select `viewP1`/`viewP2`/`currentPlayer` and combine them) so existing call
-   * sites reading `view` keep working unchanged. */
+  /** View for `currentPlayer`. */
   view: BattleView | null
-  /** P1's turn log — every turn's events masked for P1's perspective. */
+  /** Turn events masked for P1. */
   logP1: TurnLogEntry[]
-  /** P2's turn log — the same turns, masked for P2's perspective instead. */
+  /** Turn events masked for P2. */
   logP2: TurnLogEntry[]
-  /** Derived: `logP1` or `logP2`, mirroring `view`'s perspective flip — see
-   * `pickForPlayer`. */
+  /** Log for `currentPlayer`. */
   log: TurnLogEntry[]
   probability: number | null
   error: string | null
@@ -96,8 +85,7 @@ function appendLog(log: TurnLogEntry[], label: string, events: EventNode[]): Tur
   return [...log, { label, events }]
 }
 
-/** Append the same turn to both perspectives' logs at once, keeping them in
- * lockstep the same way `viewP1`/`viewP2` stay in lockstep. */
+/** Adds one turn to both masked logs. */
 function appendDualLog(
   logP1: TurnLogEntry[],
   logP2: TurnLogEntry[],
@@ -116,10 +104,8 @@ export const useBattle = create<BattleStore>((set, get) => {
   async function maybeSubmitTurn() {
     const { battleId, view, p1Commands, draftCommands, currentPlayer, commands, busy } = get()
     if (!battleId || !view || !commands) return
-    // Re-entrancy guard: the auto-fill path and the ControlPanel's forced-slot
-    // effect can both complete a draft; without this, the same turn gets
-    // POSTed twice and the second submit re-validates stale commands against
-    // the already-advanced battle ("… is not a legal command", at random).
+    // Prevent two paths from submitting the same completed draft.
+    // A second request would validate stale commands against the next state.
     if (busy) return
 
     const slotsNeeded = commands.slots.length
@@ -128,8 +114,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     const playerCommand: PlayerCommand = { kind: 'battle', commands: draftCommands }
 
     if (currentPlayer === 'p1') {
-      // P1 done — flip to P2, showing P2's own fog-of-war view of the battle from
-      // here on, and fetch their legal commands.
+      // Show P2's view and get P2's legal commands.
       set((s) => ({
         p1Commands: playerCommand,
         currentPlayer: 'p2',
@@ -144,7 +129,7 @@ export const useBattle = create<BattleStore>((set, get) => {
       return
     }
 
-    // P2 done — submit the full turn.
+    // Submit the complete turn after P2 selects commands.
     set({ busy: true, error: null })
     try {
       const turnLabel = view.phase === 'teamPreview' ? 'Team Preview' : `Turn ${view.turnNumber}`
@@ -175,7 +160,8 @@ export const useBattle = create<BattleStore>((set, get) => {
         await autoFillForcedSlots()
       }
     } catch (err) {
-      // Reset the offending player's draft; keep P1's committed commands if P2 failed.
+      // Reset the invalid player draft.
+      // Keep P1's commands when P2 input fails.
       set({
         error: err instanceof Error ? err.message : String(err),
         draftCommands: [],
@@ -186,17 +172,15 @@ export const useBattle = create<BattleStore>((set, get) => {
   }
 
   /**
-   * In selfSwitch/replacement phases most slots (or a whole player) are forced
-   * to Pass. Auto-fill forced slots so the user only ever clicks real choices;
-   * if every slot of the current player is forced, submit for them silently.
+   * Fills forced commands during self-switch and replacement phases.
+   * Submits automatically when the current player has no choice.
    */
   async function autoFillForcedSlots() {
     const { commands, busy, draftCommands } = get()
     if (!commands) return
     if (commands.phase !== 'selfSwitch' && commands.phase !== 'replacement') return
-    // If a submit is in flight, or the ControlPanel's forced-slot effect has
-    // already begun filling this draft, leave the draft alone — overwriting it
-    // here can shrink it mid-flow or double-submit the turn.
+    // Do not change a draft during submission or forced-slot completion.
+    // A change can remove commands or submit the turn twice.
     if (busy || draftCommands.length > 0) return
 
     const allForced = commands.slots.every((slot) => slot.forced)
@@ -205,7 +189,7 @@ export const useBattle = create<BattleStore>((set, get) => {
       await maybeSubmitTurn()
       return
     }
-    // Leading forced slots are auto-filled; the wizard stops at the first real choice.
+    // Fill initial forced slots and stop at the first choice.
     const draft: BattleCommand[] = []
     for (const slot of commands.slots) {
       if (slot.forced) draft.push(slot.options[0].command)
@@ -324,9 +308,8 @@ export const useBattle = create<BattleStore>((set, get) => {
     setPendingAttack: (pendingAttack) => set({ pendingAttack }),
 
     goBack: () => {
-      // Back rewinds within the current player's action first (pending target,
-      // then the last committed slot); at the very beginning of P2's turn it
-      // rewinds to the beginning of P1's turn.
+      // First, go to the previous choice for the current player.
+      // From the start of P2 input, go to the start of P1 input.
       const { pendingAttack, draftCommands, view, currentPlayer, commands, previewPicks } = get()
       if (view?.phase === 'teamPreview') {
         if (previewPicks.length > 0) {
@@ -348,8 +331,8 @@ export const useBattle = create<BattleStore>((set, get) => {
         set({ pendingAttack: null })
         return
       }
-      // Unwind forced auto-fills sitting on top of the last real choice, then
-      // drop that choice. The forced-slot effect re-fills forward as needed.
+      // Remove forced entries after the last player choice.
+      // Then remove that choice.
       const slots = commands?.slots ?? []
       let end = draftCommands.length
       while (end > 0 && slots[end - 1]?.forced) end -= 1
@@ -357,7 +340,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         set({ draftCommands: draftCommands.slice(0, end - 1) })
         return
       }
-      // Nothing left to unwind for this player — flip back to P1's turn.
+      // Return to P1 when P2 has no earlier choice.
       if (currentPlayer === 'p2') {
         set((s) => ({
           currentPlayer: 'p1',

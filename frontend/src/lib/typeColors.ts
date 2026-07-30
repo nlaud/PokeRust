@@ -1,8 +1,6 @@
-// Canonical Pokémon type colors (Bulbapedia Gen VI+ palette), keyed by the
-// exact strings the server emits — the Rust `PokemonType` enum's Debug name
-// (see poke_rust/src/bin/server/mapping.rs, `types: mon.types...format!("{:?}", t)`).
-// Values are hex, not Tailwind classes: Tailwind v4 purges any class string it
-// can't see literally at build time, so these are applied via inline `style`.
+// Maps server type names to the Bulbapedia Generation VI color palette.
+// The keys match Rust `PokemonType` debug names.
+// Inline hexadecimal values prevent Tailwind from removing dynamic classes.
 
 const DARK_TEXT = '#1a1a1a'
 const WHITE_TEXT = '#ffffff'
@@ -12,8 +10,7 @@ interface TypeColor {
   text: string
 }
 
-// A handful of canonical colors are pale enough that white text washes out,
-// so those get dark text instead.
+// Use dark text on pale type colors.
 export const TYPE_COLORS: Record<string, TypeColor> = {
   Normal: { bg: '#A8A77A', text: WHITE_TEXT },
   Fire: { bg: '#EE8130', text: WHITE_TEXT },

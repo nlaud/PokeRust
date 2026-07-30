@@ -1,5 +1,5 @@
-//! Axum handlers. All state lives in `AppState`: parsed dexes (shared, immutable)
-//! and a mutex-guarded session map (single-user local tool — coarse locking is fine).
+//! Defines the Axum handlers.
+//! `AppState` stores shared dexes and a mutex-protected session map.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -32,25 +32,17 @@ use crate::session::{self, BattleSession, Dexes, MetaDexes, SessionConfig};
 #[derive(Clone)]
 pub struct AppState {
     pub dexes: Arc<Dexes>,
-    /// Meta Team Generator usage-stats caches — see `MetaDexes`'s doc comment
-    /// for why a missing cache is not fatal to the server itself.
+    /// Optional usage caches for generated teams.
     pub meta: Arc<MetaDexes>,
     pub sessions: Arc<Mutex<HashMap<String, BattleSession>>>,
-    /// Tracker-mode sessions — a separate map from `sessions` since a tracker
-    /// session has no opponent-simulating `MatchState` (see `crate::tracker`'s
-    /// module doc). Keyed by its own UUID space, independent of battle ids.
+    /// Tracker sessions, keyed by tracker UUID.
     pub tracker_sessions: Arc<Mutex<HashMap<String, crate::tracker::TrackerSession>>>,
     /// On-disk sprite cache directory (gitignored) — see `get_sprite`.
     pub sprite_cache_dir: PathBuf,
     /// Shared client for the one-time upstream fetch on a cache miss.
     pub http: reqwest::Client,
-    /// Whether a benchmark sweep is in flight — see `run_benchmark`.
-    ///
-    /// Closing the SSE stream does **not** stop the sweeps: they run on
-    /// `spawn_blocking` threads with no cancellation point, so a client that
-    /// reloads mid-run and starts another would leave the first three tasks
-    /// churning and stack six CPU-bound sweeps on top of each other. This flag
-    /// makes a second concurrent run fail fast instead.
+    /// True while one benchmark run is active.
+    /// Closing the client stream does not stop a blocking sweep.
     pub benchmark_running: Arc<AtomicBool>,
 }
 
@@ -76,27 +68,14 @@ fn internal_error(message: impl Into<String>) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
-/// Recovers from a poisoned mutex instead of propagating the poison forever. A panic
-/// inside turn resolution is now caught before it can reach here (see
-/// `session::resolve_turn`'s `catch_unwind`), but this is defense-in-depth against any
-/// other panic while a session lock is held — one bad request must not turn every
-/// future request into a 500 for the rest of the process's life. The data behind a
-/// poisoned lock is still exactly as consistent as it was the instant before the panic
-/// (nothing here mutates a session and then panics mid-mutation), so recovering it is safe.
+/// Recovers the session map after a panic poisons its mutex.
+/// Session changes are atomic, so the stored data remains consistent.
 fn lock_sessions(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, BattleSession>> {
     app.sessions.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Resolve one side's teamsheet text for `create_battle`.
-///
-/// `mode` is `CreateBattleRequest.p1TeamMode`/`p2TeamMode`: `"sheet"` (the
-/// default) passes `sheet` through unchanged; `"meta"` ignores it and
-/// synthesizes a fresh teamsheet from usage data instead
-/// (`meta::generate_meta_team` + `meta::render_teamsheet`). Rendering back to
-/// text rather than building a `TeamPreviewState` directly means a generated
-/// side is validated by the exact same parse path
-/// (`simulator::team_preview_state_from_team_strings`) and the roster checks
-/// right after it in `create_battle` that a pasted team already goes through.
+/// Returns pasted teamsheet text or generates a teamsheet.
+/// Generated teams use the same parser and validation as pasted teams.
 fn resolve_team_text(
     label: &str,
     mode: &str,
@@ -705,11 +684,9 @@ fn solver_row_dto(row: benchmarking::SolverRow) -> SolverRowDto {
     }
 }
 
-/// Sprites live outside the repo on GitHub (see `frontend/src/lib/sprites.ts`); nothing
-/// is ever bundled here. This is a caching proxy: a disk hit serves straight from
-/// `sprite_cache_dir`, a miss fetches the PNG from GitHub exactly once, writes it to
-/// disk, and serves it. Only `raw.githubusercontent.com` URLs are accepted — this is
-/// not a general-purpose proxy.
+/// Serves sprites through a local disk cache.
+/// A cache miss downloads one PNG from GitHub.
+/// Accepts only `raw.githubusercontent.com` URLs.
 const ALLOWED_SPRITE_HOST_PREFIX: &str = "https://raw.githubusercontent.com/";
 
 #[derive(Deserialize)]

@@ -7,21 +7,9 @@ import TrackerLogSidebar from './TrackerLogSidebar'
 import TrackerTeamSidebar from './TrackerTeamSidebar'
 
 /**
- * Tracker mode's screen: the same field/sidebar visual fidelity as battle
- * mode (`TrackerArena` recreates `Arena`, `TrackerTeamSidebar` recreates
- * `TeamInfoSidebar` — both driven by `useTracker` instead of `useBattle`, see
- * their own doc comments), the event log, and `TrackerInputBar` — the
- * Minecraft-chat-style autocomplete/ghost-text/history-navigation editor
- * described in the tracker-mode design doc, in place of a move selector. Its
- * own doc comment covers the full keybinding set and the two-tier
- * preview-per-event / rebuild-per-turn commit model.
- *
- * A failed submission (parse error or an `apply_information` contradiction)
- * never touches `view`/`log`/`committedTurns` — see `trackerStore.ts` — so
- * the turn/edit is already refused; `TrackerInputBar` renders that refusal
- * inline right next to where it happened, so this screen doesn't need its
- * own error banner (unlike battle mode's `BattleScreen.tsx`, which has no
- * single input surface to attach one to).
+ * Shows the tracker arena, teams, event log, and text input.
+ * The arena and teams use tracker state with simulator components.
+ * The input shows submission errors next to the invalid text.
  */
 export default function TrackerScreen() {
   const { view, leave } = useTracker()

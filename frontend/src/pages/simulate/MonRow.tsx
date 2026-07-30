@@ -4,11 +4,8 @@ import Sprite from '../../components/common/Sprite'
 import { hpDisplayText, hpFraction } from '../../lib/hp'
 import { typeStyle } from '../../lib/typeColors'
 
-// Extracted from `TeamInfoSidebar.tsx` — this whole cluster is fully
-// prop-driven (no store access), which is exactly what makes it reusable by
-// `pages/tracker/TrackerTeamSidebar.tsx` too: it's the one place that renders
-// item/ability/nature/EVs/stat-ranges/boosts/volatiles per mon, i.e. the
-// fields the fog-of-war engine actually narrows.
+// Shows the hidden-information fields for one Pokémon.
+// Props provide all data, so simulator and tracker sidebars can use this component.
 
 export const STAT_NAMES = ['HP', 'Atk', 'Def', 'SpA', 'SpD', 'Spe']
 export const BOOST_NAMES = ['Atk', 'Def', 'SpA', 'SpD', 'Spe', 'Acc', 'Eva']
@@ -28,33 +25,25 @@ function hpBarColor(fraction: number): string {
   return 'bg-success'
 }
 
-/** The server sends the raw scaled 0–252 EV (`scale_evs_for_stat_points` in
- * poke_rust/src/state/pokemon.rs: `ev = max(0, 8*points - 4)`) — teamsheets are
- * authored in 0–32 stat points, so invert that to show the sheet author's own units. */
+/** Converts a scaled EV to the stat points used in teamsheets. */
 export function evToStatPoints(ev: number): number {
   return ev === 0 ? 0 : Math.round((ev + 4) / 8)
 }
 
-/** A range value: shows a single number when the bound has collapsed to a point
- * (ground truth, or a masked value that's since been narrowed to certainty), or
- * "min–max" while genuinely uncertain. */
+/** Shows one exact value or a range. */
 export function RangeValue({ min, max }: { min: number; max: number }) {
   return <>{min === max ? min : `${min}–${max}`}</>
 }
 
-/** Splits a masked item string back into its list entries and the separator that
- * joined them, mirroring the two join styles `describe_unknown_item` emits on the
- * server: " or " for a possible-item list, ", " for an exclusion list ("not X, not
- * Y"). A single value (Known, or "Unknown") has no separator and is left whole. */
+/** Splits a masked item list and keeps its separator. */
 export function splitItemList(text: string): { parts: string[]; sep: string } {
   if (text.includes(' or ')) return { parts: text.split(' or '), sep: ' or ' }
   if (text.includes(', ')) return { parts: text.split(', '), sep: ', ' }
   return { parts: [text], sep: '' }
 }
 
-/** Item text with a click-to-expand truncation past 3 entries, per the masked-item
- * display convention: show whichever of possible/impossible is shorter, but never
- * dump a long list inline. */
+/** Truncates item lists after three entries.
+ * The user can expand the complete list. */
 export function ItemText({ item }: { item: string | null }) {
   const [expanded, setExpanded] = useState(false)
   if (item == null) return <>None</>

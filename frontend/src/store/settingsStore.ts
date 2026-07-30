@@ -5,8 +5,8 @@ export type Theme = 'light' | 'dark' | 'custom'
 
 const SETTINGS_KEY = 'pokerust.settings.v1'
 
-// Defaults match the previous hardcoded `.custom` CSS class (index.css) so existing
-// users see no visual change until they actually pick new colors.
+// Defaults match the old `.custom` colors in `index.css`.
+// Existing users see no change before they select new colors.
 const DEFAULT_CUSTOM_BACKGROUND = '#f5f3ff'
 const DEFAULT_CUSTOM_ACCENT = '#7c3aed'
 
@@ -21,7 +21,7 @@ function loadSettings(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>
-      // Backfill fields from before customBackground/customAccent existed.
+      // Add custom color fields to old stored settings.
       return {
         theme: parsed.theme ?? 'light',
         customBackground: parsed.customBackground ?? DEFAULT_CUSTOM_BACKGROUND,
@@ -29,13 +29,13 @@ function loadSettings(): Settings {
       }
     }
   } catch {
-    // fall through to defaults
+    // Use the defaults after an invalid stored value.
   }
   return { theme: 'light', customBackground: DEFAULT_CUSTOM_BACKGROUND, customAccent: DEFAULT_CUSTOM_ACCENT }
 }
 
-// The custom properties `applyCustomColors` overrides — kept as one list so setting
-// and clearing them can never drift out of sync with each other.
+// Lists each property that `applyCustomColors` changes.
+// One list keeps the set and clear operations synchronized.
 const CUSTOM_PROPERTIES = [
   '--surface',
   '--surface-card',
@@ -52,14 +52,10 @@ function clearCustomColors() {
   for (const prop of CUSTOM_PROPERTIES) root.removeProperty(prop)
 }
 
-/** Sets the `.custom` theme's CSS custom properties as inline overrides on
- * `<html>` — inline styles win over the `.custom` class rule's static fallback
- * values (index.css), so this cleanly drives the palette from the two user-picked
- * colors without deleting that fallback. Text color is never picked directly — it's
- * computed for contrast against the background (see `computeReadableTextColor`).
- * `--surface-glass`/`--text-secondary`/`--border-subtle`/`--primary-soft` are
- * expressed as `color-mix()` strings (already used elsewhere in index.css for the
- * built-in themes' glass effects) so the mixing math happens in CSS, not JS. */
+/** Applies the custom theme as inline properties on the document element.
+ * Inline values override the static `.custom` fallbacks.
+ * The code calculates text color from the selected background.
+ * CSS `color-mix` expressions calculate the derived colors. */
 function applyCustomColors(background: string, accent: string) {
   const text = computeReadableTextColor(background)
   const root = document.documentElement.style
@@ -76,9 +72,8 @@ function applyCustomColors(background: string, accent: string) {
 function applyTheme(theme: Theme) {
   document.documentElement.classList.remove('dark', 'custom')
   if (theme !== 'light') document.documentElement.classList.add(theme)
-  // Inline custom-color overrides win over every class rule (including .dark), so
-  // they must be cleared whenever the active theme isn't 'custom' — otherwise a
-  // previously-picked palette bleeds through into light/dark mode.
+  // Inline colors override all theme classes.
+  // Clear them when the active theme is not `custom`.
   if (theme !== 'custom') clearCustomColors()
 }
 

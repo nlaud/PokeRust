@@ -7,14 +7,8 @@ import BenchmarkChart, {
 } from './BenchmarkChart'
 import ProgressBar from './ProgressBar'
 
-/** One chart in the grid, and the single place a sweep's four states are
- * rendered.
- *
- * The card is what carries loading state, not the page: the three sweeps run
- * concurrently and land minutes apart, so each chart has to show its own
- * progress and fill in independently. A card keeps its footprint across all
- * four states — skeleton rows stand in for the eventual bars — so charts that
- * finish early don't shove later ones around the grid as they arrive. */
+/** Shows one benchmark chart and its current state.
+ * The card keeps its size while results arrive. */
 export default function ChartCard({
   title,
   subtitle,
@@ -27,7 +21,7 @@ export default function ChartCard({
   skeletonRows,
 }: {
   title: string
-  /** One line under the title saying what the bars encode. */
+  /** States what the bars show. */
   subtitle?: string
   status: SweepStatus
   progress: BenchmarkProgress | null
@@ -38,9 +32,8 @@ export default function ChartCard({
   skeletonRows?: number
 }) {
   return (
-    // `data-status` is what an e2e test should assert on. The four states are
-    // otherwise only distinguishable by scraping copy, and these cards are the
-    // one place in the app whose state changes on a multi-minute timer.
+    // Use `data-status` for end-to-end state checks.
+    // This avoids checks against visible text during a long test.
     <div
       className="lift flex flex-col rounded-card bg-card p-4 shadow-sm"
       data-testid="chart-card"

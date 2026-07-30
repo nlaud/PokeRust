@@ -6,10 +6,7 @@ import { CATALOG } from '../lib/items'
 import { megaFormeNames, preloadSprites } from '../lib/sprites'
 import { contentLinesOf, splitScriptIntoTurns, type CompletionPools } from '../lib/trackerGrammar'
 
-/** Warm the sprite caches for every mon currently visible in the tracker —
- * mirrors `battleStore.ts`'s `preloadBattleSprites`, minus the team-preview
- * bucket (tracker mode has no team-preview phase of its own — see the
- * server's `tracker.rs` module doc for why). */
+/** Loads sprites for each Pokémon in the current tracker view. */
 function preloadTrackerSprites(view: BattleView) {
   const mons = [
     ...(view.p1 ? [...view.p1.active, ...view.p1.back] : []),
@@ -24,39 +21,23 @@ interface TrackerStore {
   trackerId: string | null
   view: BattleView | null
   log: TurnLogEntry[]
-  /** One raw-text chunk per COMMITTED turn (derived from the server's
-   * newline-joined `script`) — the frontend's source of truth for "what has
-   * this tracker session actually recorded," since `log` alone can't be
-   * turned back into tracker syntax for editing. `TrackerInputBar` reads this
-   * for ArrowUp/ArrowDown turn navigation. */
+  /** Raw tracker text for each committed turn.
+   * The input bar uses this text for editing and turn navigation. */
   committedTurns: string[]
-  /** Autocomplete name pools for the input bar: species/moves/abilities come
-   * from `GET /completions` (match-scoped — see that DTO's doc comment);
-   * items come straight from the existing static catalog (not
-   * match-scoped, so no round trip needed). */
+  /** Match-specific species, move, and ability suggestions.
+   * Item suggestions use the static item list. */
   completions: CompletionPools
-  /** Live Pass-1-only structural view of the in-progress (uncommitted) turn —
-   * see `TrackerPreviewResponse`'s doc comment. `null` when there's no draft
-   * to preview; the input bar/arena should render `previewView ?? view`. */
+  /** Structural view of the uncommitted turn.
+   * `null` means that no draft exists. */
   previewView: BattleView | null
-  /** The in-progress turn's parsed events, for rendering "in progress" log
-   * lines the same way a committed turn's events render. */
+  /** Parsed events for the uncommitted turn. */
   previewEvents: EventNode[]
-  /** Non-blocking (yellow) advisory: set when the most recent `previewDraft`
-   * call left the rendered event tree structurally UNCHANGED from before it —
-   * i.e. the line just committed/edited had no observable effect (a
-   * synthesis "already active" no-op, a redundant re-statement of something
-   * already true, …). Deliberately a whole-tree comparison rather than
-   * attempting to attribute "no effect" to one specific source line: folding
-   * (`leads`, an ability reveal right after a switch) can legitimately merge
-   * two lines' worth of content into one event, so a per-line event COUNT
-   * would false-positive on the earlier of the two merged lines — comparing
-   * the actual rendered result sidesteps that entirely. `null` when the last
-   * change did visibly register, or there's nothing to compare yet. This is
-   * advisory only — it never blocks a submission the way `error` does. */
+  /** Warning that the last draft change had no visible effect.
+   * The comparison uses complete event trees because the server can merge lines.
+   * This warning does not block submission. */
   lastLineWarning: string | null
-  /** Set from a failed submission — either a parse error (`errorLine` set)
-   * or an inference contradiction / network failure (`errorLine` null). */
+  /** Submission error.
+   * `errorLine` identifies a parse error line when available. */
   error: string | null
   errorLine: number | null
   busy: boolean
@@ -64,41 +45,24 @@ interface TrackerStore {
   create: (req: Parameters<typeof api.createTracker>[0]) => Promise<void>
   restore: (trackerId: string) => Promise<void>
   leave: () => void
-  /** Legacy path: submit tracker-syntax text (one or more complete,
-   * `endofturn`-terminated turns) directly, bypassing the draft/preview flow.
-   * Kept for scripts/tests that want to seed several turns of history in one
-   * call; `TrackerInputBar` itself drives `previewDraft`/`endTurn` instead. */
+  /** Submits one or more complete turns without the draft process.
+   * Scripts and tests use this method to add history. */
   submitText: (text: string) => Promise<boolean>
-  /** Per-event structural preview of the in-progress turn's lines so far
-   * (Pass 1 only — safe on a partial turn, never mutates committed state).
-   * Called once per committed event line, not per keystroke. */
+  /** Previews direct structural facts from the current draft.
+   * This method does not change committed state. */
   previewDraft: (lines: string[]) => Promise<void>
-  /** Clear the live preview (e.g. once the draft is emptied). */
+  /** Clears the live preview. */
   clearPreview: () => void
-  /** Commit `lines` as a complete turn: appends `endofturn` and rebuilds the
-   * WHOLE script via `PUT /history` (so a turn reopened by
-   * `popLastCommittedTurn` recomputes in place rather than duplicating).
-   * Returns `true` on success. */
+  /** Adds `endofturn` and rebuilds history with the completed turn.
+   * Returns `true` after a successful commit. */
   endTurn: (lines: string[]) => Promise<boolean>
-  /** Correct a single already-committed line (`lineIndex` within
-   * `committedTurns[turnIndex]`, 0-based over that turn's content lines —
-   * see `contentLinesOf`) and rebuild the whole script with it replaced. This
-   * is how editing a PAST event — from any turn, not just the latest — takes
-   * effect and recomputes the belief; see `rebuild_tracker_history`'s doc
-   * comment on the Rust side for why a full rebuild (not a targeted patch) is
-   * required. Returns `true` on success. */
+  /** Replaces one committed line and rebuilds all tracker history.
+   * The rebuild recalculates beliefs after the edit.
+   * Returns `true` after a successful edit. */
   editCommitted: (turnIndex: number, lineIndex: number, newText: string) => Promise<boolean>
-  /** "Reopen the last committed turn" (Shift+Escape): actually rebuilds the
-   * session via `PUT /history` with that turn dropped from the script — not a
-   * local-only pop — so `session.belief` (and therefore live `previewDraft`
-   * calls while the user re-edits those lines) genuinely reflects the state
-   * BEFORE that turn, instead of double-applying it. `rebuild_tracker_history`
-   * explicitly documents an empty/truncated script as a valid end state, so
-   * abandoning the reopened turn without recommitting it (e.g. leaving the
-   * page) just leaves the session one turn shorter — never lost mid-state.
-   * Returns the popped turn's content lines (for loading into the draft) or
-   * `null` if there was nothing committed to reopen, or on failure (`error`/
-   * `errorLine` set the same way `endTurn`/`editCommitted` do). */
+  /** Removes the last committed turn and rebuilds server history.
+   * The returned lines can refill the draft for editing.
+   * Returns `null` when no turn exists or the rebuild fails. */
   popLastCommittedTurn: () => Promise<string[] | null>
   clearError: () => void
 }
@@ -220,14 +184,9 @@ export const useTracker = create<TrackerStore>((set, get) => ({
     }
     try {
       const response = await api.previewTrackerEvents(trackerId, { text: lines.join('\n') })
-      // Advisory-only "did that line actually do anything" check: if the
-      // rendered event tree is byte-for-byte identical to what it was before
-      // this call, whatever changed in the draft (a new line, an edit) had no
-      // observable effect — a synthesis "already active" no-op, or a
-      // re-statement of something already true. Compared as serialized JSON
-      // rather than per-source-line, since folding (`leads`, an ability
-      // reveal right after a switch) can legitimately merge two lines into
-      // one event — a per-line count would misfire on the earlier of the two.
+      // Compare the serialized event trees before and after the draft change.
+      // Equal trees mean that the change had no visible effect.
+      // Compare trees instead of lines because the server can merge related lines.
       const unchanged = JSON.stringify(response.events) === JSON.stringify(eventsBefore)
       set({
         previewView: response.state,

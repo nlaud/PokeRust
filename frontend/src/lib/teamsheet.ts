@@ -1,10 +1,6 @@
-/**
- * Extract the species display names from a Showdown-export teamsheet, for
- * sprite previews on team cards. Mirrors the header rules of the backend
- * parser (poke_rust `parse_pokemon_header`): nickname parens, gender markers,
- * and an optional " @ Item" suffix. Display-only — the backend remains the
- * authority on what actually parses.
- */
+/** Extracts species names from a Showdown teamsheet for sprite previews.
+ * This function follows the backend header rules.
+ * The backend remains the authority for valid teamsheets. */
 export function parseSheetSpecies(sheet: string): string[] {
   return sheet
     .replace(/\r\n/g, '\n')
@@ -15,8 +11,8 @@ export function parseSheetSpecies(sheet: string): string[] {
       let header = block.split('\n')[0].trim()
       const atIndex = header.indexOf(' @ ')
       if (atIndex !== -1) header = header.slice(0, atIndex)
-      // Nickname form: "Nickname (Species)" — take the parenthesized species.
-      // Gender markers "(M)"/"(F)" are not species.
+      // Use the parenthesized species in `Nickname (Species)`.
+      // Do not treat `(M)` or `(F)` as a species.
       const parenMatches = [...header.matchAll(/\(([^)]+)\)/g)]
       for (const match of parenMatches.reverse()) {
         const inner = match[1].trim()

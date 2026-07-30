@@ -1,14 +1,8 @@
 import type { BenchmarkProgress } from '../../api/types'
 
-/** Determinate progress bar driven by real `progress` SSE events from the
- * server (see `api/client.ts::streamBenchmark`) — not a fake timer.
- *
- * One of these lives inside each sweep's own card rather than one shared bar at
- * the top of the page: the sequential sweeps are very differently sized, so a
- * single blended percentage would be fabricated. Before a sweep's first event
- * arrives there is no percentage to show at all, which is
- * what `indeterminate` covers. Reuses `BenchmarkChart`'s two-rect inline-SVG
- * idiom (track + fill) rather than a charting or UI dependency. */
+/** Shows progress from real server events.
+ * Each benchmark card has its own progress because test sizes differ.
+ * `indeterminate` applies before the first progress event. */
 export default function ProgressBar({ progress }: { progress: BenchmarkProgress | null }) {
   const indeterminate = progress === null || progress.total === 0
   const pct = indeterminate ? 0 : Math.min((progress.completed / progress.total) * 100, 100)

@@ -50,30 +50,19 @@ use crate::tracker_parse::{
 
 pub struct TrackerSession {
     pub belief: UnknownBattleState,
-    /// Snapshot of `belief` taken in `create_tracker`, before any tracker-text
-    /// event has been applied — nobody active on either side yet (see this
-    /// module's doc comment). The rebuild path (`rebuild_tracker_history`)
-    /// re-applies `script` on top of THIS, never `belief`, since `belief` is
-    /// the already-mutated cumulative state a rebuild needs to discard and
-    /// recompute from scratch.
+    /// Belief before any tracker event.
+    /// History rebuilds start from this value.
     pub initial_belief: UnknownBattleState,
-    /// Raw tracker-text of each `/events` submission (or the single full
-    /// script from the last `/history` rebuild), concatenated with a blank
-    /// line between entries to reproduce the exact input to `PUT /history`.
-    /// Exists so `GET /tracker/{id}` can hand the editor back its authored
-    /// text after a page reload — `log`/`belief` alone can't be reversed into
-    /// tracker syntax (see `apply_turns_from`'s doc comment).
+    /// Raw text from committed tracker submissions.
+    /// The editor uses it to restore authored text.
     pub script: Vec<String>,
     pub active_per_side: u8,
     pub brought_per_side: u8,
     pub inference_config: InferenceConfig,
     pub log: Vec<TurnLogEntry>,
     pub turn_count: u16,
-    /// Every species on either roster, as parsed from the teamsheets at
-    /// `create_tracker` time — independent of fog-of-war, since the tracker
-    /// completions endpoint (`get_tracker_completions`) needs the ground-truth
-    /// match roster, not a belief that may still be narrowing the opponent's
-    /// species. Deduplicated; order not significant.
+    /// Unique species from both original rosters.
+    /// Autocomplete uses this list without fog-of-war masking.
     pub roster_species: Vec<Species>,
 }
 
@@ -109,9 +98,7 @@ fn internal_error(message: impl Into<String>) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
-/// A parse failure gets its own typed body (line + message) rather than being
-/// flattened into `ApiError.message` — the frontend can point the cursor at
-/// the offending line instead of just displaying prose.
+/// Returns a typed parse error with its line number.
 fn parse_error_response(e: ParseError) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,

@@ -8,8 +8,7 @@ interface SpriteProps {
   className?: string
 }
 
-/** Gray Pokéball placeholder shown only once a sprite is confirmed missing
- *  (a clean 404 through every fallback) — never for a merely-slow load. */
+/** Shows a gray Poké Ball after all sprite candidates return HTTP 404. */
 function Placeholder({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" className="opacity-30">
@@ -20,7 +19,7 @@ function Placeholder({ size }: { size: number }) {
   )
 }
 
-/** Spinner shown while a sprite is loading or a failed lookup is being retried. */
+/** Shows a spinner during a sprite load or retry. */
 function Spinner({ size, className = '' }: { size: number; className?: string }) {
   return (
     <svg
@@ -35,11 +34,8 @@ function Spinner({ size, className = '' }: { size: number; className?: string })
   )
 }
 
-// fetchSprites() already retries transient network failures internally
-// (see lib/sprites.ts) before it ever rejects. A rejection reaching this
-// component means that whole internal retry budget was exhausted, so these
-// retries are spaced further apart — this is for outages measured in
-// seconds, not the odd dropped request.
+// `fetchSprites` first retries short network failures.
+// These longer delays handle failures that remain after those retries.
 const MAX_FETCH_RETRIES = 5
 const FETCH_RETRY_BASE_MS = 1000
 const MAX_IMG_RETRIES = 2
@@ -63,17 +59,14 @@ export default function Sprite({ species, facing = 'front', size = 64, className
         (urls) => {
           if (cancelled) return
           const resolved = facing === 'front' ? urls.front : (urls.back ?? urls.front)
-          // A resolved-but-null result means every candidate in the
-          // resolution chain came back a clean 404 — this sprite genuinely
-          // doesn't exist, so go straight to the placeholder.
+          // A null result means that each candidate returned HTTP 404.
+          // Show the placeholder.
           if (resolved) setUrl(resolved)
           else setFailed(true)
         },
         () => {
-          // fetchSprites rejected — a transient failure that survived its
-          // own internal retries. Keep the spinner up and retry here too,
-          // so a sprite that lost the race during a page-load burst still
-          // eventually appears without the user reloading the page.
+          // Keep the spinner visible after a temporary failure.
+          // Retry without a page reload.
           if (cancelled) return
           if (attempt >= MAX_FETCH_RETRIES) {
             setFailed(true)
@@ -93,13 +86,9 @@ export default function Sprite({ species, facing = 'front', size = 64, className
     }
   }, [species, facing])
 
-  // Resolving a sprite URL is only half the load — the image bytes still have
-  // to come down (through the disk-cache proxy, or GitHub on a cold miss).
-  // Warm the browser's cache with a detached Image() first (same idiom as
-  // lib/sprites.ts's preloadSprites) and only flip `loaded` once it actually
-  // fires onload, so the spinner in the render below stays up for the whole
-  // download instead of vanishing the instant the URL is known. The real
-  // <img> mounted below then loads instantly from that warmed cache.
+  // Load the image bytes before the component hides the spinner.
+  // A detached `Image` stores the data in the browser cache.
+  // The visible image then uses the cached data.
   useEffect(() => {
     if (!url) return
     const resolvedUrl = url
@@ -116,11 +105,9 @@ export default function Sprite({ species, facing = 'front', size = 64, className
       }
       probe.onerror = () => {
         if (cancelled) return
-        // The disk-cache proxy or the GitHub-hosted sprite occasionally
-        // drops mid-load under burst. Retry the same src a couple of times,
-        // then fall back to the direct (un-proxied) URL once before
-        // conceding — a genuine 404 here would already have been caught
-        // upstream as a `resolved === null` case, not this.
+        // Retry a temporary image-load failure.
+        // After the local proxy retries, try the direct URL once.
+        // An HTTP 404 already produces a null resolved value.
         if (retries < MAX_IMG_RETRIES) {
           retries += 1
           setTimeout(attemptLoad, 300 * retries)

@@ -4,30 +4,21 @@ import { useTracker } from '../../store/trackerStore'
 import FieldIndicators from '../simulate/FieldIndicators'
 import PokemonHUD from '../simulate/PokemonHUD'
 
-// Recreates `pages/simulate/Arena.tsx`'s layout for tracker mode — same
-// gradient panel, FieldIndicators, and sprite positioning/sizing, sourced
-// from `useTracker` instead of `useBattle`. Two things battle mode's Arena
-// needs and tracker mode never will, both dropped entirely:
-//   - `currentPlayer` (the hotseat perspective flip) — tracker mode has
-//     exactly one fixed perspective, so `viewer`/`opponent` are constants.
-//   - `pendingAttack`/`pushSlotCommand` (doubles move-target picking) —
-//     tracker mode has no move selector; targets are just typed as text.
+// Uses the simulator arena layout with tracker state.
+// Tracker mode has one fixed player perspective.
+// It does not need hotseat or target-selection state.
 
 const VIEWER: PlayerId = 'p1'
 const OPPONENT: PlayerId = 'p2'
 
 export default function TrackerArena() {
-  // Prefer the live per-event structural preview (Pass-1-only, uncommitted —
-  // see `TrackerPreviewResponse`'s doc comment) so HP/status/reveals update
-  // as the user types, falling back to the last committed view once the
-  // draft is empty again.
+  // Show the uncommitted structural preview while the user types.
+  // Otherwise, show the last committed view.
   const view = useTracker((s) => s.previewView ?? s.view)
   if (!view?.p1 || !view.p2) return null
 
-  // Each mon column scales with the horizontal room (flex-1 inside a
-  // percentage-width side container) up to a hard cap, so sprites and HP bars
-  // actually grow on wide windows instead of just drifting to the edges. The
-  // viewer's own HUD sits ABOVE its sprite — closer to the middle of the arena.
+  // Scale each Pokémon column to the available width and a fixed maximum.
+  // Put the player's HUD above its sprite.
   const renderSide = (player: PlayerId) => {
     const isOwnSide = player === VIEWER
     const side = player === 'p1' ? view.p1! : view.p2!

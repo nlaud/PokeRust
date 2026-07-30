@@ -4,9 +4,9 @@ import { useBattle } from '../../store/battleStore'
 import { useTracker } from '../../store/trackerStore'
 import { applyAudible, installUnlockListener, usePlayer, type TrackId, type YTPlayer } from '../../store/playerStore'
 
-// Both playlists are constantly shuffled + looped (via `onReady` below, using the
-// official YouTube IFrame Player API's queueing methods) — ambient plays by default,
-// battle crossfades in while a fight is in progress.
+// Shuffle and repeat both YouTube playlists.
+// Play ambient music by default.
+// Crossfade to battle music during a battle.
 const AMBIENT_URL = 'https://www.youtube.com/watch?v=TYdZmrpz7K0'
 const AMBIENT_PLAYLIST_ID = 'PL6uHbR5DF8jBFrkhA7-8YQ2K5GlxdeMmP'
 const BATTLE_URL = 'https://www.youtube.com/watch?v=3KyqUee895Y'
@@ -20,12 +20,8 @@ function formatTime(seconds: number): string {
 }
 
 /**
- * `setShuffle` is a documented no-op if called before the playlist has finished
- * loading, and even once it takes effect it doesn't relocate the video already
- * cued (the playlist's first entry) — so every reload started on the same track
- * and "shuffle" never looked like it did anything. Poll for the playlist to
- * actually be populated, then shuffle, loop, and jump to a random index so
- * ordering is visibly randomized from the first track onward.
+ * Waits for the playlist before it enables shuffle and repeat.
+ * Then it selects a random initial track.
  */
 function shuffleWhenReady(yt: YTPlayer | undefined, attempt = 0) {
   const playlist = yt?.getPlaylist?.()
@@ -35,13 +31,12 @@ function shuffleWhenReady(yt: YTPlayer | undefined, attempt = 0) {
     yt?.playVideoAt?.(Math.floor(Math.random() * playlist.length))
     return
   }
-  if (attempt >= 20) return // playlist never loaded in time; give up quietly
+  if (attempt >= 20) return // Stop after the playlist load limit.
   setTimeout(() => shuffleWhenReady(yt, attempt + 1), 250)
 }
 
-/** One playlist's player. Always mounted regardless of `visible` — only CSS hides
- * the inactive track, so switching tracks (or closing the Settings sidebar, which
- * hosts this component) never remounts/restarts playback. */
+/** Plays one playlist.
+ * CSS hides an inactive player without unmounting it. */
 function TrackPlayer({
   track,
   url,
@@ -73,21 +68,15 @@ function TrackPlayer({
       <ReactPlayer
         ref={ref}
         url={url}
-        // Both tracks always play (not gated on isActive/crossfading): browsers
-        // permit muted autoplay unconditionally, so keeping both embeds genuinely
-        // playing from mount is what makes the battle track's crossfade-in actually
-        // audible later — a `playVideo()` call fired for the first time mid-battle,
-        // after the tab has been open a while, is exactly the kind of "unmuted
-        // autoplay" browsers block. The inactive track stays silent via the
-        // imperative volume=0 below, not by pausing it.
+        // Start both tracks in muted autoplay mode.
+        // This lets a later crossfade work without a blocked autoplay request.
+        // Keep the inactive track at zero volume instead of pausing it.
         playing={playing}
         controls={false}
         loop
-        // Always `true` here — mute/unmute is driven imperatively via the real YT
-        // player instead (see `applyAudible` in playerStore for why: react-player's
-        // own reaction to a `muted` prop change silently fights our volume control).
-        // This still yields muted autoplay (the iframe is built with `mute: 1`),
-        // which is all that's needed to keep both embeds warm from mount.
+        // Keep this value true.
+        // `applyAudible` controls mute state through the YouTube player.
+        // React Player can otherwise conflict with direct volume control.
         muted
         volume={0} // level is driven imperatively (setVolume/crossfadeTo), not this prop
         width="100%"
@@ -96,9 +85,8 @@ function TrackPlayer({
         onReady={(player) => {
           const yt = player.getInternalPlayer() as YTPlayer | undefined
           shuffleWhenReady(yt)
-          // `crossfadeTo` only actually ramps volume on a TRACK CHANGE — the track
-          // that's active at mount time never goes through that ramp, so its real
-          // mute/volume state has to be set here instead of staying silent forever.
+          // Set the initial track volume here.
+          // `crossfadeTo` changes volume only after a track change.
           applyAudible(track)
         }}
         onProgress={(state) => isActive && setProgress(track, state.playedSeconds)}
@@ -144,32 +132,25 @@ export default function MusicPlayer() {
   const skip = usePlayer((s) => s.skip)
   const crossfadeTo = usePlayer((s) => s.crossfadeTo)
 
-  // Arm the one-time "first gesture anywhere unlocks audible playback" listener as
-  // early as possible — this component (inside the always-mounted Settings
-  // sidebar) mounts once at app start, well before the user necessarily opens
-  // Settings themselves.
+  // Listen for the first user action when the application starts.
+  // This action permits audible playback.
   useEffect(() => {
     installUnlockListener()
   }, [])
 
-  // Local state while the user is actively dragging the scrubber, so incoming
-  // onProgress updates don't fight the drag.
+  // Keep local progress while the user drags the scrubber.
   const [scrubValue, setScrubValue] = useState<number | null>(null)
 
-  // "Battle in progress" = an active battle whose phase is actually fighting, not
-  // team preview (setup) or game over. A reactive selector (not a one-time check)
-  // correctly follows battleStore's async session restore on page refresh.
+  // Treat only the normal battle phase as active combat.
+  // The reactive selector also follows an asynchronous session restore.
   const fighting = useBattle(
     (s) =>
       s.battleId != null &&
       s.view != null &&
       (s.view.phase === 'normal' || s.view.phase === 'selfSwitch' || s.view.phase === 'replacement'),
   )
-  // A tracker session counts as "fighting" too — it's a live battle, just
-  // typed instead of simulated. Its `BattleView.phase` is always `'normal'`
-  // (`mapping::battle_view_from_belief` sets it unconditionally — tracker
-  // mode has no team-preview/self-switch/replacement/game-over phases of its
-  // own), so no phase branching is needed on this side.
+  // Treat a tracker session as active combat.
+  // Tracker views always use the `normal` phase.
   const trackerFighting = useTracker((s) => s.trackerId != null && s.view != null)
   useEffect(() => {
     crossfadeTo(fighting || trackerFighting ? 'battle' : 'ambient')
@@ -211,9 +192,7 @@ export default function MusicPlayer() {
         <TrackPlayer track="ambient" url={AMBIENT_URL} playlistId={AMBIENT_PLAYLIST_ID} visible={activeTrack === 'ambient'} />
         <TrackPlayer track="battle" url={BATTLE_URL} playlistId={BATTLE_PLAYLIST_ID} visible={activeTrack === 'battle'} />
 
-        {/* Custom overlay — intercepts clicks so YouTube's own UI (already hidden via
-            controls={false}) never surfaces, and hosts the only controls we want:
-            play/pause, skip, and a scrubber. */}
+        {/* Block YouTube controls and show the application playback controls. */}
         <div className="absolute inset-0 flex flex-col justify-end bg-gradient-to-t from-black/70 via-transparent to-transparent p-2">
           <div className="mb-1 flex items-center justify-center gap-4 text-white">
             <button onClick={togglePlay} aria-label={playing ? 'Pause' : 'Play'}>

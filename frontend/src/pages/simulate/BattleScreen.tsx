@@ -11,8 +11,7 @@ export default function BattleScreen() {
   const [confirmLeave, setConfirmLeave] = useState(false)
   if (!view) return null
 
-  // GameOverState carries only the winner; teamPreview carries only the
-  // preview — the arena needs live side data.
+  // Show the arena only when the view contains live side data.
   const inBattle = !!view.p1 && !!view.p2
 
   return (

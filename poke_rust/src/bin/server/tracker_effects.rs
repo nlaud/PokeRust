@@ -1,80 +1,20 @@
-//! Tracker mode: synthesize the "guaranteed" reactions a user should never
-//! have to type by hand — anything that follows deterministically from
-//! something they *did* type.
+//! Adds guaranteed reactions to typed tracker events.
 //!
-//! Four triggers, matching how the real simulator nests these (see
-//! `information::information`'s module docs and
-//! `simulator::helpers::apply_reaction_self_boost`):
-//!
-//! - An **`AbilityRevealed`** node (anywhere in the tree — a standalone
-//!   `[slot] [ability]` line, an ability named inline on a move line, or one
-//!   synthesized by this module itself for Mega Evolution/Trace) gets its
-//!   deterministic on-reveal effect appended as a child, exactly the
-//!   "nested-reveal convention" the simulator itself uses (Intimidate's
-//!   `-1 atk` per opposing active, a weather-setter's field change, …). The
-//!   *ability itself* still has to be named by the user for an ordinary
-//!   switch-in reveal — that's new information the engine has no way to
-//!   guess — only its guaranteed consequence is auto-added.
-//! - A **`MoveUsed`** node gets: its move's always-on `self_boost` (Swords
-//!   Dance, Nasty Plot, …); and, generically, every 100%-chance,
-//!   non-random-choice entry in `MoveData.secondaries`/`self_secondaries` —
-//!   these aren't a hand-curated list, they're *already* sitting in the
-//!   parsed move dex (Showdown's move data represents a "pure status" move's
-//!   entire guaranteed effect — Thunder Wave's Paralysis, Stealth Rock's
-//!   hazard, Rain Dance's weather, Leer's -1 Def — as a clean top-level
-//!   `status:`/`sideCondition:`/`weather:`/`boosts:` field, and
-//!   `state/dex_data.rs::parse_move_entry` already converts every one of
-//!   those into a 100%-chance secondary; see this module's design doc for
-//!   the research trail). A target already recorded `Missed`/`Immune`/
-//!   `Blocked`, or the move recorded `MoveFailed` at all, is skipped.
-//! - A **`MegaEvolution`** node gets its mega form's fixed ability (a mega
-//!   forme's dex entry always has exactly one ability slot — no hidden
-//!   ability — mirroring `state/battle.rs`'s own mega-evolution ability
-//!   resolution) appended as a nested `AbilityRevealed`, itself immediately
-//!   cascaded through the same ability-reaction table (the outer recursive
-//!   walk's children-pass has already finished by the time a node's own kind
-//!   is handled, so a newly-synthesized `AbilityRevealed` can't rely on the
-//!   recursion to process it — see `ability_revealed_node`).
-//! - **Any node** gets a `Faint` sibling synthesized for any
-//!   `DamageDealt`/`Healed`/`SetHp` child that lands exactly on 0 HP — the
-//!   real simulator always emits `Faint` as an explicit sibling of the
-//!   zero-HP event (never implied by it), and Pass 1's own auto-faint
-//!   belt-and-braces only covers the `DamageDealt` arm, so this closes the
-//!   `Healed`/`SetHp`-to-0 gap and matches real emitted trees either way.
+//! Ability reveals add deterministic ability effects.
+//! Move events add guaranteed boosts and secondaries.
+//! Mega Evolution adds the fixed Mega ability and its effects.
+//! A zero-HP event adds a Faint event.
+//! Failed, missed, immune, or blocked effects do not activate.
 //!
 //! # Scope
 //!
-//! The move-secondary synthesis intentionally skips `slot_condition`
-//! payloads (Wish/Future Sight/Doom Desire need extra snapshot data —
-//! attacker stats, ability, item at cast time — the tracker doesn't have
-//! readily available) — those stay user-typed. The ability table
-//! (Intimidate, the four weather/terrain-setter pairs, Intrepid Sword/
-//! Dauntless Shield, Download, Trace) is, and will likely remain, hand-
-//! curated: unlike moves, an ability's effect lives entirely in unparsed JS
-//! with no structured dex equivalent (confirmed against Download/Trace/
-//! Frisk/Forewarn) — Frisk/Forewarn are excluded because they reveal
-//! genuinely new information the user has to type anyway (revealing it IS
-//! the ability's whole purpose). Weather/terrain-setter *abilities* follow
-//! the real precedence rule (see `weather_is_strong` and
-//! `simulator::helpers::set_weather`, which this mirrors): a standard
-//! weather-setting ability always replaces whatever standard weather is
-//! currently active (Sand Stream after Drought overrides Sun with
-//! Sandstorm), but fails to activate at all against the three strong/primal
-//! weathers (Desolate Land/Primordial Sea/Delta Stream) — those can only be
-//! replaced by another strong weather. Terrain has no such exception: a
-//! terrain-setting ability always replaces whatever terrain is active, full
-//! stop (mirrors `simulator::helpers::set_terrain`, which is unconditional).
-//! Because two switches/mega evolutions can land in the *same* turn (e.g.
-//! each side mega evolving on the turn's first move), `augment_turn` threads
-//! a running scratch of just the field-relevant belief state (weather,
-//! terrain) between events in one turn — see its doc comment — so the
-//! second event's gate sees the first event's synthesized change instead of
-//! stale pre-turn state. Intrepid Sword/Dauntless Shield/one-time abilities
-//! are gated on `one_time_ability_used` so a Pokemon that already fired one
-//! doesn't get boosted again on a later switch-in. Download only fires when
-//! the opposing actives' known Def/SpD bounds make the comparison
-//! unambiguous; Trace only fires when exactly one opposing active's ability
-//! is already `Known`.
+//! Slot conditions remain user input because they need unavailable snapshot data.
+//! Ability effects use a hand-written table because the dex does not parse ability scripts.
+//! Standard weather cannot replace strong weather.
+//! Terrain always replaces the current terrain.
+//! Scratch field state preserves event order within a turn.
+//! One-time abilities check their stored activation state.
+//! Download and Trace activate only when the belief gives one clear result.
 
 use std::collections::{HashMap, HashSet};
 
@@ -94,16 +34,9 @@ use poke_rust::state::pokemon::VolatileStatusState;
 
 use crate::tracker_parse::opposing_active_slots;
 
-/// Augment every event in one turn, in order, threading a scratch snapshot of
-/// field-level belief state (currently: weather, terrain) between them so a
-/// LATER event in the same turn correctly observes an EARLIER event's
-/// synthesized change. Concretely: two mega evolutions in one turn, one per
-/// side, each with a weather-setting ability — the second must see the
-/// first's weather already active to decide whether it's blocked (strong
-/// weather) or should override it (standard weather always replaces standard
-/// weather). `belief` itself is never mutated; `scratch` is a throwaway clone
-/// used only to keep `guaranteed_ability_reactions`'s gates accurate as the
-/// turn's events are synthesized one at a time.
+/// Adds guaranteed effects to each event in order.
+/// A scratch belief carries field changes between events.
+/// This function does not change the input belief.
 pub fn augment_turn(
     events: Vec<InformationEvent>,
     belief: &UnknownBattleState,
@@ -112,11 +45,8 @@ pub fn augment_turn(
 ) -> Vec<InformationEvent> {
     let mut scratch = belief.clone();
     let mut effect_changes = TimedEffectChanges::default();
-    // Mirror Armor changes where Intimidate's guaranteed drop lands. Tracker
-    // text flattens its reveal into a later line, so make that reveal visible
-    // before augmenting the earlier Intimidate event. Unlike Defiant or
-    // Competitive, this does not synthesize the explicitly typed reaction;
-    // it only suppresses the incorrect direct drop.
+    // Read later Mirror Armor reveals before adding Intimidate effects.
+    // This prevents a direct drop on the Mirror Armor user.
     let mut mirror_armor_slots = HashSet::new();
     for event in &events {
         collect_mirror_armor_reveals(event, &mut mirror_armor_slots);

@@ -11,7 +11,7 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col">
       <NavBar />
-      {/* The window never scrolls — pages scroll inside main (themed scrollbar). */}
+      {/* Keep window scrolling disabled. Scroll each page inside `main`. */}
       <main className="min-h-0 flex-1 overflow-y-auto">
         <Routes>
           <Route path="/" element={<TeamsPage />} />

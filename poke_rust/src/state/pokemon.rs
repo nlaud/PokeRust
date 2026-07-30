@@ -46,8 +46,9 @@ fn move_name(mov: &PokemonMove) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VolatileStatusState {
-    /// Turn-counter volatile. Payload is decremented each EOT; 0 = permanent; 1 = removed
-    /// next EOT. EXCEPTION: `Substitute` stores sub HP in the payload (never decremented).
+    /// Volatile with a turn counter.
+    /// Zero means permanent. One means removal at the next end of turn.
+    /// Substitute stores HP instead of a turn count.
     TurnStatus(VolatileStatus, u16),
     MoveStatus(VolatileStatus, u16),
     Charging(PokemonMove, Vec<crate::state::battle::FieldSlot>),
@@ -89,16 +90,13 @@ pub enum Nature {
     Serious,
 }
 
-/// `used_moves_this_field` is intentionally excluded from `PartialEq`, `Eq`, and `Hash`.
-/// It tracks which move slots have been used since switch-in (for Last Resort), but is
-/// purely runtime bookkeeping — including it would prevent coalescing branches that differ
-/// only in move usage history while being otherwise identical in game state.
+/// Excludes `used_moves_this_field` from equality and hashing.
+/// This runtime history must not prevent branch coalescing.
 #[derive(Clone)]
 pub struct PokemonState {
-    /// Stable identity within this Pokémon's own party (party-order index, assigned at team
-    /// construction). Unlike a `FieldSlot` it is unaffected by switching, and unlike `species`
-    /// it survives forme changes/Mega/Tera and distinguishes duplicate species. Used to record
-    /// the setter of Sticky Web so Mirror Armor can reflect to the correct Pokémon.
+    /// Stable party index.
+    /// It survives switches and form changes.
+    /// It also distinguishes duplicate species.
     pub mon_id: u8,
     pub fainted: bool,
     pub species: Species,
@@ -113,52 +111,49 @@ pub struct PokemonState {
     pub move_pp: [u8; 4],
     pub max_pp: [u8; 4],
     pub item: Item,
-    /// The last item consumed by this Pokémon (set when eating a Berry or consuming an item).
-    /// Used by Harvest to restore a Berry, and Recycle to recover any consumed item.
-    /// Not set for items lost via Knock Off, theft, or other non-consumption means.
+    /// Last consumed item.
+    /// Harvest and Recycle can restore it.
+    /// Item removal without consumption does not set it.
     pub consumed_item: Option<Item>,
-    /// Cud Chew delayed re-eat: `Some((berry, armed))`.
-    /// `armed=false` means one EOT has not yet passed; `armed=true` means the re-eat fires
-    /// this EOT. Cleared on switch-out or when the re-eat fires.
+    /// Pending Cud Chew Berry and ready state.
+    /// False waits through one end of turn. True activates at this end of turn.
     pub cud_chew_pending: Option<(Item, bool)>,
-    /// True once this Pokémon's held item has been consumed or removed while it was on the
-    /// field, and no replacement item has been gained since. Powers Unburden's ×2 Speed.
-    /// Cleared on switch-out and whenever an item is gained.
+    /// True after this Pokémon loses its held item on the field.
+    /// A new item or switch clears it.
+    /// Unburden uses this value.
     pub item_lost: bool,
 
     // ── Per-turn event flags (cleared in end_turn Phase 5 and on switch-out) ────────
-    /// Took any damage this turn — direct hits, recoil, confusion self-hits, etc.
-    /// Read by Assurance's ×2 condition.
+    /// True after any damage this turn.
+    /// Assurance uses this value.
     pub damaged_this_turn: bool,
-    /// Slots whose direct move hits damaged this Pokémon this turn. Read by Avalanche
-    /// ("the target damaged the user this turn").
+    /// Slots that damaged this Pokémon with direct move hits this turn.
+    /// Avalanche uses this list.
     pub damaged_by_this_turn: Vec<crate::state::battle::FieldSlot>,
-    /// Damage taken from the most recent physical direct-move hit this turn, and the slot
-    /// that landed it. Overwritten per-hit (multi-hit: final hit wins). Read by Counter.
+    /// Damage and source from the latest physical direct hit this turn.
+    /// Counter uses these values.
     pub last_physical_damage_taken: u16,
     pub last_physical_attacker: Option<crate::state::battle::FieldSlot>,
-    /// Damage taken from the most recent special direct-move hit this turn, and the slot
-    /// that landed it. Read by Mirror Coat.
+    /// Damage and source from the latest special direct hit this turn.
+    /// Mirror Coat uses these values.
     pub last_special_damage_taken: u16,
     pub last_special_attacker: Option<crate::state::battle::FieldSlot>,
-    /// Damage taken from the most recent direct-move hit this turn (any category), and the
-    /// slot that landed it. Read by Metal Burst and Comeuppance.
+    /// Damage and source from the latest direct hit this turn.
+    /// Metal Burst and Comeuppance use these values.
     pub last_damage_taken: u16,
     pub last_damage_attacker: Option<crate::state::battle::FieldSlot>,
-    /// Any stat stage actually rose this turn (post-clamp). Gates Burning Jealousy's burn.
+    /// True after a stat stage increases this turn.
     pub stats_raised_this_turn: bool,
-    /// Any stat stage actually fell this turn (post-clamp). Read by Lash Out's ×2.
+    /// True after a stat stage decreases this turn.
     pub stats_lowered_this_turn: bool,
-    /// Entered the field via a switch THIS turn (not battle-start leads — those only set
-    /// `entered_this_turn`). Payback does not double against a Pokémon that switched in.
+    /// True after a switch enters this Pokémon during the current turn.
+    /// Battle leads do not set it.
     pub switched_in_this_turn: bool,
-    /// Consecutive successful stalling-move (Protect/Detect/Endure/King's Shield/Spiky Shield/
-    /// Baneful Bunker) uses. Drives the 1/3^n success decay. Reset by any non-stalling move, a
-    /// failed stall, switch-out, and (best-effort) "couldn't act" cases.
+    /// Consecutive successful stalling moves.
+    /// Controls the one-third success decay.
     pub stall_counter: u8,
-    /// Consecutive successful Ally Switch uses. Independent from stall_counter (the two
-    /// decay chains are separate per Bulbapedia). Reset on non-Ally-Switch move, failed
-    /// Ally Switch, or switch-out.
+    /// Consecutive successful Ally Switch uses.
+    /// This decay is separate from `stall_counter`.
     pub ally_switch_counter: u8,
     pub nature: Nature,
 
@@ -180,71 +175,58 @@ pub struct PokemonState {
 
     pub last_move_failed: bool, //For stomping tantrum
 
-    /// True while the current `Status::Sleep` was induced by Rest, which (per Bulbapedia) is a
-    /// deterministic, non-randomized 2-blocked-turn sleep (1 with Early Bird) rather than the
-    /// normal 1/3-vs-2/3-weighted random duration. Cleared on waking so a later natural sleep
-    /// never inherits a stale value.
+    /// True while Rest causes the current sleep.
+    /// Rest uses a fixed duration instead of the normal random duration.
     pub rest_sleep: bool,
 
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
-    /// Consecutive uses of the same move (for the Metronome item boost).
-    /// Incremented when the same move succeeds back-to-back; reset on a different move,
-    /// a miss, or switching out.  Saturates at 255 (well above the cap of 5).
+    /// Consecutive successful uses of the same move.
+    /// The Metronome item uses this count.
     pub consecutive_move_count: u8,
-    /// Tracks which move slots have been used since this Pokémon was sent in (for Last Resort).
-    /// Index matches `moves`; cleared on switch-in alongside `first_move_on_field`.
+    /// Move slots used since entry.
+    /// Last Resort uses this array.
     pub used_moves_this_field: [bool; 4],
 
-    /// Generic once-per-battle flag for abilities that fire only on first entry
-    /// (e.g. Supersweet Syrup, Intrepid Sword). Persists across switch-outs — a volatile
-    /// would be wiped by `clear_pokemon_for_switch_out`.
+    /// True after a once-per-battle entry ability activates.
+    /// This value persists across switches.
     pub one_time_ability_used: bool,
 
-    /// True once this Pokémon has eaten any Berry this battle (own berry, Bug Bite/Pluck,
-    /// Fling). Persists across switch-out, faint+revive, and Recycle. Required by Belch.
+    /// True after this Pokémon eats a Berry.
+    /// This value persists for the battle.
+    /// Belch requires it.
     pub ate_berry_this_battle: bool,
 
-    /// True during the first TURN the Pokémon can act. Set on any entry; cleared at end-of-turn.
-    /// For U-turn/self-switch mid-turn entries (turn_started=true, turn_ended=false), the flag
-    /// must survive the current turn's EOT and remain true the NEXT turn. That is handled by
-    /// `first_turn_on_field_pending` (see below). Gates Fake Out and First Impression.
-    /// Cleared on switch-out.
+    /// True during the first turn that this Pokémon can act.
+    /// Fake Out and First Impression require it.
     pub first_move_on_field: bool,
 
-    /// Set in process_pokemon_send_out when a Pokémon enters MID-TURN before EOT has run
-    /// (U-turn / Volt Switch / Parting Shot self-switch; detected via turn_started && !turn_ended).
-    /// Tells EOT Phase 5 to skip clearing first_move_on_field for exactly one EOT cycle, so the
-    /// flag persists to the NEXT turn (the Pokémon's actual first chance to act).
+    /// Preserves `first_move_on_field` after a mid-turn entry.
+    /// The next turn is the Pokémon's first chance to act.
     pub first_turn_on_field_pending: bool,
 
-    /// True on the turn this Pokémon entered battle via a SwitchAction (voluntary or forced
-    /// mid-turn). Cleared at the end of end_turn after ability effects are applied.
-    /// Used by Speed Boost to skip the boost on the entry turn.
-    /// NOT set for faint replacements (which enter after end_turn has already run for
-    /// the KO turn and should receive Speed Boost normally on their first end_turn).
+    /// True on the turn that a switch action enters this Pokémon.
+    /// Speed Boost skips this entry turn.
+    /// Faint replacements do not set this value.
     pub entered_this_turn: bool,
 
-    /// Saved pre-transform snapshot for Imposter / Transform revert. Boxed to avoid
-    /// an infinite-size struct (recursive types require indirection in Rust).
+    /// State before Imposter or Transform.
+    /// The box permits the recursive type.
     pub pre_transform: Option<Box<PokemonState>>,
 
-    /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
-    /// the holder switches out. `None` when Mimicry is not active.
+    /// Types before Mimicry.
+    /// Terrain end or a switch restores them.
     pub pre_mimicry_types: Option<Vec<crate::state::dex_data::PokemonType>>,
 
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
 
-    /// Hit counter for Rage Fist. Incremented each time this Pokémon is hit by a direct damaging
-    /// move (from any source, including allies). Reset on switch-out or faint (Champions rules);
-    /// never reset at end-of-turn while the mon remains on field.
+    /// Direct damaging hits taken since entry.
+    /// Rage Fist uses this count.
     pub times_hit: u16,
 
-    /// When `Some(s)`, this Pokémon is currently disguised by Illusion as species `s`
-    /// (appearance only — true `species` is used for all calculations). Set on switch-in
-    /// when the ability is Illusion and a valid disguise target exists in the back.
-    /// Cleared when a direct damaging move connects, or when the ability is suppressed/changed.
+    /// Active Illusion disguise species.
+    /// Calculations still use the true species.
     pub illusion_disguise: Option<crate::data::species::Species>,
 }
 

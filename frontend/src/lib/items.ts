@@ -1,8 +1,6 @@
-// Static item catalog for the Format editor: exactly the held-item pool of
-// Pokémon Champions (general items, Mega Stones, berries). Slugs follow the
-// PokeAPI sprites-repo naming so `itemSpriteUrl` resolves; Champions-only Mega
-// Stones have no sprite there and render label-only (the <img> onError hides
-// the broken image).
+// Lists all Pokémon Champions held items for the format editor.
+// Slugs use PokeAPI sprite names.
+// Champions-only Mega Stones show labels because PokeAPI has no sprites for them.
 
 export interface CatalogItem {
   /** PokeAPI slug, e.g. "choice-scarf". */
@@ -11,7 +9,7 @@ export interface CatalogItem {
   label: string
 }
 
-/** "King's Rock" → "kings-rock"; "Charizardite X" → "charizardite-x". */
+/** Converts an item label to a PokeAPI slug. */
 function slugify(label: string): string {
   return label
     .toLowerCase()
@@ -64,10 +62,7 @@ const BERRIES = items(
   ].map((n) => `${n} Berry`),
 )
 
-/** The full held-item pool of the current Champions ruleset. Exported directly
- * (not just via `fetchItemCatalog`) so callers that need it synchronously —
- * e.g. `SetupPanel` resolving a format's legal-items list at battle-start —
- * don't have to thread a promise through just to read a static array. */
+/** Complete held-item list for the current Champions ruleset. */
 export const CATALOG: CatalogItem[] = [...GENERAL, ...MEGA_STONES, ...BERRIES]
 
 export function fetchItemCatalog(): Promise<CatalogItem[]> {

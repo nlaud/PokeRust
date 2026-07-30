@@ -44,8 +44,8 @@ use crate::state::dex_data::{
 
 // ── Core recursive node ──────────────────────────────────────────────────────
 
-/// A single piece of information revealed to a player, together with any further
-/// events it caused. Reactions are ordered by their in-battle resolution sequence.
+/// Stores one revealed event and its direct reactions.
+/// Reactions use battle resolution order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InformationEvent {
     pub kind: EventKind,
@@ -55,15 +55,9 @@ pub struct InformationEvent {
 
 // ── Supporting types ─────────────────────────────────────────────────────────
 
-/// The identity and visible state of a Pokémon as it enters the field.
-/// Used for voluntary switches and — when nested under a causing event — forced switches
-/// (Roar, Whirlwind, Dragon Tail, Red Card, etc.).
-///
-/// `species`/`hp` are always the *true* values here: the raw resolution pass
-/// (`event_observer` present) no longer masks at emission time. `disguise_species` and
-/// `max_hp` carry what a non-owning observer would see instead; [`mask_events_for`]
-/// consumes them to build each player's masked stream and they go unused afterward
-/// (`disguise_species` becomes irrelevant, `hp` is already collapsed to `Number`/`Percent`).
+/// Stores a Pokémon identity and visible state at entry.
+/// Raw events contain true species and HP.
+/// Masking uses `disguise_species` and `max_hp` for the opponent view.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SwitchState {
     pub slot: FieldSlot,

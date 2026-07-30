@@ -1,28 +1,9 @@
-//! Sample a full competitive team straight from usage statistics — no
-//! fog-of-war belief involved.
+//! Samples a complete team from usage data.
 //!
-//! This is the "belief-free" sibling of `information::determinize`: it reuses
-//! the same weighting primitives (`sample_one_weighted`,
-//! `sample_fixed_size_subset`, `MetaDex::teammate_score`/`popularity`) and the
-//! same independence assumption
-//! (`P(item)·P(ability)·P(nature)·P(spread)·P_CP(moves)`, see that module's
-//! doc comment), but builds a roster from scratch instead of filtering
-//! candidates against an `Unknown` belief. Deliberately does *not* reuse
-//! `determinize`'s belief-coupled `sample_item`/`sample_ability`/`sample_moves`
-//! wrappers (they take an `UnknownPokemonState` this code has no use for) —
-//! only the primitives underneath them.
-//!
-//! Output is a lightweight per-mon `GeneratedSet`, not a full `PokemonState`:
-//! the only thing a caller needs is enough to render a Showdown teamsheet
-//! (`render_teamsheet`) and hand it back through the same parse path a pasted
-//! team takes (`state::pokemon::parse_team_sheet_str`). Building a
-//! `PokemonState` directly here would mean carrying scaled EVs (0..=252)
-//! alongside the raw authoring points (0..=32) the cache and the teamsheet
-//! `EVs:` line both use — exactly the double-scaling footgun
-//! `scale_evs_for_stat_points`'s doc comment warns about.
-//!
-//! Enforces Champions' species clause (no duplicate species) and item clause
-//! (no duplicate held items, `Item::None` exempt) while building the roster.
+//! It uses the same sampling rules as the determinizer without a belief.
+//! It returns teamsheet values instead of a full battle state.
+//! This prevents duplicate stat-point conversion.
+//! Team generation enforces the Champions species and item clauses.
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,9 +20,8 @@ use crate::state::dex_data::PokemonData;
 use crate::state::pokemon::{Nature, is_mega_dex_entry};
 use crate::user::humanize_identifier;
 
-/// One generated Pokemon's build: enough to render a teamsheet block, nothing
-/// more. `points` are raw authoring stat points, 0..=32 per stat — the same
-/// units the teamsheet `EVs:` line and `MetaDex`'s `spreads` use.
+/// Stores one generated teamsheet set.
+/// `points` use the authoring scale from zero through 32.
 #[derive(Debug, Clone)]
 pub struct GeneratedSet {
     pub species: Species,

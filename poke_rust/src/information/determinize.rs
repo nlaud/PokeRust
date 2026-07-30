@@ -69,9 +69,7 @@ pub const MAX_POINTS_PER_STAT: u8 = 32;
 /// How an unresolved field timer is filled in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerPolicy {
-    /// Assume the effect has as long left as it plausibly could. Pessimistic for
-    /// the observer, which is the safer default for a bot deciding whether to
-    /// wait out a screen.
+    /// Uses the largest permitted remaining duration.
     MaxPlausible,
     /// Draw uniformly from the remaining possibilities.
     SampleUniform,
@@ -80,28 +78,19 @@ pub enum TimerPolicy {
 }
 
 pub struct DeterminizeConfig {
-    /// Reused wholesale for level, EV/IV conventions, the item clause, learnsets
-    /// and the legal-item whitelist, so a determinized world obeys the same
-    /// rules the belief was inferred under.
+    /// Inference rules that the sampled world must follow.
     pub inference: InferenceConfig,
-    /// Whose perspective the belief is written from. This side's Pokemon are
-    /// expected to be fully `Known` and are copied through; the opponent's are
-    /// the ones actually being sampled, and are what the CNF predicates are
-    /// checked against.
+    /// Player whose belief supplies the world.
+    /// Copies this player's known team and samples the opponent.
     pub observer: Player,
-    /// Fabricate bench Pokemon when the belief holds fewer candidates than the
-    /// side actually has. Without this a determinized state has an illegally
-    /// short bench and every switch command is rejected.
+    /// Creates plausible bench Pokémon when the belief has too few candidates.
     pub invent_missing_bench: bool,
     /// How many times to redraw a world that violates a cross-Pokemon constraint
     /// before accepting it with a warning.
     pub max_repair_passes: u8,
-    /// Weight multiplier for (nature, spread) pairs that disagree — a nature
-    /// nerfing a heavily-invested stat, or boosting an uninvested one. Applied
-    /// inside a single nature's row of the joint table, so it reshapes
-    /// `P(spread | nature)` and leaves the nature marginal at the usage rate.
-    /// Clamped to `[0, 1]`; `1.0` disables it and restores the plain
-    /// independent product.
+    /// Reduces weights for conflicting nature and spread pairs.
+    /// The value stays from zero through one.
+    /// One disables this adjustment.
     pub nature_spread_coherence: f64,
     pub timer_policy: TimerPolicy,
     /// When false, an attribute whose meta options are all excluded is an error
@@ -123,9 +112,8 @@ impl Default for DeterminizeConfig {
     }
 }
 
-/// A choice the determinizer had to make on thinner evidence than intended.
-/// Not errors — every one of these still yields a belief-consistent world — but
-/// a clean fixture should produce none, which is what makes them useful in tests.
+/// Reports a sample that used weaker evidence.
+/// The returned world remains consistent with the belief.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeterminizeWarning {
     /// Every meta option for this attribute was excluded by the belief, so it

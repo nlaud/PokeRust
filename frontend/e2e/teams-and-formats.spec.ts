@@ -1,7 +1,6 @@
 import { test, expect } from '@playwright/test'
 
-// Smoke coverage for the two localStorage-backed CRUD pages (Teams, Formats)
-// — no server involved at all, these never leave the browser.
+// Tests the local team and format pages without a server.
 
 test.describe('Teams page', () => {
   test('creating a team persists it as a card', async ({ page }) => {
@@ -13,7 +12,7 @@ test.describe('Teams page', () => {
 
     await expect(page.getByText('E2E Test Team', { exact: true })).toBeVisible()
 
-    // Reload — the whole point of localStorage persistence is surviving one.
+    // Reload the page to test local storage.
     await page.reload()
     await expect(page.getByText('E2E Test Team', { exact: true })).toBeVisible()
   })
@@ -25,11 +24,8 @@ test.describe('Formats page', () => {
     await page.getByRole('button', { name: 'Add format' }).click()
     await page.getByPlaceholder('Format name').fill('E2E Test Format')
 
-    // Active / Brought / Total number inputs, in that DOM order (see
-    // `FormatEditor`'s `[field, label]` table). Picked to not collide with
-    // either seeded default format's own active/brought/total (Doubles is
-    // 2/4/6, Singles is 1/3/6) — a collision would make the summary text
-    // assertion below match two cards instead of one.
+    // Use values that differ from both default formats.
+    // This makes the summary assertion select one card.
     const numberInputs = page.locator('input[type="number"]')
     await numberInputs.nth(0).fill('1')
     await numberInputs.nth(1).fill('2')

@@ -6,7 +6,7 @@ import { favoritesFirst, loadFormats, loadTeams, type StoredFormat } from '../..
 import { useTracker } from '../../store/trackerStore'
 import SpeciesPicker from './SpeciesPicker'
 
-/** Mirrors `pages/simulate/SetupPanel.tsx`'s `legalItemsFor`. */
+/** Returns the permitted items for a format. */
 function legalItemsFor(format: StoredFormat): string[] {
   const banned = new Set(format.bannedItems)
   return CATALOG.filter((item) => !banned.has(item.name)).map((item) => item.name)
@@ -19,9 +19,7 @@ const INFO_MODE_OPTIONS = [
 ] as const
 type TrackerInfoMode = (typeof INFO_MODE_OPTIONS)[number]['value']
 
-/** What the opponent field expects under each information mode — shown as
- * both the field's placeholder and a hint line, so the pasted-in text always
- * matches what the selected mode can actually see. */
+/** Describes the opponent input for each information mode. */
 const OPPONENT_HINT: Record<TrackerInfoMode, string> = {
   closedSheet:
     "Just species — pick or paste the opponent's roster; item/ability/moves/nature stay hidden either way.",
@@ -38,38 +36,30 @@ const OPPONENT_PLACEHOLDER: Record<TrackerInfoMode, string> = {
 }
 
 /**
- * Tracker mode's start flow — mirrors `SetupPanel.tsx`'s battle-start flow
- * (ruleset + information mode pickers, reused `Select`/`favoritesFirst`), but
- * in place of a second team select: a text box for the opponent (a teamsheet
- * or comma-separated species — the server normalizes the latter). There's no
- * lead picker here — leads for BOTH sides are conveyed by a
- * `leads p … o …` tracker-text event once the session starts (see the
- * server's `tracker.rs` module doc: a session begins fully benched on both
- * sides).
+ * Starts a tracker session with a format, information mode, and opponent data.
+ * The opponent data can be a teamsheet or species list.
+ * A later `leads` event sends out both teams.
  */
 export default function TrackerSetupPanel() {
   const [teams] = useState(loadTeams)
   const [formats] = useState(loadFormats)
   const { create, busy, error, clearError } = useTracker()
 
-  // Default to favorited teams first (falling back to storage order) rather
-  // than raw `teams[0]`, so a starred team is what's pre-selected — mirrors
-  // `SetupPanel.tsx`'s default-selection behavior.
+  // Select the first favorite team.
+  // Use storage order when no team is a favorite.
   const sortedTeams = favoritesFirst(teams)
   const defaultFormat = formats.find((f) => f.id === 'champions-s2-doubles') ?? formats[0]
   const [formatId, setFormatId] = useState(defaultFormat?.id ?? '')
   const [teamId, setTeamId] = useState(sortedTeams[0]?.id ?? '')
   const [informationMode, setInformationMode] = useState<TrackerInfoMode>('closedSheet')
   const [opponent, setOpponent] = useState('')
-  // Closed sheet only ever names species, so it gets a validated chip picker
-  // instead of the textarea (see `SpeciesPicker`). Kept as separate state from
-  // `opponent` so switching modes back and forth doesn't destroy either one.
+  // Use the species picker for a closed sheet.
+  // Keep picker data separate from the full opponent sheet.
   const [opponentSpecies, setOpponentSpecies] = useState<string[]>([])
   const [speciesCatalog, setSpeciesCatalog] = useState<string[]>([])
   const [speciesLoading, setSpeciesLoading] = useState(true)
 
-  // One fetch for the whole page — the list is static dex data, and the picker
-  // is unusable without it.
+  // Load the static species list once for the page.
   useEffect(() => {
     let cancelled = false
     listSpecies()
@@ -77,8 +67,8 @@ export default function TrackerSetupPanel() {
         if (!cancelled) setSpeciesCatalog(res.species)
       })
       .catch(() => {
-        // Non-fatal: the picker degrades to accepting nothing, and the user can
-        // switch to a sheet mode. The real failure surfaces on submit.
+        // Keep the page available after a species-list failure.
+        // The user can select another information mode.
       })
       .finally(() => {
         if (!cancelled) setSpeciesLoading(false)
@@ -91,9 +81,8 @@ export default function TrackerSetupPanel() {
   const format = formats.find((f) => f.id === formatId)
   const team = teams.find((t) => t.id === teamId)
   const usesPicker = informationMode === 'closedSheet'
-  // The server requires at least `broughtPerSide` parseable Pokemon
-  // (`tracker.rs::create_tracker`), so gate on exactly that rather than a fixed
-  // 6 — a real closed sheet shows the whole roster, but a Bo3 game 2 might not.
+  // Require at least `broughtPerSide` valid Pokémon.
+  // Do not require a fixed roster of six.
   const minSpecies = format?.broughtPokemon ?? 0
   const opponentReady = usesPicker
     ? opponentSpecies.length >= minSpecies && minSpecies > 0
@@ -105,8 +94,7 @@ export default function TrackerSetupPanel() {
     clearError()
     void create({
       myTeam: team.sheet,
-      // `normalize_opponent_text` already splits a single comma-separated line
-      // into per-mon blocks, so the picker needs no API change of its own.
+      // `normalize_opponent_text` separates the comma-delimited species.
       opponent: usesPicker ? opponentSpecies.join(', ') : opponent,
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,

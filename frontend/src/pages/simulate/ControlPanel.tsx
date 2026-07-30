@@ -35,8 +35,8 @@ export default function ControlPanel() {
     setMega(false)
   }, [currentPlayer, currentSlot])
 
-  // Auto-commit forced slots. Reads fresh store state so a double-invoked
-  // effect (StrictMode) sees the already-advanced draft and doesn't re-push.
+  // Commit forced slots with current store data.
+  // A repeated Strict Mode effect then sees the updated draft.
   useEffect(() => {
     const s = useBattle.getState()
     const slot = s.commands?.slots[s.draftCommands.length]
@@ -150,8 +150,7 @@ export default function ControlPanel() {
 
   const slot = commands.slots[currentSlot]
   if (!slot || slot.forced) {
-    // All slots committed (turn about to ship) or a forced slot the effect
-    // above is about to auto-advance.
+    // Stop when all slots are complete or the effect will complete a forced slot.
     return (
       <div className={panelClass}>
         <span className="text-sm font-medium text-ink-muted">…</span>
@@ -176,8 +175,7 @@ export default function ControlPanel() {
 
   const attackOptions = slot.options.filter((o) => o.command.kind === 'attack')
   const struggleOptions = slot.options.filter((o) => o.command.kind === 'struggle')
-  // Hide bench mons already claimed by an earlier slot's switch this turn —
-  // two fainted slots can't both take the same replacement.
+  // Hide bench Pokémon that another slot selected this turn.
   const claimedBench = new Set(
     draftCommands.flatMap((c) => (c.kind === 'switch' ? [c.partyIndex] : [])),
   )
@@ -261,9 +259,8 @@ export default function ControlPanel() {
             if (!moveView) return null
             const group = moveSlots.get(moveSlot) ?? []
             const available = optionsFor(moveSlot)
-            // A move with no legal options (Fake Out after turn 1, Disabled,
-            // choice-locked, 0 PP…) stays visible; clicking it explains why
-            // the pick bounced instead of silently vanishing.
+            // Keep unavailable moves visible.
+            // A click explains why the server rejected the move.
             const usable = group.length > 0
             return (
               <button

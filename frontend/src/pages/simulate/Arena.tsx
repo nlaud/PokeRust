@@ -16,16 +16,12 @@ export default function Arena() {
   const { view, currentPlayer, pendingAttack, pushSlotCommand } = useBattle()
   if (!view?.p1 || !view.p2) return null
 
-  // Whose side of the field is "the viewer" — bottom, facing away, HUD above —
-  // vs "the opponent" — top, facing the viewer, HUD below. Follows whoever is
-  // currently choosing moves: the battlefield flips when the hotseat wizard
-  // advances from P1's command entry to P2's (see `activeView` in
-  // battleStore.ts, which the `view` this component reads already tracks).
+  // Put the current player at the bottom and the opponent at the top.
+  // The hotseat handoff changes the current player.
   const viewer = currentPlayer
   const opponent = otherPlayer(viewer)
 
-  // Doubles target-pick mode: legal target slots come straight from the
-  // server's pre-expanded command options.
+  // Use the server command options as legal doubles targets.
   const targetableSlots: FieldSlot[] =
     pendingAttack?.targets
       .map((t) => (t.command.kind === 'attack' || t.command.kind === 'struggle' ? t.command.target : undefined))
@@ -40,10 +36,8 @@ export default function Arena() {
     if (option) pushSlotCommand(option.command)
   }
 
-  // Each mon column scales with the horizontal room (flex-1 inside a
-  // percentage-width side container) up to a hard cap, so sprites and HP bars
-  // actually grow on wide windows instead of just drifting to the edges. The
-  // viewer's own HUD sits ABOVE its sprite — closer to the middle of the arena.
+  // Scale each Pokémon column to the available width and a fixed maximum.
+  // Put the current player's HUD above its sprite.
   const renderSide = (player: PlayerId) => {
     const isOwnSide = player === viewer
     const side = player === 'p1' ? view.p1! : view.p2!

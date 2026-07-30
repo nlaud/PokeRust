@@ -1,30 +1,18 @@
-//! `MetaDex`: the parsed, name-resolved usage cache the determinizer samples from.
+//! Loads the resolved usage cache for sampling.
 //!
-//! Loading is deliberately asymmetric about failure. An unresolvable *species*
-//! is a hard `MetaError` — see `names.rs` for why a silently-`Unknown` species is
-//! worse than no data at all. An unresolvable move/item/ability, an out-of-range
-//! stat point, or an unrecognized row category is a `MetaWarning` and the row is
-//! dropped: degraded input, not wrong output.
+//! An unknown species stops the load because it can produce incorrect stats.
+//! Other unknown or invalid rows produce warnings and are removed.
 //!
 //! ## What the percentages mean
 //!
-//! Four categories (`held_item`, `ability`, `stat_alignment`, `stat_points`) are
-//! genuine categorical distributions, top-N truncated, so their listed values
-//! sum to less than 100 and the remainder sits on unlisted options. Callers that
-//! want a distribution renormalize over what survives their own filtering —
-//! dividing by the *actual* surviving sum, never by 100. Sums above 100 occur
-//! (109.1 observed) from the site's own rounding, so nothing here asserts they
-//! total 100.
+//! Held items, abilities, natures, and stat spreads are truncated distributions.
+//! Sampling normalizes the remaining permitted rows by their actual sum.
 //!
-//! `move` is not a distribution at all: those are per-slot marginal inclusion
-//! rates summing to roughly 4 x 100%. `teammate` rows carry no percentages
-//! whatsoever — `pct` is always 0.0 there and `rank` is the only signal, which is
-//! why co-occurrence goes through `teammate_score` rather than the raw field.
+//! Move rates are marginal inclusion rates and total about 400 percent.
+//! Teammate rows use rank because they contain no percentages.
 //!
-//! `stat_points` are in the authoring 0..=32 scale summing to 66 — the same units
-//! a teamsheet's `EVs:` line uses, *not* the 0-252 scale. They are clamped on
-//! load, because `state::pokemon::scale_evs_for_stat_points` casts through
-//! `as u8` and would turn a stray 33 into an EV of 4 with no diagnostic.
+//! Stat points use the teamsheet scale from zero through 32.
+//! The loader checks this range before conversion.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

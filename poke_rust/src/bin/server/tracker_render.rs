@@ -39,8 +39,7 @@ use crate::tracker_effects::{
     augment_with_guaranteed_effects, fold_event_into_synthesis_scratch,
 };
 
-/// A reaction/event this renderer has no tracker-grammar word for. Carries a
-/// short human-readable reason so a fuzz failure identifies the missing grammar.
+/// Reports an event that the tracker grammar cannot represent.
 #[derive(Debug)]
 pub struct Unsupported(pub String);
 
@@ -48,11 +47,9 @@ fn unsupported(reason: impl Into<String>) -> Unsupported {
     Unsupported(reason.into())
 }
 
-/// Render one whole turn's already-masked events into tracker-syntax text
-/// (newline-separated lines, `endofturn`-terminated) — the exact submission
-/// shape `POST /api/tracker/{id}/events` expects. `belief` must be the
-/// tracker's committed belief from BEFORE this turn (mirrors
-/// `augment_with_guaranteed_effects`'s own `belief` contract).
+/// Renders one masked turn as tracker text.
+/// The text ends with `endofturn`.
+/// `belief` must contain the committed state before this turn.
 pub fn render_turn(
     events: &[InformationEvent],
     belief: &UnknownBattleState,
@@ -132,9 +129,8 @@ fn render_standalone_tree(
     Ok(())
 }
 
-/// Render one top-level event to a single line, or `Ok(None)` if the event
-/// (after subtracting guaranteed-and-therefore-re-synthesized reactions)
-/// carries no information a user would need to type at all.
+/// Renders one top-level event.
+/// Returns `Ok(None)` when generated reactions contain all its information.
 fn render_top_level_event(
     event: &InformationEvent,
     belief: &UnknownBattleState,
@@ -193,15 +189,9 @@ fn render_top_level_event(
             Ok(Some(out.join("\n")))
         }
         EventKind::SimultaneousSwitch { switches } => {
-            // Rendered as ONE combined `leads p ... o ...` line covering
-            // every side that qualifies (mirroring the grammar a user
-            // types — see `tracker_parse.rs`'s `"leads"` dispatch arm).
-            // `fold_leads_and_entry_abilities` also accepts two separate
-            // per-side `leads` lines, but a single combined line is the
-            // canonical round-trip rendering. Entry-ability reveals nested
-            // as reactions are rendered as their own follow-up lines; their
-            // guaranteed cascades are re-synthesized by `augment_turn`, same
-            // diffing discipline as everywhere else.
+            // Combine all qualifying sides in one canonical `leads` line.
+            // Render entry abilities on separate lines.
+            // The augmenter recreates their guaranteed effects.
             let mut out = Vec::new();
             let mut after_switch = belief.clone();
             fold_event_into_synthesis_scratch(
@@ -222,8 +212,8 @@ fn render_top_level_event(
                 if side.is_empty() {
                     continue;
                 }
-                // Simulator action order is speed/queue order, not slot order;
-                // `leads` assigns species left-to-right to slots 0, 1, ... .
+                // The simulator orders actions by its queue.
+                // The `leads` grammar assigns species by slot order.
                 side.sort_by_key(|sw| sw.slot.slot_index);
                 let side_was_empty = match player {
                     Player::P1 => belief.p1_active_mons.is_empty(),
@@ -241,9 +231,8 @@ fn render_top_level_event(
                         .join(" ");
                     leads_fragments.push(format!("{} {}", side_word(player), species_list));
                 } else {
-                    // A simultaneous post-faint replacement may fill only a
-                    // subset of doubles slots. `leads` cannot preserve those
-                    // indices, so emit ordinary slot-addressed switches.
+                    // A replacement can fill only some doubles slots.
+                    // Use slot switches because `leads` cannot preserve these indices.
                     fallback_switch_lines.extend(
                         side.iter()
                             .map(|sw| switch_line(sw))
@@ -262,11 +251,8 @@ fn render_top_level_event(
                 {
                     render_standalone_tree(child, &after_switch, &mut out)?;
                 }
-                // Entry abilities are ordered siblings. Thread each one's
-                // actual reactions into the scratch state before diffing the
-                // next (for example Drizzle followed by Sand Stream); otherwise
-                // the second ability is compared against the pre-entry weather
-                // and its guaranteed override is rendered a second time.
+                // Apply each entry ability to the scratch state in order.
+                // This prevents duplicate field-effect output.
                 fold_event_into_synthesis_scratch(&mut after_switch, r, pokemon_dex);
             }
             Ok(Some(out.join("\n")))
@@ -313,8 +299,7 @@ fn render_top_level_event(
         | EventKind::StatusCured { .. }
         | EventKind::BoostChanged { .. }
         | EventKind::BoostsCopied { .. } => render_standalone_event(event, belief).map(Some),
-        // Auto-synthesized as a sibling of any zero-HP DamageDealt/Healed/SetHp
-        // (`synthesize_guaranteed_faints`) — never rendered directly.
+        // The augmenter generates this event after a zero-HP event.
         EventKind::Faint { .. } => Ok(None),
         other => Err(unsupported(format!(
             "{other:?} has no top-level tracker grammar yet"
@@ -383,8 +368,7 @@ fn missing_guaranteed_status_blockers(
         .collect()
 }
 
-/// Render a standalone `[slot] [word]` line for an event that also makes
-/// sense as its own line (ability/item reveal nested under a switch, etc.).
+/// Renders an event as a standalone `[slot] [word]` line.
 fn render_standalone_event(
     event: &InformationEvent,
     _belief: &UnknownBattleState,
@@ -469,8 +453,7 @@ fn render_standalone_event(
     }
 }
 
-/// Render one reaction as an inline token appended to a move line (the
-/// "flat nesting" convention `tracker_parse.rs` itself uses).
+/// Renders one reaction as an inline move token.
 fn render_move_qualifier(
     event: &InformationEvent,
     belief: &UnknownBattleState,
@@ -484,10 +467,8 @@ fn render_move_qualifier(
         EventKind::Blocked { target } => Ok(format!("{} blocked", slot_token(*target))),
         EventKind::MoveFailed { slot } => Ok(format!("{} fail", slot_token(*slot))),
         EventKind::MustRecharge { slot } => Ok(format!("{} mustrecharge", slot_token(*slot))),
-        // Bare `charging`, no move name: it is always this line's own move (the
-        // parser rejects any other), so repeating it is noise. `move_used` is
-        // matched-and-ignored rather than `..`-ed so that a future variant change
-        // surfaces here as a compile error.
+        // `charging` always refers to this line's move.
+        // Match `move_used` so a variant change causes a compile error.
         EventKind::ChargingMove {
             user,
             move_used: _,
@@ -605,10 +586,8 @@ fn render_move_qualifier(
             side_word(*side),
             side_condition_word(condition)
         )),
-        // Field-level payloads of a move's own secondaries — rendered as a
-        // standalone-style word appended inline; the target-agnostic ones
-        // (weather/terrain) don't need a slot prefix on a move line since
-        // they're global/side-scoped, not per-mon.
+        // Append field effects as inline words.
+        // Global effects do not need a slot prefix.
         EventKind::WeatherChanged { weather: Some(w) } => {
             Ok(format!("weather {}", weather_word(w)))
         }
@@ -622,10 +601,8 @@ fn render_move_qualifier(
         }
     }?;
 
-    // The simulator often nests observations below their trigger (Crit below
-    // DamageDealt, recoil below an AbilityRevealed, berry healing below
-    // ItemLost). Tracker syntax is intentionally flat, so recursively append
-    // only children that the production augmenter will not recreate.
+    // Tracker syntax flattens nested simulator observations.
+    // Append only children that the augmenter will not recreate.
     let mut reaction_scratch;
     let reaction_belief = if matches!(event.kind, EventKind::Switch(_)) {
         reaction_scratch = belief.clone();
@@ -653,14 +630,9 @@ fn render_move_qualifier(
     Ok(rendered)
 }
 
-/// Reactions of `event` that `augment_with_guaranteed_effects` would NOT
-/// already re-synthesize on its own for a bare (reaction-less) clone — see
-/// this module's doc comment for why this diff is necessary. Only compares
-/// one level deep (direct children), matching the shapes
-/// `augment_with_guaranteed_effects` itself produces for `MoveUsed`/
-/// `MegaEvolution`/`AbilityRevealed`. When an otherwise guaranteed node has
-/// additional simulator-only descendants, recursively subtract the
-/// synthesized subtree so those observations are still rendered.
+/// Returns reactions that the augmenter will not recreate.
+/// Compares direct children.
+/// Preserves extra simulator descendants below generated parents.
 fn reactions_requiring_explicit_render<'a>(
     event: &'a InformationEvent,
     belief: &UnknownBattleState,
@@ -706,10 +678,8 @@ fn reactions_requiring_explicit_render<'a>(
             explicit.extend(r.reactions.iter());
             continue;
         }
-        // Protect-style resolution emits this bookkeeping child even
-        // though the enclosing MoveUsed already records the same user and
-        // move. The tracker parser intentionally represents the action
-        // once; inference treats MoveUsed as the same committed action.
+        // Protect resolution can repeat the enclosing move.
+        // The tracker records this action once.
         if let (
             EventKind::MoveUsed {
                 user, move_used, ..
@@ -728,11 +698,8 @@ fn reactions_requiring_explicit_render<'a>(
             remaining_synthetic.remove(pos);
             continue;
         }
-        // A guaranteed node may carry additional simulator-only children
-        // (for example an Intimidate drop containing a Defiant reveal and
-        // its +2 Atk reaction). Match the guaranteed parent by kind, suppress
-        // that parent token, and recursively preserve only the descendants
-        // that synthesis would not recreate.
+        // A generated parent can contain extra simulator children.
+        // Suppress the parent and preserve only the extra children.
         if let Some(pos) = remaining_synthetic.iter().position(|s| s.kind == r.kind) {
             let synthetic_match = remaining_synthetic.remove(pos);
             collect_non_synthetic_reactions(r, &synthetic_match, &mut explicit);
@@ -789,10 +756,7 @@ fn side_word(player: Player) -> &'static str {
     }
 }
 
-/// `Species`/`PokemonMove`/`Item`/`Ability`'s `from_str` are generated
-/// directly from their normalized Debug/display names (see `norm`'s doc
-/// comment in `tracker_parse.rs`), so lowercasing+stripping punctuation from
-/// `{:?}` round-trips through them exactly.
+/// Normalizes a generated display name for a parser round trip.
 fn norm_debug<T: std::fmt::Debug>(v: &T) -> String {
     format!("{v:?}")
         .chars()

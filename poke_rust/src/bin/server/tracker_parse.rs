@@ -34,8 +34,7 @@ pub struct ParseError {
     pub message: String,
 }
 
-/// One parsed line: either a concrete event to fold into this turn, or the
-/// `EndOfTurn` marker that commits everything accumulated so far.
+/// Represents one parsed event or end-of-turn marker.
 #[derive(Debug)]
 pub enum TrackerLine {
     Event(InformationEvent),
@@ -76,11 +75,8 @@ fn hp_readings_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, Po
         .collect()
 }
 
-/// Every active slot whose species is currently `Known` in `belief`, seeding
-/// the running `slot_species` scratch `parse_tracker_text` threads through a
-/// submission — see that function's doc comment for why a running scratch is
-/// needed at all (same-turn `leads`/`switch` lines aren't reflected in
-/// `belief` itself, which is read-only for the whole submission).
+/// Returns each known active species by slot.
+/// The parser updates this map during the submission.
 fn slot_species_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, Species> {
     let mut out = HashMap::new();
     for (player, mons) in [
@@ -102,17 +98,10 @@ fn slot_species_from_belief(belief: &UnknownBattleState) -> HashMap<FieldSlot, S
     out
 }
 
-/// Parse every line of `text` into `TrackerLine`s. Blank lines and lines
-/// starting with `#` are ignored. `belief` is read (never mutated) to resolve
-/// HP-direction (damage vs. heal vs. unchanged) for `hpspec` tokens **and**
-/// which species currently occupies a slot for `mega`'s auto-fill/suffix
-/// resolution (`active_species_at`) — but `belief` itself is frozen for the
-/// whole submission, so a `leads`/`switch` line earlier in the SAME
-/// submission (typically the same turn) wouldn't otherwise be visible to a
-/// later `mega` line addressing the mon it just sent out. `slot_species`
-/// fixes that: seeded from `belief`, then updated in place by `leads` and
-/// `switch` as they parse, exactly like `hp_readings` already threads the
-/// latest HP reading forward.
+/// Parses tracker text into tracker lines.
+/// Ignores blank lines and lines that start with `#`.
+/// Uses the belief to classify HP changes and current species.
+/// Updates scratch HP and species data between lines.
 pub fn parse_tracker_text(
     text: &str,
     belief: &UnknownBattleState,
@@ -120,10 +109,7 @@ pub fn parse_tracker_text(
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Result<Vec<TrackerLine>, ParseError> {
     let mut out = Vec::new();
-    // HP direction is contextual. Thread the latest literal reading through
-    // the submission so a switch followed by damage, consecutive multi-hit
-    // readings, and later turns in the same batch compare against the event
-    // immediately before them rather than the pre-submission belief forever.
+    // Keep the latest HP reading for later lines in this submission.
     let mut hp_readings = hp_readings_from_belief(belief);
     let mut slot_species = slot_species_from_belief(belief);
     for (idx, raw_line) in text.lines().enumerate() {
@@ -146,37 +132,10 @@ pub fn parse_tracker_text(
     Ok(out)
 }
 
-/// Fold one turn's raw parsed events into their final nested shape before
-/// synthesis/inference sees them: every `SimultaneousSwitch` event in the
-/// turn's leading contiguous run (i.e. the `leads` line(s) at the very start
-/// of the turn — normally just one combined `leads p ... o ...` line, but a
-/// submission that instead spells the two sides out as separate consecutive
-/// `leads p ...` / `leads o ...` lines is folded the same way) is merged into
-/// a SINGLE combined event covering every entering mon on both sides, and any
-/// bare `AbilityRevealed` line immediately following that run, addressed to
-/// one of the just-entered slots, is moved from its own top-level line into
-/// the combined event's `reactions` instead of staying an unrelated sibling.
-///
-/// This matters for more than just tidiness: `EventKind::SimultaneousSwitch`'s
-/// doc comment says ability activations "are nested in this event's
-/// `reactions`... exactly as the simulator processes them", and
-/// `pass1_ability_absence_inference` (`information/inference.rs`) reads
-/// exactly that field to reason across every mon that entered together (e.g.
-/// "no weather change appeared, and this is the only entering mon that COULD
-/// have a weather setter, so it doesn't have one"). Two separate `leads`
-/// lines (one per side) would otherwise produce two independent
-/// `SimultaneousSwitch` events with empty `reactions`, so that cross-mon
-/// reasoning would only ever see half the field; and a following
-/// `p1 sandstream` line would stay a disconnected sibling event instead of
-/// the nested reveal the engine expects, silently discarding the
-/// entry-ability bookkeeping the design doc describes.
-///
-/// The fold stops (and leaves everything after it untouched) at the first
-/// event that isn't itself a `SimultaneousSwitch` or a qualifying
-/// `AbilityRevealed` — a move, an ordinary `switch`, etc. — so an unrelated,
-/// later same-turn ability reveal for one of the leads' slots (from a
-/// completely different trigger) is never mistakenly folded in as an entry
-/// effect.
+/// Combines consecutive lead events at the start of a turn.
+/// Moves immediate entry-ability reveals into the combined switch reactions.
+/// Inference uses this shape for entry-ability absence rules.
+/// Stops at the first unrelated event.
 pub fn fold_leads_and_entry_abilities(events: Vec<InformationEvent>) -> Vec<InformationEvent> {
     let mut result: Vec<InformationEvent> = Vec::with_capacity(events.len());
     let mut merged_switches: Vec<SwitchState> = Vec::new();

@@ -180,7 +180,7 @@ function FormatEditor({
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    // The curated Champions catalog is small — show it all.
+    // Show the complete Champions item list.
     return q ? catalog.filter((i) => i.label.toLowerCase().includes(q)) : catalog
   }, [catalog, search])
 
@@ -192,7 +192,7 @@ function FormatEditor({
     setDraft({ ...draft, bannedItems: [...next] })
   }
 
-  // Enforce active <= brought <= total <= 6 whenever any number changes.
+  // Keep `active <= brought <= total <= 6` after a value changes.
   const setNumbers = (field: 'activePokemon' | 'broughtPokemon' | 'totalPokemon', raw: number) => {
     let { activePokemon, broughtPokemon, totalPokemon } = draft
     if (field === 'totalPokemon') totalPokemon = clamp(raw, 1, 6)

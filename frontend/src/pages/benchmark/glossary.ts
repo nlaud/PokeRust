@@ -1,16 +1,6 @@
-/** Plain-language explanations of the engine concepts the benchmark charts are
- * labelled with, surfaced as hover tooltips.
- *
- * These are the terms a reader cannot infer from the label — "top4" and "BIαβ"
- * mean nothing without the method behind them. Kept in one file rather than
- * inline in the page so the wording stays consistent between the row labels,
- * the column headers and the card subtitles.
- *
- * Sources of truth for the behaviour described here: `poke_rust::solver`'s
- * module docs (algorithms), `solver::chance::ChanceMode` (sampling),
- * `simulator::{simulate_turn, sample_turn}` (turn-resolution modes) and
- * `information::unknowns::InformationMode` (fog-of-war baselines). Update both
- * if either changes. */
+/** Defines tooltips for benchmark terms.
+ * One file gives each term one definition.
+ * Update these definitions after a related engine change. */
 
 // ── Solver: pruning algorithms ──────────────────────────────────────────────
 

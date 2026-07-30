@@ -22,10 +22,7 @@
 /// an absolute tolerance on a quantity of order 1, not a relative one.
 pub const EPS: f64 = 1e-9;
 
-/// Above this dimension, skip dominance reduction: it is `O(m²n + n²m)`, which
-/// stops being cheap relative to the LP exactly around here. Only full-width
-/// doubles matrices get this big, and those are dominated by the cost of
-/// filling their cells anyway.
+/// Largest dimension that uses dominance reduction.
 const DOMINANCE_MAX_DIM: usize = 64;
 
 /// The equilibrium of one matrix game.
@@ -45,11 +42,9 @@ pub struct MatrixSolution {
     pub used_lp: bool,
 }
 
-/// Solve the zero-sum matrix game `a`, where P1 picks a row and P2 a column.
-///
-/// `a` must be rectangular. A degenerate input (no rows or no columns) yields a
-/// zero-valued solution with empty strategies rather than a panic — the search
-/// treats an empty action set as a position with nothing to decide.
+/// Solves a rectangular zero-sum matrix game.
+/// P1 selects a row, and P2 selects a column.
+/// An empty dimension returns a zero value and empty strategies.
 pub fn solve_matrix_game(a: &[Vec<f64>]) -> MatrixSolution {
     let m = a.len();
     let n = a.first().map_or(0, |row| row.len());
@@ -83,10 +78,8 @@ pub fn solve_matrix_game(a: &[Vec<f64>]) -> MatrixSolution {
     simplex(a, m, n)
 }
 
-/// The reduced game after dominance elimination. Re-checks the cheap paths,
-/// since deleting rows can expose a saddle point that the full matrix hid, then
-/// goes straight to the LP — dominance has already run to a fixpoint, so a
-/// second reduction pass would find nothing.
+/// Solves a game after dominance reduction.
+/// Checks simple cases again before the linear program.
 fn solve_reduced(a: &[Vec<f64>]) -> MatrixSolution {
     let m = a.len();
     let n = a[0].len();
@@ -121,11 +114,7 @@ fn degenerate(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     None
 }
 
-/// A pure equilibrium, if one exists.
-///
-/// When `max_i min_j a == min_j max_i a` the cell `(i*, j*)` at those two argopts
-/// is a saddle: it is at least the row minimum and at most the column maximum,
-/// both of which equal the common value, so neither player gains by deviating.
+/// Returns a pure saddle-point equilibrium when one exists.
 fn saddle_point(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     let (best_row, maximin) = extremum(
         a.iter()
@@ -145,14 +134,9 @@ fn saddle_point(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     })
 }
 
-/// Indices of the rows and columns surviving iterated strict dominance.
-///
-/// Row `i` is strictly dominated when some other row beats it against *every*
-/// column; symmetrically for columns, with P2 preferring smaller payoffs.
-/// Restricting to strict dominance is what makes this safe: a strictly
-/// dominated strategy has probability zero in every equilibrium, so the reduced
-/// game has the same value and the same equilibria as the original. (Weak
-/// dominance does not have that property and is deliberately not used.)
+/// Returns rows and columns that survive strict dominance.
+/// Strictly dominated strategies have zero probability in every equilibrium.
+/// This function does not remove weakly dominated strategies.
 fn undominated(a: &[Vec<f64>], m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
     let mut rows: Vec<usize> = (0..m).collect();
     let mut cols: Vec<usize> = (0..n).collect();
@@ -201,7 +185,7 @@ fn undominated(a: &[Vec<f64>], m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
     }
 }
 
-/// Solve the game by linear programming.
+/// Solves the game by linear programming.
 ///
 /// Formulated as P2's LP because it lands in canonical form for free. With every
 /// payoff shifted strictly positive, the game value `v` is positive, so P2's

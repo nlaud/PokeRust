@@ -11,8 +11,7 @@ import {
 } from './benchmark/glossary'
 import { formatTime } from '../lib/time'
 
-/** Compact count formatting, mirroring `benches/solver_speed.rs::fmt_count` so
- * the page and the offline bench output read the same. */
+/** Formats counts like the offline solver benchmark. */
 function formatCount(value: number): string {
   if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}k`
@@ -39,9 +38,7 @@ const TURN_SPEED_COLUMNS: ChartColumn[] = [
   { key: 'pairings', header: 'pairs', title: PAIRINGS_HELP },
 ]
 
-/** Sorted enumerate-before-sample, ascending rolls, no-crit before crit — groups
- * the "enumerate vs sample" story together rather than following the wire order,
- * which is crit-major. */
+/** Sorts mode, roll count, and critical-hit setting for chart comparison. */
 function turnSpeedChartRows(rows: TurnSpeedRow[]): ChartRow[] {
   return [...rows]
     .sort((a, b) => {
@@ -150,18 +147,14 @@ function chanceHelp(chance: string): string {
   return CHANCE_HELP[chance] ?? chance
 }
 
-/** Double oracle only — the default algorithm — so the chart reads as one story:
- * how cost scales with depth and with how much of the outcome distribution the
- * search keeps. Bars encode turn simulations rather than wall-clock, since that
- * is the number the cost is actually made of. */
+/** Shows double-oracle turn counts by depth and chance mode. */
 function solverCostRows(rows: SolverRow[], scenario: SolverRow['scenario']): ChartRow[] {
   return rows
     .filter((r) => ran(r) && r.scenario === scenario && r.algorithm === 'doubleOracle')
     .sort((a, b) => a.depth - b.depth || a.rolls - b.rolls || a.chance.localeCompare(b.chance))
     .map((r) => ({
       key: `${r.depth}-${r.rolls}-${r.chance}`,
-      // `d2` rather than `depth 2`: these cards are half-width, and the full
-      // wording truncates. The tooltip spells it out.
+      // Use `d2` because the full depth label does not fit this card.
       label: `d${r.depth} · ${r.rolls} ${r.rolls === 1 ? 'roll' : 'rolls'} · ${r.chance}`,
       labelTitle:
         `Search depth ${r.depth} — turns of lookahead before positions are scored ` +
@@ -208,15 +201,9 @@ const PRUNING_COLUMNS: ChartColumn[] = [
   },
 ]
 
-/** Each pruning algorithm against unpruned backward induction at matched
- * settings, as a ratio of turn simulations.
- *
- * A ratio rather than a bar per algorithm because the underlying counts span
- * three orders of magnitude across the grid — the speedup is the comparable
- * quantity, and expressing it that way keeps the chart a single series with no
- * palette to get wrong. Sorted descending, so the split falls out visually:
- * double oracle above 1× at the top, serialized bounds below it at the bottom,
- * which is the whole finding. */
+/** Compares each pruning algorithm with backward induction.
+ * Each ratio uses matched settings and turn counts.
+ * The chart sorts ratios from highest to lowest. */
 function solverPruningRows(rows: SolverRow[]): ChartRow[] {
   const settings = (r: SolverRow) => `${r.scenario}-${r.depth}-${r.rolls}-${r.chance}`
   const baselines = new Map(

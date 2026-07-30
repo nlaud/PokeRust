@@ -3,7 +3,7 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Design tokens — light is the default theme; .dark and .custom override on <html>. */
+/* Light theme values. The dark and custom themes override them. */
 :root {
   --surface: #f7f9fb;
   --surface-card: #ffffff;
@@ -56,8 +56,7 @@
   --radius-card: 8px;
 }
 
-/* Fixed-height app shell: the window itself never scrolls (no page-level
-   scrollbar); pages scroll inside <main>. */
+/* Fix the application height. Scroll pages inside `main`. */
 html,
 body,
 #root {
@@ -71,7 +70,7 @@ body {
   overflow: hidden;
 }
 
-/* Theme-colored scrollbars for the inner scroll containers. */
+/* Colors for scrollbars in page containers. */
 * {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--text-secondary) 35%, transparent) transparent;
@@ -91,22 +90,21 @@ body {
   background: color-mix(in srgb, var(--text-secondary) 55%, transparent);
 }
 
-/* Glassmorphic panel used for floating battle controls and overlays. */
+/* Translucent panel for battle controls and overlays. */
 .glass {
   background-color: var(--surface-glass);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
 }
 
-/* More see-through glass for the floating command panel, so the arena
-   stays visible behind it. */
+/* More transparent panel for commands above the arena. */
 .glass-soft {
   background-color: color-mix(in srgb, var(--surface-glass) 55%, transparent);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border-subtle);
 }
 
-/* Interactive elevation: subtle lift on hover for clickable cards/buttons. */
+/* Small hover movement for interactive cards and buttons. */
 .lift {
   transition:
     transform 150ms ease,

@@ -1,20 +1,10 @@
-//! Resolution of championsbattledata.com display names to the crate's enums.
+//! Resolves usage-site display names to engine enums.
 //!
-//! Every `from_str` in `data/` ends in a catch-all that returns
-//! `Unknown(s)` rather than failing — convenient for the teamsheet parser, and a
-//! trap here. A `Species::Unknown` flows on into `build_pokemon_state`, which has
-//! no dex entry for it and substitutes `[100; 6]` base stats, so a single
-//! unresolved name yields a Pokemon that looks entirely plausible while being
-//! numerically wrong in every damage calculation. The resolvers below therefore
-//! all return `Option` and treat the `Unknown(_)` variant as a miss; callers
-//! decide whether a miss is fatal (species) or merely a dropped row (everything
-//! else).
+//! Generated parsers return an Unknown variant after a failed match.
+//! These resolvers return `None` instead.
+//! An unknown species would otherwise use incorrect fallback base stats.
 //!
-//! Moves, items, abilities and natures need no special handling: all 394 / 143 /
-//! 187 / 25 distinct names in the cache normalize straight onto their enum
-//! variants. Species do not — the site uses Champions-style names
-//! (`Alolan Ninetales`, `Hisuian Zoroark`) where the enum uses Showdown-style
-//! ones (`NinetalesAlola`, `ZoroarkHisui`) — hence `SPECIES_OVERRIDES`.
+//! Species names need overrides for regional and special forms.
 
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -22,30 +12,16 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::state::pokemon::{Nature, normalize_string};
 
-/// Champions species names that do not normalize onto a `Species` variant.
-///
-/// Keyed by `normalize_string` output, which collapses the site's two spellings
-/// of every name — the display form (`"Alolan Ninetales"`) and the file slug
-/// (`"alolan-ninetales"`) — onto one entry.
-///
-/// Most of these follow a rule (`Alolan X` -> `XAlola`, `Hisuian X` -> `XHisui`,
-/// `Galarian X` -> `XGalar`, or a dropped `… Form`/`Forme`/`Pattern`/`Variety`
-/// suffix), but enough do not — `Jumbo` is `Super`, `Family of Four` is `Four`,
-/// `Paldean Tauros Aqua Breed` moves a prefix *and* a suffix — that a table is
-/// easier to audit than the rules plus their exceptions.
-///
-/// The four entries collapsing to a base form (`Aegislash`, `Florges`, `Furfrou`,
-/// `Palafin`) are safe because the cache has no separate base-form file for any
-/// of them; `meta_species_map_is_injective` guards that.
+/// Maps Champions species names that do not match generated enum names.
+/// Keys use normalized display names and file slugs.
+/// The explicit table keeps irregular form names auditable.
 const SPECIES_OVERRIDES: &[(&str, Species)] = &[
     ("aegislashshieldforme", Species::Aegislash),
     ("alolanninetales", Species::NinetalesAlola),
     ("alolanraichu", Species::RaichuAlola),
     ("basculegionfemale", Species::BasculegionF),
     ("basculegionmale", Species::Basculegion),
-    // The site writes every other Rotom forme suffix-first (`Rotom Wash`,
-    // `Rotom Heat`, …) but flipped this one to `Fan Rotom` in the Current
-    // season. An inconsistency in the source, not a rule.
+    // The source uses `Fan Rotom` but suffix-first names for other Rotom forms.
     ("fanrotom", Species::RotomFan),
     ("florgesredflower", Species::Florges),
     ("furfrounaturalform", Species::Furfrou),
@@ -73,10 +49,8 @@ const SPECIES_OVERRIDES: &[(&str, Species)] = &[
     ("vivillonfancypattern", Species::VivillonFancy),
 ];
 
-/// Resolve a Champions species name or file slug.
-///
-/// Checks `SPECIES_OVERRIDES` first, then falls back to `Species::from_str`,
-/// rejecting its `Unknown(_)` catch-all. Never returns `Species::Unknown`.
+/// Resolves a Champions species name or file slug.
+/// Never returns `Species::Unknown`.
 pub fn resolve_species(raw: &str) -> Option<Species> {
     let key = normalize_string(raw);
     if key.is_empty() {
@@ -121,12 +95,7 @@ pub fn resolve_ability(raw: &str) -> Option<Ability> {
     }
 }
 
-/// Case-insensitive nature lookup.
-///
-/// `state::pokemon::parse_nature_str` is private and matches the exact-cased
-/// teamsheet spelling; this is the normalized equivalent for meta data. Kept
-/// separate rather than making that function public so the two call conventions
-/// cannot be confused.
+/// Resolves a nature without case differences.
 pub fn resolve_nature(raw: &str) -> Option<Nature> {
     Some(match normalize_string(raw).as_str() {
         "hardy" => Nature::Hardy,
@@ -158,17 +127,9 @@ pub fn resolve_nature(raw: &str) -> Option<Nature> {
     })
 }
 
-/// Recover a nature from the stat it raises and the stat it lowers.
-///
-/// Every `stat_alignment` row carries both alongside the nature's name, and the
-/// pair determines the nature uniquely — so when the name itself is corrupt the
-/// row is still recoverable. The Current-season cache has exactly one such row
-/// (Singles Stunfisk, rank 10, named `"SCs"`, +Sp. Atk / −Defense = Mild), and
-/// dropping it would silently discard a real option.
-///
-/// Returns `None` when the two stats match, which is how the source writes the
-/// five neutral natures — those are genuinely indistinguishable from each other
-/// and from a malformed pair.
+/// Resolves a nature from its raised and lowered stats.
+/// This recovers rows with a damaged nature name.
+/// Returns `None` for neutral or invalid pairs.
 pub fn nature_from_stat_change(up: &str, down: &str) -> Option<Nature> {
     let up = stat_index(up)?;
     let down = stat_index(down)?;

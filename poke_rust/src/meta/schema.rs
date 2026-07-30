@@ -1,25 +1,9 @@
-//! Deserialization of the raw championsbattledata.com API payload.
+//! Deserializes raw usage-site API data.
 //!
-//! `update_meta.py` writes the site's responses verbatim, so this mirrors their
-//! shape rather than a shape of our choosing — and since re-running the scraper
-//! can pick up whatever the site currently serves, everything here is built to
-//! survive drift rather than to validate. Concretely:
-//!
-//! - every field is `#[serde(default)]`, so a *removed* column is not an error;
-//! - both structs carry `#[serde(flatten)] extra`, so an *added* column is
-//!   captured rather than rejected;
-//! - `category` stays a `String` rather than an enum, so an unrecognized row
-//!   kind can be counted and skipped instead of failing the whole file.
-//!
-//! The awkward part is that the payload is union-typed: every row object carries
-//! all fourteen columns, and the ones that do not apply to its category hold the
-//! empty string rather than `null` or nothing. So `hp_points` is `""` on a move
-//! row and an integer on a `stat_points` row. `de_loose_*` absorb that.
-//!
-//! Numeric fields deserialize as `i64` and are clamped later, never as `u8`.
-//! `state::pokemon::scale_evs_for_stat_points` casts through `as u8`, so a stat
-//! point of 33 would silently become an EV of 4 instead of an obvious error;
-//! keeping the wide type until the clamp is what makes that detectable.
+//! Default and flattened fields tolerate removed or added columns.
+//! Category remains a string so the loader can skip a new row type.
+//! Loose readers accept empty strings in category-specific columns.
+//! Wide integers permit range checks before conversion.
 
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};

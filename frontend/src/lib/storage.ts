@@ -1,5 +1,5 @@
-// Versioned localStorage persistence for teams and formats.
-// Bump a key's version and add a migration here if the schema ever changes.
+// Stores versioned teams and formats in local storage.
+// After a schema change, increase the key version and add a migration.
 
 export interface StoredTeam {
   id: string
@@ -16,10 +16,9 @@ export interface StoredFormat {
   activePokemon: number
   totalPokemon: number
   broughtPokemon: number
-  /** PokeAPI item names (slugs) that are banned in this format. */
+  /** PokeAPI item slugs that this format bans. */
   bannedItems: string[]
-  /** Pin all opponent IVs to 31 for the fog-of-war inference engine (Champions
-   * competitive default). Mirrors `InferenceConfig::force_max_ivs` in the Rust engine. */
+  /** Sets all inferred opponent IVs to the Champions default of 31. */
   forceMaxIvs: boolean
   /** Once-per-battle mechanics permitted by this regulation. */
   teraEnabled: boolean
@@ -45,7 +44,7 @@ function writeJson(key: string, value: unknown) {
 
 export function loadTeams(): StoredTeam[] {
   const teams = readJson<{ teams: StoredTeam[] }>(TEAMS_KEY)?.teams ?? []
-  // Backfill `favorite` for rows stored before the field existed.
+  // Add `favorite` to old stored rows.
   return teams.map((t) => ({ ...t, favorite: t.favorite ?? false }))
 }
 
@@ -86,7 +85,7 @@ export function loadFormats(): StoredFormat[] {
     saveFormats(DEFAULT_FORMATS)
     return DEFAULT_FORMATS
   }
-  // Backfill fields for rows stored before they existed.
+  // Add new fields to old stored rows.
   return stored.formats.map((f) => ({
     ...f,
     favorite: f.favorite ?? false,
@@ -104,20 +103,19 @@ export function newId(): string {
   return crypto.randomUUID()
 }
 
-/** Favorited items sort first; a stable sort preserves relative order within each group. */
+/** Sorts favorite items first. Keeps the order within each group. */
 export function favoritesFirst<T extends { favorite: boolean }>(items: T[]): T[] {
   return [...items].sort((a, b) => Number(b.favorite) - Number(a.favorite))
 }
 
-/** Last-used new-battle configuration, restored between games. */
+/** Stores the latest new-battle configuration. */
 export interface BattleSetup {
   formatId: string
   team1Id: string
   team2Id: string
   informationMode?: 'closedSheet' | 'perfect' | 'openSheet' | 'openSheetNatures'
-  /** `'saved'` (default): use the matching `teamNId`. `'meta'`: ignore it and
-   * have the server generate a team from usage stats instead. Optional so
-   * setups saved before the Meta Team Generator existed still parse. */
+  /** Selects a saved team or a generated team.
+   * An absent value selects the saved team. */
   team1Source?: 'saved' | 'meta'
   team2Source?: 'saved' | 'meta'
 }
