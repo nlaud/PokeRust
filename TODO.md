@@ -4,12 +4,7 @@ Remove items when the work is complete.
 
 ## Determinizer
 
-- [ ] Merge duplicate nature rows in `collect_natures`.
 - [ ] Add an item-clause check to `check_determinization`.
-
-Some species have duplicate nature rows.
-For example, Avalugg lists Adamant at 36.2% and 12.2%.
-The true Adamant rate is the sum of both rows.
 
 ## Solver target
 

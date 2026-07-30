@@ -560,6 +560,36 @@ fn collect_natures(
             imputed,
         });
     }
+    merge_duplicate_natures(out)
+}
+
+/// Sum the percentages of rows that resolved to the same nature.
+///
+/// The source lists one nature twice for some species — Avalugg has carried
+/// Adamant at both 36.2% and 12.2%. Two rows naming the same nature are not two
+/// options, so the true rate is their sum. Leaving them split understates the
+/// nature and lets a weighted draw treat it as two separate candidates.
+///
+/// The name-repair path in `collect_natures` makes this more likely, not less:
+/// a row with a corrupt name recovers through its stat pair and can land on a
+/// nature that another row already named.
+///
+/// Merging keeps first-seen order, and `rows_of` sorted by rank, so the result
+/// stays rank-ordered. The merged entry takes the better rank. It counts as
+/// imputed when any part was imputed, because the sum is only as trustworthy as
+/// its weakest term.
+fn merge_duplicate_natures(rows: Vec<Weighted<Nature>>) -> Vec<Weighted<Nature>> {
+    let mut out: Vec<Weighted<Nature>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match out.iter_mut().find(|e| e.value == row.value) {
+            Some(existing) => {
+                existing.pct += row.pct;
+                existing.rank = existing.rank.min(row.rank);
+                existing.imputed |= row.imputed;
+            }
+            None => out.push(row),
+        }
+    }
     out
 }
 
@@ -1012,6 +1042,43 @@ mod tests {
         assert_eq!(natures[0].value, Nature::Mild);
         assert!((natures[0].pct - 0.7).abs() < 1e-9);
         assert!(warnings.is_empty(), "recovery should not warn: {warnings:?}");
+    }
+
+    /// Two rows naming the same nature are one nature at the summed rate, not
+    /// two candidates. The third row here also exercises the interaction with
+    /// name repair: it recovers through its stat pair onto a nature row 1
+    /// already named.
+    #[test]
+    fn duplicate_nature_rows_are_merged() {
+        let file: MetaFile = serde_json::from_str(
+            r#"{"rows":[
+                {"category":"stat_alignment","rank":1,"name":"Adamant",
+                 "percentage_value":36.2,"stat_up":"Attack","stat_down":"Sp. Atk"},
+                {"category":"stat_alignment","rank":2,"name":"Careful",
+                 "percentage_value":20.0,"stat_up":"Sp. Def","stat_down":"Sp. Atk"},
+                {"category":"stat_alignment","rank":3,"name":"@@@",
+                 "percentage_value":12.2,"stat_up":"Attack","stat_down":"Sp. Atk"}
+            ]}"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let natures = collect_natures(&Species::Avalugg, &file, &mut warnings);
+
+        assert_eq!(natures.len(), 2, "the Adamant rows should merge: {natures:?}");
+        let adamant = natures
+            .iter()
+            .find(|w| w.value == Nature::Adamant)
+            .expect("Adamant survived");
+        assert!(
+            (adamant.pct - 48.4).abs() < 1e-9,
+            "expected 36.2 + 12.2, got {}",
+            adamant.pct
+        );
+        assert_eq!(adamant.rank, 1, "the merged entry keeps the better rank");
+        // Rank order has to survive the merge — `impute_percentages` and the
+        // determinizer's top-N reasoning both read this list as ordered.
+        assert_eq!(natures[0].value, Nature::Adamant);
+        assert_eq!(natures[1].value, Nature::Careful);
     }
 
     /// A name that resolves neither way is still a warning, so genuine drift
