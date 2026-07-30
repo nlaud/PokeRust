@@ -2,10 +2,6 @@
 
 Remove items when the work is complete.
 
-## Determinizer
-
-- [ ] Add an item-clause check to `check_determinization`.
-
 ## Solver target
 
 Name these games separately:

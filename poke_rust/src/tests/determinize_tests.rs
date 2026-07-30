@@ -1095,6 +1095,68 @@ fn the_uniform_fallback_still_applies_coherence() {
     }
 }
 
+/// The item clause has to be checked, not assumed.
+///
+/// The sampler threads a used-item set through its draws, so a clean run never
+/// reaches this branch — which is exactly why it needs a test that plants a
+/// violation instead of one that hopes to stumble on one. Every other
+/// `check_determinization` assertion in this file is of the "no problems"
+/// shape, and those would all still pass if the check did nothing at all.
+#[test]
+fn the_checker_catches_an_item_clause_violation() {
+    with_meta!(meta);
+    let belief = belief_1v1(Species::Charizard, Species::Garchomp, 2);
+    let mut world = determinize_seeded(
+        7,
+        &belief,
+        meta,
+        pokemon_dex(),
+        move_dex(),
+        &config_with_learnsets(),
+    )
+    .unwrap();
+
+    let item_problems = |world: &_| {
+        check_determinization(world, &belief, pokemon_dex())
+            .into_iter()
+            .filter(|p| p.contains("item clause"))
+            .collect::<Vec<_>>()
+    };
+
+    // The planted violation below proves nothing unless the world starts clean.
+    assert!(
+        check_determinization(&world, &belief, pokemon_dex()).is_empty(),
+        "the unmodified world should already pass every check"
+    );
+
+    // Holding nothing is exempt, however many Pokemon do it — a consumed or
+    // knocked-off item reads as `None` and must not look like a violation.
+    world.state.p2_active_mons[0].item = Item::None;
+    world.state.p2_back_mons[0].item = Item::None;
+    assert!(
+        item_problems(&world).is_empty(),
+        "Item::None must be exempt from the clause"
+    );
+
+    // The same real item twice is not exempt.
+    world.state.p2_active_mons[0].item = Item::Leftovers;
+    world.state.p2_back_mons[0].item = Item::Leftovers;
+    let problems = item_problems(&world);
+    assert_eq!(
+        problems.len(),
+        1,
+        "expected exactly one report for one duplicated item: {problems:?}"
+    );
+
+    // The clause is per team, so the same item on the two sides is legal.
+    world.state.p2_back_mons[0].item = Item::None;
+    world.state.p1_active_mons[0].item = Item::Leftovers;
+    assert!(
+        item_problems(&world).is_empty(),
+        "one item per side is not a violation"
+    );
+}
+
 /// A species outside the 235-entry cache is fully uniform but still legal.
 #[test]
 fn species_absent_from_the_cache_still_determinizes() {

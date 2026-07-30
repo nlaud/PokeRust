@@ -2259,6 +2259,29 @@ pub fn check_determinization(
             }
         }
 
+        // Item clause: one team may not hold the same item twice. The sampler
+        // threads a used-item set through its draws to enforce this, and the
+        // repair loop can also reject a world on it, so a duplicate reaching
+        // here means one of those two lost track.
+        //
+        // `Item::None` is exempt — any number of Pokemon can hold nothing, and
+        // a consumed or knocked-off item reads as `None` mid-battle. This
+        // therefore checks the clause as the state currently shows it, which is
+        // weaker than checking the teambuilder's original assignment: two
+        // Pokemon that were built with the same item but have since consumed one
+        // of them look legal here. The belief does not carry the pre-consumption
+        // item for the hidden side, so that stronger check is not available.
+        let mut held: HashSet<Item> = HashSet::new();
+        for mon in concrete_active.iter().chain(concrete_back.iter()) {
+            if mon.item != Item::None && !held.insert(mon.item.clone()) {
+                problems.push(format!(
+                    "{player:?}: item clause violated, {:?} held more than once \
+                     (seen again on {:?})",
+                    mon.item, mon.species
+                ));
+            }
+        }
+
         // Nothing may appear on the bench that the belief never offered.
         let (known_back, possible_back, fainted) = match player {
             Player::P1 => (
