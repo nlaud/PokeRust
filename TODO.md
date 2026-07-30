@@ -4,17 +4,8 @@ Remove items when the work is complete.
 
 ## Determinizer
 
-- [ ] Make `meta/team_gen.rs` sample a spread after it samples the nature.
 - [ ] Merge duplicate nature rows in `collect_natures`.
 - [ ] Add an item-clause check to `check_determinization`.
-
-Two controls now damp these two faults separately.
-Across 235 species, the full incoherent rate is 19.4%.
-A raised stat with no points accounts for 12.9 percentage points.
-A lowered invested stat accounts for 3.9 percentage points.
-
-`meta/team_gen.rs` samples the nature and spread independently.
-This process keeps the old 19.4% incoherent rate.
 
 Some species have duplicate nature rows.
 For example, Avalugg lists Adamant at 36.2% and 12.2%.

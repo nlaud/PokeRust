@@ -12,6 +12,9 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::cps::sample_fixed_size_subset;
+use crate::information::determinize::{
+    DEFAULT_NATURE_LOWERS_INVESTED, DEFAULT_NATURE_RAISES_UNUSED, coherence,
+};
 use crate::meta::dex::{MetaDex, SpeciesMeta, StatPoints};
 use crate::meta::names::ALL_NATURES;
 use crate::simulator::helpers::sample_one_weighted;
@@ -60,8 +63,10 @@ impl std::error::Error for TeamGenError {}
 ///    every mon already on the team — `MetaDex::teammate_score` summed over
 ///    the roster so far, popularity breaking ties. Mirrors
 ///    `information::determinize::select_bench_indices`'s scoring.
-/// 3. Each mon's item/ability/nature/spread/moves are drawn independently
-///    from that species' usage marginals.
+/// 3. Each mon's item/ability/nature/moves are drawn independently from that
+///    species' usage marginals. The spread is drawn *after* the nature and
+///    conditioned on it, so a nature does not end up fighting its own
+///    investment — see `sample_spread_for_nature`.
 ///
 /// Species clause and item clause are enforced by construction: a species or
 /// item already on the team is never offered as a candidate for a later slot.
@@ -110,7 +115,7 @@ pub fn generate_meta_team(
         }
         let ability = sample_ability(&species, species_meta, pokemon_dex);
         let nature = sample_nature(species_meta);
-        let points = sample_spread(species_meta);
+        let points = sample_spread_for_nature(species_meta, nature);
         let moves = sample_moves(&species, species_meta, learnset_dex);
 
         team.push(GeneratedSet {
@@ -349,13 +354,44 @@ fn sample_nature(species_meta: Option<&SpeciesMeta>) -> Nature {
     draw_uniform(ALL_NATURES.to_vec()).unwrap_or(Nature::Hardy)
 }
 
-/// Pick a stat-point spread, falling back to no investment at all (a
-/// maximum-entropy answer, and never out of range) when the cache has none.
-fn sample_spread(species_meta: Option<&SpeciesMeta>) -> StatPoints {
+/// Pick a stat-point spread for an already-chosen nature, falling back to no
+/// investment at all (a maximum-entropy answer, and never out of range) when the
+/// cache has none.
+///
+/// The nature comes first and this conditions on it. Drawing the two
+/// independently, as this did, reproduces the cache's own 19.4% incoherent rate:
+/// natures and spreads are stored as separate marginals, so nothing in the
+/// product model knows that a minus-Attack nature and 32 Attack points do not
+/// go together.
+///
+/// Weighting spreads inside the chosen nature cannot disturb the nature
+/// marginal, because `sample_nature` has already drawn and is untouched. That is
+/// the same reason `determinize::enumerate_nature_spreads` normalizes per row.
+fn sample_spread_for_nature(species_meta: Option<&SpeciesMeta>, nature: Nature) -> StatPoints {
     if let Some(meta) = species_meta {
-        let candidates: Vec<(StatPoints, f64)> =
-            meta.spreads.iter().map(|w| (w.value, w.pct)).collect();
+        let candidates: Vec<(StatPoints, f64)> = meta
+            .spreads
+            .iter()
+            .map(|w| {
+                let factor = coherence(
+                    nature,
+                    &w.value,
+                    DEFAULT_NATURE_LOWERS_INVESTED,
+                    DEFAULT_NATURE_RAISES_UNUSED,
+                );
+                (w.value, w.pct * factor)
+            })
+            .collect();
         if let Some(points) = draw_weighted(candidates) {
+            return points;
+        }
+        // Every listed spread fights this nature. Re-weight on plain usage
+        // rather than giving up: we cannot say which spread pairs with it, and
+        // that is a reason to stay agnostic, not to emit no investment at all.
+        // `enumerate_nature_spreads` makes the same call for a zero row.
+        let plain: Vec<(StatPoints, f64)> =
+            meta.spreads.iter().map(|w| (w.value, w.pct)).collect();
+        if let Some(points) = draw_weighted(plain) {
             return points;
         }
     }

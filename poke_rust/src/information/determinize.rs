@@ -66,6 +66,15 @@ pub const STAT_POINT_BUDGET: u32 = 66;
 /// Per-stat ceiling in authoring units.
 pub const MAX_POINTS_PER_STAT: u8 = 32;
 
+/// Default damping for a nature that lowers a stat the build invests in.
+///
+/// Named because `meta::team_gen` samples without a `DeterminizeConfig` and
+/// still needs the same weights. See `coherence` for where the number is from.
+pub const DEFAULT_NATURE_LOWERS_INVESTED: f64 = 0.10;
+
+/// Default damping for a nature that raises a stat with no points.
+pub const DEFAULT_NATURE_RAISES_UNUSED: f64 = 0.35;
+
 /// How an unresolved field timer is filled in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerPolicy {
@@ -109,8 +118,8 @@ impl Default for DeterminizeConfig {
             observer: Player::P1,
             invent_missing_bench: true,
             max_repair_passes: 8,
-            nature_lowers_invested: 0.10,
-            nature_raises_unused: 0.35,
+            nature_lowers_invested: DEFAULT_NATURE_LOWERS_INVESTED,
+            nature_raises_unused: DEFAULT_NATURE_RAISES_UNUSED,
             timer_policy: TimerPolicy::MaxPlausible,
             allow_uniform_fallback: true,
         }
@@ -446,7 +455,13 @@ pub(crate) fn enumerate_nature_spreads(
             .filter_map(|(points, spread_pct)| {
                 let mut candidate =
                     build_spread_candidate(unk, base_stats, *nature, *points, cfg)?;
-                candidate.weight = spread_pct * coherence(*nature, points, cfg);
+                candidate.weight = spread_pct
+                    * coherence(
+                        *nature,
+                        points,
+                        cfg.nature_lowers_invested,
+                        cfg.nature_raises_unused,
+                    );
                 Some((candidate, *spread_pct))
             })
             .collect();
@@ -494,11 +509,19 @@ pub(crate) fn enumerate_nature_spreads(
 ///
 /// This is applied *within* a nature's row by `enumerate_nature_spreads`, never
 /// across natures — see the comment there for why. `1.0` disables a rule.
-fn coherence(nature: Nature, points: &StatPoints, cfg: &DeterminizeConfig) -> f64 {
+///
+/// The factors arrive as plain numbers rather than a `&DeterminizeConfig`
+/// because `meta::team_gen` samples the same way with no belief and no config.
+pub(crate) fn coherence(
+    nature: Nature,
+    points: &StatPoints,
+    lowers_invested: f64,
+    raises_unused: f64,
+) -> f64 {
     // Clamped, not just floored: a value above 1.0 would *boost* incoherent
     // builds, which is the opposite of what these knobs are for.
-    let lowers_invested = cfg.nature_lowers_invested.clamp(0.0, 1.0);
-    let raises_unused = cfg.nature_raises_unused.clamp(0.0, 1.0);
+    let lowers_invested = lowers_invested.clamp(0.0, 1.0);
+    let raises_unused = raises_unused.clamp(0.0, 1.0);
     if (lowers_invested - 1.0).abs() < f64::EPSILON && (raises_unused - 1.0).abs() < f64::EPSILON {
         return 1.0;
     }
@@ -717,7 +740,12 @@ fn sample_uniform_spread(
                 if let Some(mut candidate) =
                     build_spread_candidate(unk, base_stats, *nature, arr, cfg)
                 {
-                    candidate.weight = coherence(*nature, &arr, cfg);
+                    candidate.weight = coherence(
+                        *nature,
+                        &arr,
+                        cfg.nature_lowers_invested,
+                        cfg.nature_raises_unused,
+                    );
                     let weight = candidate.weight;
                     pool.push((candidate, weight));
                 }

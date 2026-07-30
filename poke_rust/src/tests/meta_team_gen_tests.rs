@@ -15,7 +15,9 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::meta::team_gen::{generate_meta_team, render_teamsheet};
 use crate::meta::{MetaDex, MetaFormat};
-use crate::state::pokemon::parse_team_sheet_str;
+use crate::state::pokemon::{
+    nature_stat_modifiers, parse_team_sheet_str, scale_evs_for_stat_points,
+};
 use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -51,6 +53,54 @@ macro_rules! with_meta {
 }
 
 // ── Structural invariants ────────────────────────────────────────────────────
+
+/// A generated set must not pair a nature with a spread that fights it.
+///
+/// The cache stores natures and spreads as separate marginals, so drawing the
+/// two independently — as this generator did — leaves nothing to rule out a
+/// minus-Attack nature over 32 Attack points. Conditioning the spread on the
+/// nature is what removes that, and this measures the result end to end.
+///
+/// Measured 11.1% with the conditioning disabled, 5.3% with it on, so the
+/// threshold sits between them. Note that 11.1% is *not* the 19.4% figure in
+/// `TODO.md`: that one is a flat average across 235 species, while a generated
+/// team draws species by popularity and lands on better-behaved spread tables.
+///
+/// This is a rate, not a structural invariant, so the threshold is loose enough
+/// to survive a cache refresh.
+///
+/// The predicate is re-derived in EV units rather than calling the sampler's
+/// own. `ev = max(0, 8p - 4)`, so 8 authoring points is 60 EVs and 0 stays 0.
+#[test]
+fn generated_sets_do_not_fight_their_own_nature() {
+    with_meta!(meta);
+    const TEAMS: u64 = 200;
+
+    let mut total = 0usize;
+    let mut incoherent = 0usize;
+    for seed in 0..TEAMS {
+        let team = generate_meta_team(meta, pokemon_dex(), learnset_dex(), 6, seed)
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        for mon in &team {
+            let evs = scale_evs_for_stat_points(mon.points);
+            total += 1;
+            let fights = nature_stat_modifiers(&mon.nature)
+                .iter()
+                .enumerate()
+                .any(|(i, m)| (*m < 1.0 && evs[i + 1] >= 60) || (*m > 1.0 && evs[i + 1] == 0));
+            if fights {
+                incoherent += 1;
+            }
+        }
+    }
+
+    let rate = incoherent as f64 / total as f64 * 100.0;
+    assert!(
+        rate < 8.0,
+        "{rate:.2}% of generated sets fight their own nature, against 5.3% when \
+         the spread is conditioned on the nature and 11.1% when it is not"
+    );
+}
 
 #[test]
 fn generates_a_full_team_honoring_both_clauses() {
