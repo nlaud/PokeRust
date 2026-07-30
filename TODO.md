@@ -1,10 +1,6 @@
 # TODO
 
-Remove an item when the work is complete.
-
-## Documentation
-
-- [ ] Rewrite all documentation and comments in strict Simplified Technical English.
+Remove items when the work is complete.
 
 ## Determinizer
 
@@ -77,13 +73,6 @@ The solver must support these game properties:
 
 ## Perfect-information solver
 
-- [x] Add a Nash solver for perfect-information positions.
-  - The solver uses simultaneous-move backward induction.
-  - Double oracle reduces the matrix.
-  - Serialized alpha-beta supplies bounds.
-  - A matrix solver finds the exact equilibrium.
-  - `cargo bench --bench solver_speed` measures the solver.
-
 ### Search control
 
 - [ ] Add iterative deepening.
@@ -91,7 +80,7 @@ The solver must support these game properties:
   - Keep the last complete result after cancellation.
   - Reuse root support, action order, and resolved transitions.
   - Keep transposition values keyed by depth.
-- [ ] Add a deadline and a node budget.
+- [ ] Add a deadline.
 - [ ] Keep the exact solver as the regression oracle for small positions.
 
 ### Team preview
