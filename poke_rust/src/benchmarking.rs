@@ -1,29 +1,15 @@
-//! Turn-resolution and fog-of-war-inference speed measurement, as a library
-//! module so both the standalone benches (`poke_rust/benches/turn_speed.rs`,
-//! `battle_sweep.rs`) and the web server's `GET /api/benchmark` endpoint
-//! (`src/bin/server/routes.rs`, streamed over Server-Sent Events) can drive
-//! the same scenarios. The bench binaries print a full historical sweep to
-//! stdout (recorded in `benches/RESULTS.md`); this module ports the same
-//! grid/timing logic and runs the exact same unbounded sweep — the full
-//! ordered N×N teamsheet-pairing grid (`../teamsheets`) — rather than a
-//! capped subset, so live results are directly comparable to the offline
-//! `cargo bench` numbers. `on_progress` callbacks let a caller report live
-//! progress on what is now a genuinely multi-minute call.
+//! Measures turn resolution, inference, and solver speed.
+//! Standalone benchmarks and `GET /api/benchmark` use this module.
+//! Both interfaces run the same complete ordered teamsheet grid.
+//! Thus, web results can be compared with `cargo bench` results.
+//! `on_progress` reports progress during the long test.
 //!
-//! `run_turn_speed` mirrors `turn_speed.rs`: one post-team-preview turn timed
-//! across enumerate (`simulate_turn`) vs sample (`sample_turn`) mode, damage
-//! rolls, crit branching, singles vs doubles. `run_inference` mirrors
-//! `battle_sweep.rs`: full games played to completion — both singles and
-//! doubles, mirroring `run_turn_speed`'s own scenario split (the offline
-//! `battle_sweep.rs` this was ported from is doubles-only; singles coverage
-//! is new here) — replaying the recorded event stream through
-//! `apply_information` once per fog-of-war information mode and timing each
-//! call.
+//! `run_turn_speed` measures one turn for each mode and battle format.
+//! `run_inference` plays complete battles in both formats.
+//! It replays each event stream once for each information mode.
 //!
-//! Doubles enumeration at high roll counts is still excluded via
-//! `doubles_enum_ok` — the specific case CLAUDE.md documents as exceeding
-//! 15 GB (see `turn_speed.rs`'s header) — that safety cap is orthogonal to
-//! and unaffected by running the full pairing grid.
+//! `doubles_enum_ok` omits high-roll doubles enumeration.
+//! These cases can use more than 15 GB.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};

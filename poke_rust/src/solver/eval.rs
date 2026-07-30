@@ -1,20 +1,14 @@
-//! Scoring a non-terminal position at the search horizon.
+//! Scores a nonterminal position at the search limit.
 //!
-//! The search returns P1's win probability, so a leaf has to be turned into a
-//! number in `[0, 1]`. That range is not cosmetic: it is what gives the
-//! serialized alpha-beta search globally valid bounds `L = 0`, `U = 1` with no
-//! tuning, which is exactly what star1 pruning at chance nodes requires.
+//! The score is P1's win probability in the range `[0, 1]`.
+//! This range supplies valid bounds for serialized alpha-beta and star1 pruning.
 //!
-//! The evaluator is a plain `fn` pointer on [`SolveConfig`](super::SolveConfig)
-//! rather than a hardcoded call, so it can be swapped without touching the
-//! search — a rollout-based evaluator, a learned one, or a fixed constant for
-//! testing all drop straight in.
+//! [`SolveConfig`](super::SolveConfig) stores the evaluator as a function pointer.
+//! Callers can replace it without a search change.
 //!
-//! The default is a positional heuristic. It is deliberately simple: at the
-//! horizon the search has already spent its budget, and an expensive evaluator
-//! trades away the depth that actually produces good play. Its weights are
-//! stated as named constants below and are a starting point, not a fitted
-//! model — `benches/RESULTS.md` is the place to record any recalibration.
+//! The default evaluator uses a simple position heuristic.
+//! Its named weights are initial values, not fitted values.
+//! Record weight changes in `benches/RESULTS.md`.
 
 use crate::state::battle::BattleState;
 use crate::state::dex_data::{SideCondition, Status};

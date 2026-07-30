@@ -1,43 +1,28 @@
-//! Soundness oracle: **the true concrete state must always be a member of the set
-//! the belief admits.** A fog-of-war belief can be *wrong* in two independent ways:
-//! it can become internally self-contradictory (the existing oracle —
-//! `apply_information` panicking via `inference_contradiction!` — already catches
-//! this), or it can silently narrow past the truth without ever going empty. This
-//! module is the second check: after every turn, verify that every hidden field on
-//! every opponent mon still admits its real value, and that every CNF predicate
-//! clause the engine has accumulated is satisfiable by the real assignment.
+//! Checks that a belief still contains the true concrete state.
 //!
-//! Used by the `random_doubles_battles_are_sound` fuzz test
-//! (`tests/random_battle_tests.rs`) — see that test's own doc comment for the
-//! broader soundness-testing strategy this complements.
+//! `apply_information` detects an internally empty belief.
+//! This module detects a nonempty belief that excludes the truth.
+//! It checks each hidden opponent field after every turn.
+//! It also checks each CNF clause against the true assignment.
+//!
+//! `random_doubles_battles_are_sound` uses this check.
 //!
 //! ## Design
 //!
-//! Containment for a single `Unknown<T>` field reduces to one already-`pub`
-//! primitive: `!unknown_is_excluded(field, &true_value)`. Range fields
-//! (`min_stats`/`max_stats`, `min_pre_nature_stat`/`max_pre_nature_stat`) are
-//! checked as `min <= true <= max`. Everything else in this module is:
+//! `!unknown_is_excluded(field, &true_value)` checks one `Unknown<T>` field.
+//! Numeric fields require `min <= true <= max`.
 //!
-//! 1. **Mapping** each true opponent `PokemonState` to the belief entry that's
-//!    supposed to represent it (`build_mon_idx_map`) — active mons are positional,
-//!    bench mons are matched existentially by `mon_id`/species. A disguised
-//!    Illusion mon is checked against the **union** of its primary entry and its
-//!    `possible_illusion_state` hypothesis: the true world matches whichever
-//!    hypothesis is real, so containment holds if EITHER hypothesis alone (not a
-//!    per-field mix of both — that would be unsound) admits every field.
-//! 2. **Predicate satisfiability** (`clause_holds_under_truth`): each CNF clause in
-//!    `belief.predicates` must have at least one literal that's true under the real
-//!    assignment. Literals this module can't precisely evaluate (an unmapped
-//!    `mon_idx`, or a `Statement` variant not worth fully modeling here) evaluate to
-//!    `None` ("indeterminate") rather than `Some(true)` — critical for `Not(_)` to
-//!    stay sound under negation — and an indeterminate literal is treated as
-//!    "might satisfy the clause," never as grounds to fail it. This makes the
-//!    oracle strictly conservative: it can only ever under-report violations, never
-//!    fabricate one.
+//! `build_mon_idx_map` maps each true opponent to one belief entry.
+//! Active Pokémon use their positions.
+//! Bench Pokémon match by `mon_id` or species.
+//! An Illusion user can match its primary or alternate hypothesis.
+//! One complete hypothesis must contain all true fields.
 //!
-//! Every failure panics with a descriptive `[subset violation]` message (mirroring
-//! `inference_contradiction!`'s style) so a fuzz-sweep failure is immediately
-//! actionable.
+//! `clause_holds_under_truth` checks each CNF clause.
+//! An unknown literal result cannot cause a failure.
+//! Thus, this conservative check can miss a violation but cannot invent one.
+//!
+//! A failure panics with a `[subset violation]` message.
 
 use std::collections::HashMap;
 use std::fmt;

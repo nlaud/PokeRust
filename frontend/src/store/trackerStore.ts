@@ -117,9 +117,8 @@ async function loadCompletions(trackerId: string): Promise<CompletionPools> {
     const dto = await api.getTrackerCompletions(trackerId)
     return { species: dto.species, moves: dto.moves, abilities: dto.abilities, items: ITEM_LABELS }
   } catch {
-    // Autocomplete is a convenience, not a correctness gate — a failed fetch
-    // just means suggestions are empty until the next successful load; typed
-    // text still round-trips through the real parser on submit either way.
+    // Keep suggestions empty until the next successful load.
+    // The server still validates typed text.
     return { species: [], moves: [], abilities: [], items: ITEM_LABELS }
   }
 }
@@ -236,9 +235,8 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         lastLineWarning: unchanged ? 'That line had no visible effect.' : null,
       })
     } catch {
-      // A partial, still-being-typed line can easily fail to parse mid-word —
-      // that's expected and not an error worth surfacing; just hold the last
-      // good preview rather than clearing it out from under the user.
+      // A partial word can fail to parse.
+      // Keep the last valid preview.
     }
   },
 

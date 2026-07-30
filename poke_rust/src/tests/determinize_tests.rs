@@ -1,18 +1,11 @@
-//! Tests for the meta-driven determinizer.
+//! Tests the usage-driven determinizer.
 //!
-//! The suite is layered. The pure-math pieces (`information::cps`,
-//! `information::compositions`) carry their own unit tests; this file covers the
-//! parts that only mean anything once a belief, the usage cache and the engine
-//! are all in play:
+//! The math modules contain their own unit tests.
+//! This file tests the complete determinizer:
 //!
-//! 1. *Soundness* — every determinized world must satisfy the belief it came
-//!    from, checked against `subset_check`'s oracle plus `check_determinization`
-//!    for the three blind spots that oracle documents.
-//! 2. *Runnability* — the TODO's actual requirement, "should just be able to be
-//!    put in the simulator and work". Driven by feeding worlds through
-//!    `sample_turn_raw_seeded`.
-//! 3. *Fidelity* — that the sampled distribution really does follow the usage
-//!    data, rather than merely being legal.
+//! 1. Confirm that each world satisfies its source belief.
+//! 2. Run each world through `sample_turn_raw_seeded`.
+//! 3. Compare sampled distributions with usage data.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

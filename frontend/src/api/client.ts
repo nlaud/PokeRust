@@ -49,7 +49,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await response.json()
       if (body.message) message = body.message
     } catch {
-      // non-JSON error body; keep the status text
+      // Keep the status text for a non-JSON error body.
     }
     throw new ApiError(response.status, message)
   }
@@ -110,7 +110,7 @@ async function requestTrackerText<T>(path: string, method: string, body: unknown
     try {
       parsed = await response.json()
     } catch {
-      // non-JSON error body; fall through to the generic message below
+      // Use the generic message for a non-JSON error body.
     }
     if (typeof parsed.line === 'number') {
       throw new TrackerParseApiError(parsed.line, parsed.message ?? response.statusText)

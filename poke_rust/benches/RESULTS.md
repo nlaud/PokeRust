@@ -1,21 +1,27 @@
 # Benchmark Results
 
-Produced by `cargo bench --bench turn_speed` (turn resolution) and
-`cargo bench --bench solver_speed` (game-tree solver); see each bench's file
-header for its scenarios. Latest recorded runs below — append a new section when
-re-measuring after engine changes.
+Run these commands to measure turn resolution and solver speed:
 
-## 2026-07-06 — sample mode landed
+```sh
+cargo bench --bench turn_speed
+cargo bench --bench solver_speed
+```
 
-- Machine: Windows 11, 31.5 GB RAM, release build (bench profile)
-- Engine state: sample mode (`DamageConfig::sample` / `sample_turn`) just added;
-  `Missed`-event and doubles-endgame fixes included
-- Scenarios: singles = Aerodactyl Rock Slide vs Pelipper Hurricane (rain);
-  doubles = Rock Slide + Heat Wave spreads vs Hurricane + Draco Meteor —
-  the turn shape that exceeded 15 GB under full enumeration at 16 rolls + crit
-- Enumerate times: one run for slow configs, averaged for fast ones.
-  Sample times: averaged over ≥ 0.4 s of repeated runs. `branches` is the
-  number of weighted outcome states returned.
+The source files describe each test case. Add a section after an engine change.
+
+## 2026-07-06: Sample mode
+
+- Machine: Windows 11 with 31.5 GB of RAM
+- Build: release benchmark profile
+- Engine: `DamageConfig::sample` and `sample_turn`
+- Singles: Aerodactyl uses Rock Slide against Pelipper in rain.
+- Doubles: Both sides use two attacks. Two attacks hit both opponents.
+
+The doubles test used more than 15 GB with 16 rolls and critical hits.
+
+Slow enumeration results use one run. Fast results use an average.
+Sample results use repeated runs for at least 0.4 seconds.
+The `branches` column gives the number of weighted outcomes.
 
 ```
 scenario mode       rolls  crit         time   branches
@@ -63,45 +69,40 @@ doubles  sample        16  true      1.75 ms          1
 
 ## Takeaways
 
-- **Sample mode is 0.07–1.75 ms per turn across every setting** — its mild
-  growth tracks a single action's fan-out (briefly materialized before
-  sampling), not the turn's combinatorics. Roughly 10⁶ sampled turns/minute
-  single-threaded, which is the budget that matters for rollout-based search.
-- **Singles enumeration is always cheap** (≤ ~22 ms at 16 rolls + crit,
-  517 branches) — full-fidelity analysis in singles costs nothing.
-- **Doubles enumeration grows ~16–20× per roll doubling** (two spread moves ×
-  two targets compound the roll count four times over, before secondaries).
-  2 rolls + crit is already 5.3 s / ~65k branches; 16 rolls + crit
-  extrapolates to billions of branches — the observed >15 GB blow-up. The
-  skipped cells are intentionally not run.
-- **Crit branching ≈ 2× branches per damaging move**: a ~2× time bump in
-  singles, ~13–18× in doubles (2× compounded across four move-target pairs).
-- Enumeration cost ≈ branch count × (BattleState clone + coalesce hash);
-  the clone-heavy state design is the constant factor, not the damage math.
+- Sample mode takes 0.07 to 1.75 ms per turn.
+- One thread can sample about one million turns each minute.
+- Singles enumeration takes at most about 22 ms.
+- Doubles enumeration grows 16 to 20 times when the roll count doubles.
+- Two doubles rolls with critical hits take 5.3 seconds and create about 65,000 branches.
+- Critical-hit branches approximately double the branches for each damaging move.
+- State copies and branch merging cause most enumeration cost.
+- The benchmark omits settings that need excessive time or memory.
 
 # Game-Tree Solver
 
-## 2026-07-28 — solver landed
+## 2026-07-28: Solver
 
-- Machine: Windows 11, 31.5 GB RAM, release build (bench profile)
-- `cargo bench --bench solver_speed`; whole sweep ≈ 8 minutes
-- Positions: real mid-turn-one states, built from `../teamsheets` pairings via
-  team preview exactly as `turn_speed` does. Each cell averages over as many
-  pairings as its turn-resolution budget allows, hence the varying `pairs`.
-- `turns` = `simulate_turn` calls; `cells` / `total` = matrix cells evaluated
-  against matrix cells that existed. Doubles is capped to 24 joint actions per
-  player (`cap`), so its rows measure cost, not play quality.
-- Cells the cost model predicted to be too expensive print `skipped` and are
-  omitted below.
-- **Count columns reproduce only to ~1% across runs.** Not a solver property:
-  `coalesce_branches` drains a `HashMap` at every expansion level, so
-  intermediate branch order varies and float addition is not associative — a
-  successor's probability can land a few ulps apart on two runs of the same
-  input, which is enough to reorder a near-tie and shift the tree the search
-  walks. Backward induction, which prunes nothing, drifts as much as the pruning
-  algorithms do, which is what identifies the transition function as the source.
-  Values agree bit for bit or within one ulp. Treat sub-percent movement between
-  runs as noise.
+- Machine: Windows 11 with 31.5 GB of RAM
+- Build: release benchmark profile
+- Total test time: about eight minutes
+
+The benchmark creates real first-turn states from pairs in `../teamsheets`.
+Each result averages the number of pairs that fit its turn budget.
+
+The `turns` column counts `simulate_turn` calls.
+The `cells` column counts evaluated matrix cells.
+The `total` column counts all matrix cells.
+The doubles tests limit each player to 24 joint actions.
+These tests measure cost, not play quality.
+
+The benchmark omits tests that its cost model marks as too expensive.
+
+Counts can vary by about one percent between runs.
+`coalesce_branches` reads a `HashMap`, which has an unstable order.
+Floating-point addition can then change a probability by a few units in its last place.
+This small change can reorder close successors and change the search path.
+Solver values agree exactly or differ by one unit in the last place.
+Treat smaller count changes as noise.
 
 ```
 scenario algorithm          depth rolls chance     cap pairs      time    turns    cells  total    lps
@@ -146,7 +147,8 @@ doubles  doubleOracle           1     1 top1        24    24   62.02ms      265 
 doubles  doubleOracle           1     4 enumerate   24     5     7.06s    11.9k    11.9k  12.3k      2
 ```
 
-Double oracle against backward induction, matched settings, in turn resolutions:
+This table compares double oracle with backward induction.
+Each row uses the same settings and counts turn resolutions.
 
 ```
 scenario depth rolls chance        BI turns     DO turns  speedup
@@ -167,42 +169,17 @@ doubles      1     4 enumerate        25.3k        11.9k    2.12x
 
 ## Takeaways
 
-- **The solver's cost is `simulate_turn`, essentially entirely.** Across every
-  row, time ≈ turns × a per-turn constant — ~50 µs for singles at one roll,
-  ~160 µs at four, ~650 µs for doubles at four — while `lps` never exceeds ~1.2k
-  even on the 118k-turn row, and a matrix LP is microseconds. Optimizations that
-  cut turn resolutions win; optimizations that cut LPs do not. This inverts the
-  assumption the source papers were written under, where transitions are cheap.
-- **Double oracle pays off, and its margin grows with depth**: 1.44× at depth 1,
-  ~2× at depth 2, 2.96× at depth 3, 3.1–3.3× in doubles. It is the default for
-  that reason. Growth with depth is expected — the saving is per node, so it
-  compounds.
-- **Serialized alpha-beta bounds are a net loss here, as predicted, and the
-  benchmark exists to have checked rather than assumed.** They do exactly what
-  the theory says: matrix cells drop sharply (depth 3: 118.3k → 37.3k, a 3.2×
-  cut; doubles depth 1: 1.5k → 506). But each bound costs a full auxiliary
-  alpha-beta search over the same subtree, so turn resolutions more than double
-  (depth 3: 118.3k → 273.2k) and wall-clock roughly doubles (6.29 s → 13.69 s).
-  Trading turn resolutions for matrix cells is the wrong direction in this
-  engine. Kept behind `SolverAlgorithm::SerializedBounds` and
-  `use_serialized_bounds`, both off by default.
-- **Depth 3 singles is affordable; depth 3 doubles is not.** Double oracle
-  reaches depth 3 in 2.2 s with one outcome per chance node. Doubles costs
-  ~3–4× a singles ply even capped at 24 joint actions, and uncapped it is two
-  orders of magnitude worse — a full doubles matrix is ~250×250 cells, every one
-  a turn resolution.
-- **Damage rolls cost more than depth does, per unit of fidelity.** Singles
-  depth 2 goes 1.7k → 14.7k turns moving from 1 roll to 4 (8.6×), while going
-  from depth 2 to depth 3 at one roll costs 36× — but the depth-3 answer is
-  worth far more than a finer damage distribution at depth 2. Prefer depth, and
-  spend `ChanceMode` on keeping the fan-out down.
-- **Peak RSS 87 MB across the whole sweep** (steady state ~20 MB), including the
-  doubles-enumerate cells. The search is depth-first, so live memory is
-  proportional to depth × branching rather than to the tree; the transposition
-  table is entry-capped, and the turn cache is off by default.
-- Pure equilibria are common in real positions — hence the ordered fast paths in
-  `matrix.rs`. Note `lps` = 0 for every *singles* depth-1 row: at one ply those
-  matrices are resolved entirely by the single-action, saddle-point and dominance
-  checks without ever reaching the simplex. Doubles needs the simplex once or
-  twice per solve even at depth 1, which is consistent with its larger matrices
-  admitting genuinely mixed equilibria more often.
+- `simulate_turn` causes almost all solver cost.
+- One-roll singles turns take about 50 microseconds.
+- Four-roll singles turns take about 160 microseconds.
+- Four-roll doubles turns take about 650 microseconds.
+- Fewer turn resolutions improve speed more than fewer linear programs.
+- Double oracle becomes more effective as depth increases.
+- Serialized bounds reduce matrix cells but increase turn resolutions and total time.
+- `SolverAlgorithm::SerializedBounds` and `use_serialized_bounds` are disabled by default.
+- Depth-three singles takes 2.2 seconds with one outcome at each chance node.
+- Depth-three doubles is not practical.
+- More search depth gives more value than more damage rolls.
+- Peak memory use was 87 MB. Normal memory use was about 20 MB.
+- Depth-first search keeps memory use proportional to depth and branching.
+- Singles often have pure equilibria. Doubles need mixed equilibria more often.

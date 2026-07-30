@@ -48,7 +48,7 @@ struct Args {
     #[arg(long, default_value_t = 3001)]
     port: u16,
 
-    /// Directory for the on-disk sprite cache (gitignored; created if missing)
+    /// Directory for the ignored sprite cache. The server creates it when necessary.
     #[arg(long, default_value = "../sprite_cache")]
     sprite_cache_dir: PathBuf,
 
@@ -65,7 +65,7 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Keep the engine silent; per-battle sim options come with each request.
+    // Keep the engine silent. Each request supplies its battle options.
     let _ = poke_rust::VERBOSITY.set(0);
 
     let dexes = Arc::new(Dexes {

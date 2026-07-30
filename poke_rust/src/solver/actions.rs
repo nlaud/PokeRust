@@ -1,24 +1,15 @@
-//! Which joint commands a player may legally submit, by battle phase.
+//! Returns the legal joint commands for each battle phase.
 //!
-//! A player's move in the game-theoretic sense is not one `BattleCommand` but
-//! one command *per active slot* — in doubles the two slots are chosen together
-//! and constrain each other, so the matrix game's rows are joint actions, not
-//! individual commands. This module produces those rows.
+//! A joint command contains one command for each active slot.
+//! In doubles, both slot commands can restrict each other.
+//! Therefore, matrix rows contain joint commands.
 //!
-//! Legality is phase-dependent in ways that are easy to get wrong, and this
-//! logic already existed inside the HTTP server (`bin/server/session.rs`), which
-//! is a binary crate and therefore unreachable from the library. Rather than
-//! reimplement rules like "earlier fainted slots claim bench Pokemon first" and
-//! risk the two copies drifting, the logic lives here and the server delegates
-//! to it.
+//! The HTTP server and solver use this module.
+//! This shared code prevents different legality rules.
 //!
-//! Note that joint legality genuinely needs two different validators: outside
-//! the replacement phase it is `validate_battle_command_combination` (no two
-//! slots switching to the same party index, at most one Terastallization and one
-//! Mega Evolution), but during a replacement it is
-//! `user::replacement_commands_are_valid`, which additionally enforces that a
-//! fainted slot may only stay empty once every healthy bench Pokemon is spoken
-//! for. The first validator alone would happily accept an illegal replacement.
+//! Normal phases use `validate_battle_command_combination`.
+//! Replacement phases use `replacement_commands_are_valid`.
+//! The replacement validator assigns each available bench Pokémon before it permits an empty slot.
 
 use std::collections::HashMap;
 

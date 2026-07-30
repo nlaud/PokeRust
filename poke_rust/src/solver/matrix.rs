@@ -1,36 +1,22 @@
-//! Nash equilibrium of a two-player zero-sum matrix game.
+//! Solves a two-player zero-sum matrix game.
 //!
-//! One simultaneous move — one turn of Pokemon, once every joint action's
-//! expected value is known — is a normal-form game: rows are P1's joint
-//! commands, columns are P2's, and `a[i][j]` is P1's expected payoff when they
-//! are played together. This module returns its value and both players' optimal
-//! mixed strategies. Everything in `search.rs` is scaffolding for producing the
-//! matrix; this is where the game theory happens.
+//! Rows contain P1 joint commands. Columns contain P2 joint commands.
+//! Each cell contains P1's expected payoff for both commands.
+//! The result contains the game value and both optimal mixed strategies.
 //!
-//! Solving it exactly is a linear program (von Neumann), and the standard
-//! transformation gives both players' strategies out of a *single* tableau:
-//! the column player's LP is the LP dual of the row player's, so the row
-//! strategy falls out of the final objective row's reduced costs on the slack
-//! columns. There is no need to solve two LPs, and no need for an LP crate —
-//! the matrices here are at most a few hundred square, a dense tableau is
-//! exact, and this crate deliberately carries no numeric dependencies.
+//! One linear program solves the game exactly.
+//! Its dual values provide the other player's strategy from the same tableau.
+//! The dense tableau supports the small matrices without another numeric dependency.
 //!
-//! The LP is the last resort, not the first. In practice most matrices the
-//! search builds never reach it:
+//! The solver first uses these faster cases:
 //!
-//! 1. **A player with one legal action.** Replacement and self-switch phases
-//!    routinely force one side to a single `Pass`, and a `1×n` game is just a
-//!    minimum. This is the single most common shape the search encounters.
-//! 2. **A pure saddle point.** If `max_i min_j a == min_j max_i a` the game has
-//!    a pure equilibrium, found in `O(mn)` with no pivoting.
-//! 3. **Iterated strict dominance.** Strictly dominated strategies are in the
-//!    support of no equilibrium, so deleting them preserves both the value and
-//!    the equilibrium set — and Pokemon matrices are full of them (a move that
-//!    is worse than another against every single opponent reply).
+//! 1. Solve a row or column with one legal action.
+//! 2. Find a pure saddle point.
+//! 3. Remove strictly dominated strategies.
 //!
-//! Payoffs are P1-positive throughout: P1 maximizes, P2 minimizes. The search
-//! feeds this win probabilities in `[0, 1]`, but nothing here depends on that
-//! range — an additive shift is applied internally regardless.
+//! P1 maximizes each payoff. P2 minimizes it.
+//! The search supplies probabilities in `[0, 1]`.
+//! An internal shift also permits other payoff ranges.
 
 /// Comparison tolerance. Payoffs are win probabilities in `[0, 1]`, so this is
 /// an absolute tolerance on a quantity of order 1, not a relative one.

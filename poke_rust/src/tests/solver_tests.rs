@@ -1,15 +1,11 @@
-//! Tests for the perfect-information game-tree solver.
+//! Tests the perfect-information solver.
 //!
-//! The load-bearing one is [`all_algorithms_agree`]: backward induction,
-//! serialized bounds and double oracle explore wildly different fractions of the
-//! tree, so any unsound cutoff shows up as a disagreement in the value. The
-//! matrix solver's own equilibrium properties are covered inline in
-//! `solver::matrix`; these tests are about the search around it.
+//! [`all_algorithms_agree`] compares all search algorithms.
+//! A different value identifies an invalid cutoff.
+//! `solver::matrix` contains equilibrium tests.
 //!
-//! Everything here runs in debug builds, where a `simulate_turn` call costs
-//! roughly ten times its release cost. Positions are therefore kept deliberately
-//! small — few moves, short benches, one damage roll — because the search cost
-//! is the product of the action counts and the branching factor at every ply.
+//! Debug builds make `simulate_turn` about ten times slower.
+//! Tests therefore use few moves, short benches, and one damage roll.
 
 use std::collections::HashMap;
 

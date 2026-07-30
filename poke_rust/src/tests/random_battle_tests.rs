@@ -1,20 +1,13 @@
-//! Random full-battle fuzz test: plays complete doubles battles (team preview
-//! through `GameOverState`) between random pairings of the real teamsheets in
-//! `../teamsheets/`, clicking uniformly-random legal commands each turn, while
-//! threading BOTH players' fog-of-war inference beliefs the same way the HTTP
-//! server does (`src/bin/server/session.rs::resolve_turn`/`advance_belief`):
-//! resolve one weighted trajectory per turn with `sample_turn_raw`, mask it
-//! once per observer with `mask_events_for`, and fold each masked stream into
-//! that player's belief with `apply_information`.
+//! Tests complete random doubles battles.
+//! It selects random teamsheet pairs and legal commands.
+//! It tracks both fog-of-war beliefs with the server process.
+//! `sample_turn_raw` selects one weighted event stream.
+//! `mask_events_for` masks the stream for each player.
+//! `apply_information` updates each belief.
 //!
-//! There is no explicit "assert nothing impossible happened" check anywhere
-//! below — `apply_information` itself IS that assertion. It panics
-//! (`inference_contradiction!`, see `information/inference.rs`) the moment an
-//! observed event stream is jointly impossible under the tracked belief, so
-//! simply calling it, every turn, for both players, without swallowing the
-//! panic, is the soundness oracle: if ordinary randomized play ever produces
-//! a state the inference engine considers impossible, this test fails with a
-//! descriptive `[inference contradiction] context=... event=...` message.
+//! `apply_information` panics when observed events conflict with a belief.
+//! The test does not catch this panic.
+//! A panic therefore reports an inference soundness failure.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

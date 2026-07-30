@@ -1,46 +1,32 @@
-//! Conditional-Poisson sampling: draw a fixed-size subset with prescribed
-//! per-item inclusion probabilities.
+//! Samples a fixed-size subset with conditional Poisson sampling.
 //!
-//! The determinizer needs this twice. Move sets are the motivating case — the
-//! usage cache gives a *marginal inclusion rate* per move ("Dragon Claw appears
-//! on 89.1% of Garchomp") and we must turn ten such marginals into one concrete
-//! 4-move set. Bench selection is the same shape: several candidate Pokemon,
-//! each with an affinity score, and a fixed number of slots to fill.
+//! The determinizer uses this method for move sets and bench selections.
+//! Usage data gives a marginal rate for each candidate.
+//! The sampler selects a fixed number of candidates.
 //!
 //! ## The model
 //!
-//! Conditional Poisson puts `P(S) ∝ ∏_{i∈S} w_i` over all subsets of size `n`.
-//! Among all distributions on fixed-size subsets with given marginals it is the
-//! maximum-entropy one, which is exactly the right default here: the source data
-//! supplies marginals and says nothing whatsoever about correlations, so the
-//! model should assume none. What that costs is real and worth stating — real
-//! move sets are strongly correlated (Protect and Substitute compete for a slot;
-//! a Choice item implies four attacks; a Trick Room setter's whole kit hangs
-//! together) and none of that structure survives, because none of it is in the
-//! data to begin with.
+//! The model uses `P(S) ∝ ∏_{i∈S} w_i` for each subset of size `n`.
+//! It gives the maximum-entropy distribution for the specified marginal rates.
+//! The model does not include correlations because the source does not provide them.
 //!
 //! ## Fitting
 //!
-//! The weights `w` are not the marginals; they induce them. Inclusion
-//! probabilities follow from the elementary symmetric polynomials,
-//! `π_i(w) = w_i · e_{n-1}(w \ i) / e_n(w)`, and we recover `w` from a target `t`
-//! by the multiplicative update `w_i ← w_i · t_i / π_i(w)` from the odds
-//! initialization `w_i = t_i / (1 - t_i)`.
+//! Weights `w` produce the marginal rates but do not equal them.
+//! Inclusion uses `π_i(w) = w_i · e_{n-1}(w \ i) / e_n(w)`.
+//! Fitting starts with `w_i = t_i / (1 - t_i)`.
+//! Each update uses `w_i ← w_i · t_i / π_i(w)`.
 //!
-//! `e_{n-1}(w \ i)` is recomputed from scratch for each `i` rather than by
-//! deflating `e(w)`. Deflation is `O(K·n)` instead of `O(K²·n)` but is
-//! numerically unstable precisely when one weight dominates the rest — which is
-//! the common case here, since a 99%-usage move produces exactly that. At
-//! `K ≤ 14` the quadratic version costs a few hundred flops.
+//! The fit recalculates `e_{n-1}(w \ i)` for each `i`.
+//! This `O(K²·n)` method remains stable when one weight dominates.
+//! Candidate pools contain at most 14 entries.
 //!
 //! ## Drawing
 //!
-//! For the sizes that arise (`K ≤ 14`, `n ≤ 4`, so at most `C(14,4) = 1001`
-//! subsets) every subset is enumerated and handed to the simulator's existing
-//! `sample_one_weighted`. That is an exact draw from the model with no
-//! sequential approximation, and it inherits the crate's seeded-RNG seam for
-//! free. Larger pools fall back to successive sampling, which is approximate —
-//! see `sample_fixed_size_subset`.
+//! Normal pools contain at most 1,001 subsets.
+//! The code enumerates these subsets and calls `sample_one_weighted`.
+//! This process draws exactly from the model and supports the seeded random generator.
+//! Larger pools use approximate successive sampling.
 
 use crate::simulator::helpers::sample_one_weighted;
 

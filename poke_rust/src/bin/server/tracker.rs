@@ -1,34 +1,24 @@
-//! Tracker mode: sessions for following a real battle by typing what happened,
-//! rather than simulating an opponent. See `tracker_parse.rs` for the text
-//! grammar and `tracker_effects.rs` for guaranteed-effect synthesis; this
-//! module owns the session type and its four HTTP handlers.
+//! Manages tracker sessions and their HTTP handlers.
+//! Tracker users enter events from a real battle.
+//! `tracker_parse.rs` defines the grammar.
+//! `tracker_effects.rs` adds guaranteed effects.
 //!
-//! # Why there's no concrete `MatchState` here
+//! # State
 //!
-//! Battle mode's `BattleSession` holds an authoritative `MatchState` plus a
-//! *belief about the opponent* derived from it. Tracker mode has no opponent to
-//! simulate — the belief IS the state, for both sides: the viewer's own side is
-//! seeded fully `Known` (see `create_tracker`) exactly like `from_known_pokemon`
-//! already seeds a battle-mode belief's own side, and the opponent's side
-//! narrows exactly like an ordinary fog-of-war belief always has. Neither side
-//! starts with anyone active — a session begins fully benched on both sides,
-//! and the first `leads p … o …` tracker-text event (see `tracker_parse.rs`)
-//! sends out both sides' actual leads together, symmetrically for the viewer
-//! and the opponent.
-//! `apply_information` already knows how to fold events into a belief with no
-//! separate ground truth backing it — that's exactly what a battle-mode belief
-//! already is; `mapping::battle_view_from_belief` renders a `BattleView`
-//! straight from it, the same way `bench_pokemon_view_from_belief` already
-//! renders bench mons with no concrete pairing.
+//! Tracker mode does not have a concrete `MatchState`.
+//! Its belief is the state for both sides.
+//! The viewer's side starts with known data.
+//! The opponent's side starts with the selected information mode.
+//! Both teams start on the bench.
+//! The first `leads` event sends out the active Pokémon.
+//! `mapping::battle_view_from_belief` renders the belief.
 //!
-//! # Turn contract (Phase 1)
+//! # Turn input
 //!
-//! `POST /events` must submit one or more *complete* turns, each ending with an
-//! explicit `endofturn` line — see `split_into_turns`. Every turn is applied to
-//! a scratch clone of the belief first; the session only commits once every
-//! turn in the submission has succeeded, mirroring `session::resolve_turn`'s
-//! all-or-nothing discipline (a contradiction must never leave the belief
-//! half-updated).
+//! `POST /events` accepts one or more complete turns.
+//! Each turn ends with an `endofturn` line.
+//! The server first applies all turns to a belief copy.
+//! It commits the copy only when every turn succeeds.
 
 use std::collections::{HashMap, HashSet};
 

@@ -1,15 +1,9 @@
-// Word-by-word completion engine for the tracker input bar (Minecraft-chat-
-// style command completion). This is a COMPLETION-ONLY mirror of the
-// authoritative grammar in `poke_rust/src/bin/server/tracker_parse.rs` — it
-// never builds an `InformationEvent`, only ranks candidate next-tokens, and
-// it is NOT the source of truth: the server's parser is, and a submission
-// that slips past this mirror still gets a real 422 `{line, message}` from
-// `POST /api/tracker/{id}/events` (or `/preview`, `/history`). Keep the
-// tables below in sync with `tracker_parse.rs`'s `status_from_word` /
-// `cant_reason_from_word` / `volatile_from_word` / `weather_from_word` /
-// `terrain_from_word` / `item_verb_from_word` / `stat_idx` / `parse_line`'s
-// dispatch order — the same "two hand-synced sources" discipline the DTOs in
-// `api/types.ts` already follow (see `frontend/README.md`).
+// Completes each word in the tracker input.
+// This module mirrors the main grammar in `tracker_parse.rs`.
+// It ranks the next tokens but does not create an `InformationEvent`.
+// The server parser remains authoritative and returns HTTP 422 for invalid input.
+// Keep the keyword tables and parser order synchronized with the Rust parser.
+// Also keep `api/types.ts` synchronized with the Rust DTOs.
 
 /** Mirrors `tracker_parse.rs::norm` exactly: alphanumeric-only, lowercased —
  * the same normalization `Species::from_str`/`PokemonMove::from_str`/
@@ -50,14 +44,10 @@ export interface CompletionPools {
 export const EMPTY_POOLS: CompletionPools = { species: [], moves: [], abilities: [], items: [] }
 
 // ── Casing detection ─────────────────────────────────────────────────────────
-// Pool completions (species/moves/abilities/items) arrive as human labels
-// with spaces ("Rock Slide") — but the input tokenizes on whitespace, so a
-// multi-word name only ever round-trips as ONE token in a whitespace-free
-// casing: `RockSlide` (Pascal), `rock_slide` (snake), `rock-slide` (kebab), or
-// `rockSlide` (camel) — exactly the casings `tracker_parse.rs::norm` (and this
-// module's `norm` above) treat as equivalent. A literal space, by contrast,
-// breaks a multi-word name into two separate tokens on submit, so it is
-// deliberately NOT one of the casings offered here.
+// Pools provide labels with spaces, such as "Rock Slide."
+// The input separates tokens at spaces.
+// A multiword name must therefore use Pascal, snake, kebab, or camel case.
+// The Rust parser and `norm` treat these forms as equal.
 
 export type CasingStyle = 'pascal' | 'snake' | 'kebab' | 'camel'
 
@@ -124,10 +114,9 @@ function recasePools(pools: CompletionPools, style: CasingStyle): CompletionPool
 }
 
 // ── Fixed keyword tables, mirroring tracker_parse.rs ────────────────────────
-// Each concept lists every word the Rust parser accepts; `canonical` is the
-// single word this module SUGGESTS for that concept (kept short/memorable so
-// the rising suggestion list doesn't show five spellings of the same thing —
-// every alias below still round-trips through the server either way).
+// Each concept lists all words that the Rust parser accepts.
+// `canonical` is the short word that this module suggests.
+// The server also accepts each listed alias.
 
 interface WordGroup {
   canonical: string
@@ -273,10 +262,8 @@ const MOVE_EFFECT_WORDS: WordGroup[] = [
   group('immune'),
   group('blocked', 'block'),
   group('fail', 'failed'),
-  // The charge turn of a two-turn move (`o1 solarbeam charging`). Takes no
-  // argument — the move it charges is always the line's own move, so
-  // `tracker_parse.rs` treats a repeated name as optional and rejects a
-  // different one.
+  // Marks the charge turn of this line's two-turn move.
+  // The marker does not require a move argument.
   group('charging'),
   group('illusion', 'illusionended'),
   group('damage', 'damaged'),
@@ -314,13 +301,11 @@ const SLOT_VERB_WORDS: WordGroup[] = [
   group('stockpilelevel'),
   group('copyboosts', 'boostscopied'),
   group('invertboosts', 'boostsinverted'),
-  // Input alias `o1 charging <move>`, which the parser desugars to the
-  // canonical move-line form above.
+  // Accepts `o1 charging <move>` as an alias for the standard move line.
   group('charging'),
 ]
 
-// Champions' 18 damage types plus the Tera-only Stellar type (`tera <type>`
-// accepts it like any other type word — mirrors `dex_data::parse_type`).
+// Includes the 18 damage types and the Tera-only Stellar type.
 const TYPE_WORDS: WordGroup[] = [
   'Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison',
   'Ground', 'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark',
@@ -351,11 +336,9 @@ const EFFECT_STATE_WORDS: WordGroup[] = [
 ]
 const SLOT_TARGET_WORDS = ['p1', 'p2', 'o1', 'o2']
 const EXPLICIT_SLOT_WORDS = ['@p1', '@p2', '@o1', '@o2']
-// `leads` is now its own line-start keyword (`leads p <sp>... o <sp>...`),
-// mirroring `tracker_parse.rs`'s standalone-keyword dispatch — not a
-// slot-addressed verb anymore (see `SLOT_VERB_WORDS`, which no longer lists
-// it). `LEADS_SIDE_WORDS` are the bare markers accepted after `leads`; digits
-// (`p1`/`p2`) don't apply there — a marker always means "this whole side".
+// `leads` starts a line and applies to a full side.
+// `LEADS_SIDE_WORDS` lists its permitted side markers.
+// These markers do not use slot digits.
 const LEADS_LINE_WORDS: WordGroup[] = [group('leads')]
 const LEADS_SIDE_WORDS: WordGroup[] = [group('p'), group('o')]
 
@@ -515,9 +498,7 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
     return cursorIndex === 3 ? { kind: 'effectState' } : { kind: 'done' }
   }
   if (first === 'endofturn' || first === 'eot') return { kind: 'done' }
-  // `leads [p|o] <species>... [p|o] <species>...` — every position after the
-  // keyword can be either a new side marker or another species of the
-  // current side (see `tracker_parse.rs`'s `"leads"` dispatch arm).
+  // After `leads`, accept a new side marker or another species for the current side.
   if (first === 'leads') return { kind: 'leadsSideOrSpecies' }
 
   if (cursorIndex === 1) return { kind: 'action' }
@@ -533,10 +514,8 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
     return cursorIndex === 2 ? { kind: 'teraType' } : { kind: 'done' }
   }
   if (action === 'mustrecharge' || action === 'pass') return { kind: 'done' }
-  // Standalone alias `o1 charging <move>` — the move name IS required in this
-  // spelling (it's the only thing naming the move). The canonical spelling,
-  // `o1 solarbeam charging`, has `charging` in the move body instead, where it
-  // takes no argument at all.
+  // The `o1 charging <move>` alias requires the move name.
+  // The standard `o1 solarbeam charging` form does not.
   if (action === 'charging') {
     return cursorIndex === 2 ? { kind: 'chargingMove' } : { kind: 'done' }
   }
@@ -564,10 +543,8 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   if (ITEM_VERB_WORDS.some((g) => g.aliases.includes(action))) {
     return cursorIndex === 2 ? { kind: 'itemVerbItem' } : { kind: 'done' }
   }
-  // A bare 2-token cant-reason/ability/item line ends here; anything longer
-  // means `tokens[1]` was a MOVE (the same length-sensitive collision
-  // `tracker_parse.rs:810-827` resolves) — the move-line body loop applies
-  // for every token from index 2 onward, including inline item-verb targets.
+  // A two-token reason, ability, or item line ends here.
+  // Longer input treats the second token as a move.
   const previous = norm(tokens[cursorIndex - 1] ?? '')
   const twoBack = norm(tokens[cursorIndex - 2] ?? '')
   const threeBack = norm(tokens[cursorIndex - 3] ?? '')
@@ -598,10 +575,8 @@ export function completionsAt(
   partial: string,
   pools: CompletionPools,
 ): string[] {
-  // A numeric/percent/fraction token (HP specs like `50%`, `120/200`) is
-  // already complete — no word pool has anything to suggest for it, and
-  // returning early here (rather than falling into `rank`'s edit-distance
-  // fallback) avoids dumping an unrelated word list against it.
+  // HP values such as `50%` and `120/200` are complete tokens.
+  // Return without unrelated word suggestions.
   if (isSelfCompleteToken(partial)) return []
   const style = styleFromTokens(tokens, pools)
   const recased = recasePools(pools, style)

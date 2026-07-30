@@ -1,41 +1,27 @@
-//! Shared helpers for `turn_speed.rs` and `battle_sweep.rs`.
+//! Provides shared helpers for `turn_speed.rs` and `battle_sweep.rs`.
 //!
-//! Benches are separate crates, so this file is not itself a bench target
-//! (see `autobenches = false` in `Cargo.toml`) — it is pulled into each real
-//! bench with `#[path = "bench_common.rs"] mod bench_common;`.
+//! Each benchmark is a separate crate.
+//! `autobenches = false` prevents Cargo from running this file as a benchmark.
+//! Each benchmark imports this module with a path attribute.
 //!
-//! The command-selection logic here (`random_team_preview_command`,
-//! `random_commands_for_player`, `reseed_for_battle`) is a direct port of the
-//! same-named helpers in `poke_rust/src/tests/random_battle_tests.rs` — that
-//! test already proved this exact pattern (uniformly-random legal commands,
-//! dual fog-of-war belief tracking mirroring `src/bin/server/session.rs`)
-//! drives full battles correctly through `GameOverState`, so the benches
-//! reuse it rather than re-deriving it from `user.rs`'s interactive driver.
+//! The command helpers match the helpers in `random_battle_tests.rs`.
+//! They select legal commands with equal probability.
+//! The tests confirm that this process can complete battles.
 //!
-//! Known limitation shared with that test: with a populated `learnset_dex`,
-//! `InferenceConfig`-driven inference under any non-`PerfectInformation` mode
-//! can hit two known, unfixed soundness bugs (crossed stat bounds in Pass 5;
-//! learnset-based Illusion narrowing false-positives whenever a Zoroark-line
-//! Pokémon is on the field) — `apply_information` panics when this happens.
-//! Callers must wrap `apply_information` in `catch_unwind` and treat a panic
-//! as "belief tracking stopped here", not a bench failure.
+//! Inference has two known soundness defects when `learnset_dex` contains data.
+//! Pass 5 can cross stat bounds.
+//! Learnset inference can reject a valid Illusion user.
+//! `apply_information` panics for these contradictions.
+//! Callers use `catch_unwind` and stop belief tracking after a panic.
 //!
-//! Reproducibility scope: seeding these helpers with a fixed `StdRng` only
-//! guarantees the *first* random draw (team-preview leads) reproduces run to
-//! run. Every draw after that depends on which legal commands exist, and that
-//! depends on the battle state the engine's own entropy-based `thread_rng()`
-//! produced (damage rolls, crits, misses, ...) — so a multi-turn caller
-//! (`battle_sweep.rs`) will NOT see the same move/switch sequence, turn count,
-//! or event stream on a re-run at the same seed. A single-turn caller
-//! (`turn_speed.rs`, which only ever draws one command per side, immediately
-//! after the deterministic team-preview resolution) is unaffected and does
-//! reproduce exactly — verified by diffing two runs' branch counts.
+//! A fixed `StdRng` only reproduces the team-preview leads in a full battle.
+//! The engine uses `thread_rng()` for later random effects.
+//! These effects change later states and legal commands.
+//! Thus, full battles can have different commands, turns, and events.
+//! The single-turn benchmark completes its selection before these effects occur.
 
-// Each bench includes this file via `#[path]` as its own separate module
-// instance (benches are separate crates) and uses a different subset of these
-// helpers — e.g. `turn_speed.rs` never calls `reseed_for_battle`. Allow
-// per-compilation dead code rather than warn on whichever subset a given
-// bench doesn't touch.
+// Each benchmark imports a different helper subset.
+// Permit unused helpers in each separate benchmark crate.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -61,7 +47,7 @@ use poke_rust::state::dex_data::{
 };
 
 /// Hang guard only, not a soundness/quality property — real doubles games
-/// settle in a handful of turns; this comfortably covers a PP-stall grind.
+/// settle in a few turns. This limit also permits a long PP stall.
 /// Matches the precedent in `random_battle_tests.rs`.
 pub const MAX_TURNS: usize = 400;
 
@@ -85,7 +71,7 @@ pub fn load_dexes() -> Dexes {
 
 /// Every `../teamsheets/*.txt` file, sorted by filename for a stable,
 /// reproducible ordering across runs (so a fixed seed reproduces the same
-/// pairing sequence even if the OS's directory-listing order doesn't).
+/// pairing sequence for any directory order).
 pub fn teamsheet_paths() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir("../teamsheets")
         .expect("../teamsheets directory should exist")

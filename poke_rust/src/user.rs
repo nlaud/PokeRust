@@ -644,8 +644,8 @@ fn choose_normal_battle_commands(
     }
 }
 
-/// The player who owns `pending_slot` picks a bench replacement; every other slot,
-/// including all of the opposing player's, passes.
+/// Lets the owner of `pending_slot` select a bench replacement.
+/// Every other slot passes.
 fn choose_self_switch_commands(
     state: &BattleState,
     player: Player,
@@ -673,7 +673,7 @@ fn choose_self_switch_commands(
                     .map(|(i, _)| i)
                     .collect();
                 if healthy_bench.is_empty() {
-                    // Shouldn't happen — self_switch_pending is cleared when there's no valid target — but guard defensively.
+                    // Guard against a pending self-switch without a valid target.
                     return BattleCommand::Pass;
                 }
                 let leaving_mon = match player {
@@ -715,7 +715,7 @@ pub fn choose_battle_commands_for_player(
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> PlayerCommand {
-    // Mid-turn self-switch: the pending slot must choose a replacement; all other slots Pass.
+    // The pending slot selects a replacement. All other slots pass.
     if let Some((pending_slot, _)) = state.self_switch_pending {
         return choose_self_switch_commands(state, player, pending_slot);
     }
@@ -831,7 +831,7 @@ pub fn simulate_battle(
                 let selected_index = distribution.sample(&mut rng);
                 let (next_state, _, probability) = next_states[selected_index].clone();
 
-                // At verbosity 3, print selected outcome info; at 4+, info is already printed during simulation
+                // Print the selected outcome at verbosity 3. Simulation prints it at higher levels.
                 if prev_verbosity >= 3 {
                     println!(
                         "{}",

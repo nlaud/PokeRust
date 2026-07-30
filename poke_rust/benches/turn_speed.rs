@@ -1,37 +1,25 @@
-//! Turn-resolution speed benchmark: times a single attack-turn resolution
-//! across enumerate/sample mode × damage rolls × crit branching, in singles
-//! and doubles, swept over every ordered pairing of the real teamsheets in
-//! `../teamsheets/` with seeded random leads and moves. Unlike
-//! `battle_sweep.rs` (a multi-turn loop, where engine RNG feeds back into
-//! which commands are even legal on later turns), everything measured here
-//! is chosen from state reached before any engine RNG has run — team-preview
-//! resolution takes the single deterministic highest-probability branch, and
-//! the one post-preview move pick follows immediately from that — so the
-//! full scenario (leads + moves + resulting branch counts) reproduces exactly
-//! for a given seed; only wall-clock timing varies run to run. Verified by
-//! diffing two runs' branch-count columns.
+//! Measures one turn across each mode, roll count, and critical-hit setting.
+//! The benchmark tests singles and doubles with each ordered teamsheet pair.
+//! A fixed seed selects the leads and moves.
+//!
+//! The benchmark selects all commands before the engine uses random values.
+//! A seed therefore produces the same leads, moves, and branch counts.
+//! Only the measured time changes between runs.
 //!
 //! Run from `poke_rust/`:
 //! ```sh
 //! cargo bench --bench turn_speed
 //! ```
 //!
-//! Scenarios: singles (1 active / 3 brought) and doubles (2 active / 4
-//! brought), each pairing's leads and move choice picked once per pairing via
-//! `bench_common::random_team_preview_command`/`random_commands_for_player`
-//! and then reused across that pairing's whole rolls×crit grid, so rolls/crit
-//! stays the controlled variable within a pairing. Results are averaged
-//! across all pairings that ran each grid cell.
+//! Singles uses one active Pokémon and three selected Pokémon.
+//! Doubles uses two active Pokémon and four selected Pokémon.
+//! Each pair uses the same leads and moves for all roll and critical-hit settings.
+//! Each result is the average for all tested pairs.
 //!
-//! **Enumerate mode never runs above 4 damage rolls** (`rolls ∈ {1, 2, 4}`):
-//! full enumeration (`simulate_turn` — every possible outcome, not one
-//! sampled trajectory) is the path CLAUDE.md flags as exploding past 15 GB on
-//! doubles spread turns, and randomized teams/moves make the branch count
-//! unpredictable ahead of time, so 8/16-roll enumerate cells are never
-//! attempted. The doubles-specific "no crit at 4 rolls" exclusion proven safe
-//! by the original fixed-team version of this bench is kept on top of that
-//! cap. Sample mode (memory-bounded — one weighted trajectory regardless of
-//! roll count) keeps the full `{1, 2, 4, 8, 16}` grid.
+//! Enumeration uses one, two, or four damage rolls.
+//! It omits larger counts because doubles can use more than 15 GB.
+//! The four-roll doubles test also disables critical hits.
+//! Sample mode uses one, two, four, eight, or 16 rolls.
 
 #[path = "bench_common.rs"]
 mod bench_common;

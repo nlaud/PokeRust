@@ -1,8 +1,7 @@
-//! Tests for `state::inference::apply_information`.
+//! Tests `state::inference::apply_information`.
 //!
-//! Tests construct hand-built `InformationEvent` lists and assert on the resulting
-//! `UnknownMatchState`.  All assertions must satisfy the soundness invariant: the
-//! true training/item/stat of the simulated Pokémon must lie *within* every returned bound.
+//! Tests apply hand-written `InformationEvent` lists to an `UnknownMatchState`.
+//! Each result must contain the true build, item, and stats.
 
 #![allow(unused)]
 

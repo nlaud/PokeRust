@@ -1,49 +1,33 @@
-//! The recursion: backward induction over simultaneous-move stochastic nodes.
+//! Searches simultaneous stochastic game nodes by backward induction.
 //!
-//! A node is a position where both players choose at once. Its payoff matrix has
-//! P1's joint actions as rows and P2's as columns, and each cell is the *expected*
-//! value of that pair of choices — expected because the engine answers a joint
-//! action with a probability distribution over successor states, not one state.
-//! Solving the matrix (`super::matrix`) gives the node's value and both players'
-//! mixed strategies; the value propagates upward.
+//! Both players choose at each node.
+//! Matrix rows contain P1 joint commands, and columns contain P2 joint commands.
+//! Each cell contains the expected value of its command pair.
+//! The matrix solution supplies the node value and both mixed strategies.
 //!
-//! Three algorithms compute the same answer with different amounts of work; see
-//! [`SolverAlgorithm`]. All are from Bošanský et al. (AIJ 237, 2016), Algorithms
-//! 1–4.
+//! [`SolverAlgorithm`] describes three algorithms that return the same answer.
+//! They follow Algorithms 1 through 4 from Bošanský et al., AIJ 237, 2016.
 //!
-//! # Where bounds are and are not allowed
+//! # Bounds
 //!
-//! This is the one thing in the module that is easy to get quietly wrong.
+//! Alpha-beta pruning can return a bound instead of an exact value.
+//! Every matrix cell must contain an exact value.
+//! Therefore, simultaneous search evaluates cells in the full `[0, 1]` window.
 //!
-//! Alpha-beta style pruning returns a *bound* on a value rather than the value.
-//! A matrix cell fed to the LP must be **exact** — a linear program over
-//! interval-valued cells does not compute an equilibrium, it computes nonsense,
-//! and it does so without complaining. So cells are always evaluated over the
-//! full `[0, 1]` window.
+//! Bounds are valid in two places:
 //!
-//! Bounds are legitimate in exactly two places:
+//! - [`SearchContext::serial_ab`] uses bounds during serialized search.
+//! - A recursive simultaneous search can use bounds from serialized search.
 //!
-//! - Inside [`SearchContext::serial_ab`], the *serialized* search, which is an
-//!   ordinary alternating-move alpha-beta search where cutoffs are sound, and
-//!   where star1 pruning at chance nodes is likewise sound.
-//! - As the `(α, β)` window handed to a recursive simultaneous solve, when that
-//!   window came from serialized bounds. Those brackets are *valid* — they
-//!   provably contain the true value — so narrowing to them never excludes the
-//!   answer, and the value returned is still exact.
+//! These windows contain the exact value.
+//! Thus, the transposition table does not need bound flags.
 //!
-//! Because every simultaneous window either is `[0, 1]` or provably contains the
-//! true value, every value the simultaneous search produces is exact. That is
-//! what lets the transposition table store bare numbers with no bound flags.
+//! # Midturn decisions
 //!
-//! # Mid-turn decision points do not consume a ply
-//!
-//! One `simulate_turn` call does not always advance the turn counter: a faint
-//! leaves the battle in a replacement phase, and a self-switch move (U-turn,
-//! Baton Pass) leaves it waiting for a pivot. Both are real simultaneous-move
-//! decision nodes and are searched as such — but charging them a ply would mean
-//! a depth-3 search that hit two faints was really looking one turn ahead. They
-//! recurse at the same depth, bounded by
-//! [`SolveConfig::max_forced_chain`](super::SolveConfig::max_forced_chain).
+//! A faint can require a replacement before the turn ends.
+//! A self-switch move can require a pivot choice.
+//! The search does not charge these decisions as another depth.
+//! [`SolveConfig::max_forced_chain`](super::SolveConfig::max_forced_chain) limits the decision chain.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;

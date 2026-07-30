@@ -1,6 +1,6 @@
-//! JSON DTOs for the web frontend. The engine's state types stay untouched
-//! (several payload enums are code-generated); these structs are the wire format,
-//! hiding engine bookkeeping fields and emitting display-name strings.
+//! Defines the JSON data objects for the web frontend.
+//! Engine state types do not use serialization.
+//! These objects hide engine fields and use display names.
 
 use serde::{Deserialize, Serialize};
 

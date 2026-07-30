@@ -1,9 +1,7 @@
-//! # Information — the player-visible event model
+//! Defines events that reveal battle information to a player.
 //!
-//! This module defines every event that **reveals information to a player** during a
-//! Pokémon battle. It is modelled on Showdown's SIM-PROTOCOL but differs in one key
-//! structural way: **reaction events are nested inside the event that triggered them**
-//! via the [`InformationEvent::reactions`] field.
+//! The model follows the Showdown SIM-PROTOCOL.
+//! [`InformationEvent::reactions`] nests each reaction below its cause.
 //!
 //! For example, a Life-Orb move that scores a critical hit, deals super-effective
 //! damage, triggers the target's resist berry, and KOs the target looks like:
@@ -20,22 +18,18 @@
 //!   └── DamageDealt { target (user), amount, new_hp }         ← Life Orb recoil
 //! ```
 //!
-//! Because the *parent* event already conveys the cause (e.g. the enclosing `MoveUsed`
-//! tells you that recoil came from a move), there is no separate "effect source" tag on
-//! individual events.
+//! The parent event identifies the cause.
+//! Child events do not need a separate source field.
 //!
 //! ## Priority / speed ordering
 //!
-//! Ordering top-level events by action priority and actor speed is **not done here** —
-//! it is the responsibility of the caller that assembles a `Vec<InformationEvent>` for
-//! a turn. The nested structure means each reaction automatically travels with its cause
-//! regardless of ordering.
+//! The caller sorts top-level events by action priority and actor Speed.
+//! Nested reactions remain with their cause.
 //!
 //! ## Integration with `unknowns`
 //!
-//! This is the bridge to [`crate::unknowns::UnknownBattleState`]. All HP figures use
-//! [`crate::unknowns::PokemonHP`] so that allies report exact HP and opponents report a
-//! percentage, exactly as a real player observes.
+//! Events update [`crate::unknowns::UnknownBattleState`].
+//! [`crate::unknowns::PokemonHP`] stores exact ally HP and opponent HP percentages.
 
 use super::unknowns::PokemonHP;
 use crate::data::ability::Ability;

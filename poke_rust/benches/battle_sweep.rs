@@ -1,47 +1,24 @@
-//! Full-battle + fog-of-war inference benchmark: plays complete doubles
-//! battles (team preview through `GameOverState`) between every ORDERED
-//! pairing of the real teamsheets in `../teamsheets/` (N sheets -> N² battles,
-//! including mirrors), with seeded random legal-command selection.
+//! Measures complete doubles battles and fog-of-war inference.
+//! It plays every ordered pair of teamsheets in `../teamsheets/`.
+//! The pairs include mirror matches.
+//! A seeded generator selects legal commands.
 //!
-//! "Seeded" is a narrower claim than it might sound — verified empirically,
-//! not just asserted: only the pairing order and each side's team-preview
-//! leads are guaranteed reproducible run to run. The engine's own RNG (damage
-//! rolls, crits, misses, confusion — all entropy-based `thread_rng()`, no seam
-//! to inject a seed) decides the resolved outcome of every turn via
-//! `sample_turn_raw`, which changes the resulting battle state, which changes
-//! *which legal commands even exist* next turn (a fainted mon needs a
-//! replacement pick, a different mon might be Choice-locked, etc.) — so the
-//! harness's own seeded RNG draws a different-shaped sequence of choices every
-//! run despite the identical seed. Net effect: total turns/battle, exact
-//! move/switch sequences, and per-mode call counts below will differ run to
-//! run; only the *set of pairings played* and their *leads* do not. (Contrast
-//! `turn_speed.rs`, which times a single post-preview turn chosen immediately
-//! after the deterministic team-preview resolution — no engine RNG runs
-//! before that pick, so it reproduces exactly; confirmed by diffing two runs'
-//! branch counts.)
+//! The seed reproduces the pair order and team-preview leads.
+//! The engine uses `thread_rng()` for battle effects.
+//! These effects change later states and legal commands.
+//! Thus, turn counts, commands, and events can change between runs.
 //!
-//! Each battle is resolved ONCE per pairing (`sample_turn_raw`, one weighted
-//! trajectory — the same memory-bounded mode the server uses), recording
-//! every turn's commands and unmasked event stream. That single recorded
-//! trajectory is then REPLAYED once per fog-of-war information mode
-//! (Perfect Information / Closed Team Sheet / Open Team Sheet / Open Team
-//! Sheet + Natures), timing `apply_information` for both players' beliefs
-//! under each mode. Replaying instead of re-resolving means all four modes
-//! are compared against an *identical* event stream, and turn-resolution
-//! cost is only ever paid once per battle, not four times.
+//! `sample_turn_raw` resolves each battle once and records its events.
+//! The benchmark replays these events for each information mode.
+//! It measures `apply_information` for both players.
+//! Each mode therefore receives the same event stream.
 //!
-//! `apply_information` panics (`inference_contradiction!`) on a
-//! jointly-impossible observation. As of this writing there are two known,
-//! unfixed inference-engine soundness bugs that make this common whenever
-//! `learnset_dex` is populated (matching production `InferenceConfig`):
-//! crossed min/max stat bounds surfacing in Pass 5, and learnset-based
-//! Illusion narrowing false-positives whenever a Zoroark-line Pokemon is on
-//! the field (see `poke_rust/src/tests/random_battle_tests.rs`, which found
-//! both). Each `apply_information` call below is wrapped in `catch_unwind`;
-//! a panic stops that (mode, player, battle)'s belief tracking early and is
-//! counted as a "contradiction", not treated as a bench failure — a nonzero
-//! count reflects a real, already-tracked engine bug, not a problem with this
-//! benchmark.
+//! `apply_information` can detect an impossible observation and panic.
+//! Two known inference defects can cause these panics.
+//! Pass 5 can cross stat bounds.
+//! Learnset inference can reject a valid Illusion user.
+//! `catch_unwind` records these panics as contradictions.
+//! A contradiction stops belief tracking for that mode, player, and battle.
 //!
 //! Run from `poke_rust/`:
 //! ```sh

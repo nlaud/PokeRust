@@ -1,23 +1,19 @@
-//! # state::inference — information-folding engine
+//! Applies observed events to a hidden-information state.
 //!
-//! Converts an ordered list of [`InformationEvent`]s into tighter bounds on the
-//! [`UnknownMatchState`].  The entry point is [`apply_information`].
+//! [`apply_information`] reads ordered [`InformationEvent`] values.
+//! It narrows the possible values in [`UnknownMatchState`].
 //!
-//! ## Pipeline (six passes, one event-tree walk)
+//! # Passes
 //!
-//! 1. **Pass 1** — direct/structural facts (items revealed, status, types, HP, …)
-//! 2. **Pass 2** — item presence/absence from behaviour (Life Orb recoil, no recoil,
-//!    100%-accurate miss → Bright Powder, Choice-item multi-move → no Choice, …)
-//! 3. **Pass 3** — damage → stat bounds (inverts the real pipeline via a monotone
-//!    binary-search oracle; narrows BSV / EV / nature ranges from observed damage)
-//! 4. **Pass 4** — speed ordering → Spe bounds (within priority brackets, with multiplier
-//!    accounting; Quick Claw / Quick Draw → disjunctive predicates)
-//! 5. **Pass 5** — back-solve EV / IV / nature from tightened stat bounds
-//! 6. **Pass 6** — BCP (boolean constraint propagation) on the CNF `predicates` to fixpoint
+//! 1. Apply direct and structural facts.
+//! 2. Infer item presence or absence from behavior.
+//! 3. Convert damage to stat bounds.
+//! 4. Convert action order to Speed bounds.
+//! 5. Convert stat bounds to EV, IV, and nature bounds.
+//! 6. Propagate Boolean constraints until no value changes.
 //!
-//! **100 % soundness guarantee**: the returned state never excludes a training that could
-//! actually produce the observed events.  When events are *jointly impossible*, the function
-//! **panics** via [`inference_contradiction!`] with a descriptive message.
+//! The result must include every build that can produce the observed events.
+//! Impossible event sets cause [`inference_contradiction!`] to panic.
 
 #![allow(unused, dead_code, clippy::too_many_arguments)]
 

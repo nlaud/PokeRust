@@ -1,48 +1,35 @@
-//! Game-tree solver for perfect-information battle positions.
+//! Solves perfect-information battle positions.
 //!
-//! Given a concrete `MatchState` — both teams fully known — this computes each
-//! player's optimal *mixed* strategy over their legal joint commands and the
-//! resulting win odds, by searching forward to a fixed depth and solving the
-//! game exactly at every node.
+//! The input is a concrete `MatchState` with two known teams.
+//! The solver searches to a fixed depth.
+//! It returns each optimal mixed strategy and P1's win probability.
 //!
 //! # Why not minimax
 //!
-//! A Pokemon turn is a **simultaneous-move stochastic game**: both players
-//! commit an action without seeing the other's, and the engine then resolves a
-//! probability distribution over successor states. Ordinary minimax models this
-//! wrongly — it lets one player see the other's commitment — and the "safest
-//! move" policy it produces is deterministic and therefore exploitable by anyone
-//! who models it. The correct value of a node is the **Nash equilibrium value**
-//! of the payoff matrix whose cells are the joint actions' expected values, and
-//! its solution is genuinely mixed. That is why the output here is a probability
-//! per action rather than a single best move.
+//! Both players select commands without seeing the other commands.
+//! The engine then returns a distribution of successor states.
+//! Minimax incorrectly lets one player respond to the other player's command.
+//! The solver instead computes each node's Nash equilibrium.
+//! Thus, the result gives a probability for each command.
 //!
 //! # Algorithms
 //!
-//! Implements the family described in Bošanský, Lisý, Lanctot, Čermák &
-//! Winands, *Algorithms for computing strategies in two-player simultaneous move
-//! games*, Artificial Intelligence 237:1–40 (2016) — see
-//! [`SolverAlgorithm`] for the three variants and what each buys.
+//! The implementation follows Bošanský et al., Artificial Intelligence 237, 2016.
+//! [`SolverAlgorithm`] describes the three variants.
 //!
-//! The paper's chance-node model maps onto this engine exactly: its transition
-//! weight `P*(s, r, c, s')` is precisely the probability that `simulate_turn`
-//! already attaches to each successor.
+//! `simulate_turn` supplies the transition probability for each successor.
 //!
 //! # Utilities are win probabilities
 //!
-//! Every value in this module is P1's win probability, in `[0, 1]`; P1
-//! maximizes and P2 minimizes. That choice is load-bearing rather than
-//! cosmetic — it hands the search globally valid bounds `L = 0`, `U = 1` with no
-//! tuning, which is what star1 pruning at chance nodes and the serialized
-//! alpha-beta windows both require.
+//! Each utility is P1's win probability in `[0, 1]`.
+//! P1 maximizes the value, and P2 minimizes it.
+//! This range supplies valid bounds for star1 and serialized alpha-beta pruning.
 //!
 //! # Cost
 //!
-//! The dominant cost is `simulate_turn`, at hundreds of microseconds per call,
-//! against microseconds for a matrix LP. So the metric that decides whether a
-//! configuration is affordable is [`SolveStats::turns_simulated`], not the LP
-//! count — and the lever that matters is [`ChanceMode`], which bounds how much
-//! of each turn's outcome distribution the search descends into.
+//! `simulate_turn` causes most search cost.
+//! [`SolveStats::turns_simulated`] measures this work.
+//! [`ChanceMode`] limits the outcomes that the search examines.
 //!
 //! ```no_run
 //! # use poke_rust::data::pokemon_move::PokemonMove;

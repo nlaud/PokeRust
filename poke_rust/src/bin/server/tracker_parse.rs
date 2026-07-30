@@ -1,49 +1,17 @@
-//! Tracker mode: parses free-text descriptions of a real battle's events into
-//! the `InformationEvent` trees `apply_information` expects.
+//! Converts tracker text to `InformationEvent` trees.
 //!
-//! # Scope (Phase 1 MVP)
+//! # Scope
 //!
-//! This is a deliberately-scoped subset of the full grammar described in the
-//! tracker-mode design doc, chosen to get a sound, working pipeline in place
-//! first. Notable simplifications (documented inline at their call sites too):
+//! The grammar supports a selected set of battle events.
 //!
-//! - **Flat nesting.** All effects on a move line become *direct children* of
-//!   the `MoveUsed` node (siblings), keyed to whichever slot was last
-//!   mentioned, rather than the fully cause-nested trees the simulator itself
-//!   emits (e.g. a berry heal nested three levels under the `DamageDealt` /
-//!   `ItemLost` that triggered it). Inference reasons about the *presence* of
-//!   node types within a `MoveUsed` subtree, not exact parent/child shape, so
-//!   this stays sound; it is just less legible than simulator output would be.
-//! - **Explicit targets required.** Every targeted move must name its
-//!   target slot(s) explicitly (matches every example in the design doc); no
-//!   singles auto-target inference. The one exception is a **charge turn**
-//!   (`o1 solarbeam charging`): the charge step frequently reveals no target at
-//!   all — "Charizard flew up high!" names nobody — so `charging` lines are
-//!   allowed to carry an empty target list, and the release turn a turn later
-//!   records the target normally. A target may still be given if it IS known.
-//! - **Leads are an event, not a pre-game pick.**
-//!   `leads [p|o] <species>... [p|o] <species>...` sends out one or both
-//!   sides' opening (or simultaneous post-faint replacement) leads together
-//!   — a session starts fully benched on both sides (see `tracker.rs`'s
-//!   module doc), symmetric with how every other mid-battle switch already
-//!   works. Distinct from `switch`, which replaces one slot at a time. A
-//!   single `leads` line covering both sides parses directly to ONE
-//!   `SimultaneousSwitch` event; if a submission instead spells the two
-//!   sides out as separate consecutive `leads` lines,
-//!   `fold_leads_and_entry_abilities` (called once per turn, before
-//!   synthesis/inference) still merges that leading run into ONE combined
-//!   event and folds any immediately-following entry-ability reveal
-//!   (`p1 sandstream`, `o1 unnerve`, …) into that event's `reactions` — see
-//!   its doc comment for why this matters beyond tidiness (cross-mon
-//!   ability-absence reasoning).
-//! - **HP direction from the belief.** `[xx]%`/`[xx]hp` tokens don't say
-//!   whether they're damage or healing — that's inferred by comparing against
-//!   the slot's currently-believed HP. Equal-to-current is emitted as `SetHp`
-//!   (no mechanism implied).
-//! - Guaranteed-effect synthesis (Intimidate's `-1 atk`, Swords Dance's
-//!   `+2 atk`, weather from Drizzle, …) lives in `tracker_effects.rs` and is
-//!   applied as a post-processing pass over the events this module builds —
-//!   see `crate::tracker_effects::augment_turn`.
+//! - Move effects are direct children of `MoveUsed`.
+//! - Targeted moves must name each target.
+//! - A charge turn can omit its target.
+//! - `leads` sends out one or both sides together.
+//! - Consecutive lead lines merge into one `SimultaneousSwitch` event.
+//! - HP values use the current belief to determine damage or healing.
+//! - An unchanged HP value creates `SetHp`.
+//! - `tracker_effects.rs` adds guaranteed effects after parsing.
 
 use std::collections::HashMap;
 

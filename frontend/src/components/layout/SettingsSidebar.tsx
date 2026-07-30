@@ -32,10 +32,8 @@ export default function SettingsSidebar() {
   const { sidebarOpen, setSidebarOpen, theme, setTheme, customBackground, customAccent, setCustomColors } =
     useSettings()
 
-  // The sidebar (and everything inside it, including <MusicPlayer/>) stays mounted
-  // at all times — it's only ever hidden via CSS (transform + pointer-events), never
-  // unmounted. Unmounting would tear down the music players and restart playback
-  // every time the drawer closed, which defeats "I want the audio to always work."
+  // Keep the sidebar and MusicPlayer mounted.
+  // CSS hides the sidebar without restarting audio.
   return (
     <div className={`fixed inset-0 z-50 ${sidebarOpen ? '' : 'pointer-events-none'}`}>
       <div

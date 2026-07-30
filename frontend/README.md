@@ -1,250 +1,245 @@
-# PokeRust Frontend
+# PokeRust frontend
 
-Minimalist web UI for the PokeRust battle simulator: a **Teams** page
-(Showdown-format teamsheets in localStorage, the default route), a **Formats**
-page (ruleset cards with a curated Pokémon Champions item pool for ban lists),
-a **Simulate** page (hotseat battles against the Rust engine), a **Tracker**
-page (follow a real battle by typing what happened instead of driving a
-simulated opponent — see "Tracker mode" below), and a **Benchmark** page
-(right-aligned in the navbar; runs the turn-resolution, fog-of-war-inference
-and game-tree-solver sweeps, streamed live over Server-Sent Events from
-`GET /api/benchmark` — see `poke_rust::benchmarking` and "The Benchmark page"
-below).
-React + Vite + TypeScript + Tailwind CSS v4.
+The frontend uses React, Vite, TypeScript, and Tailwind CSS.
 
-## Running
+It provides these pages:
 
-Two processes, both from the repo root:
+- **Teams** stores Showdown teamsheets.
+- **Formats** stores rules and item bans.
+- **Simulate** runs a hotseat battle.
+- **Tracker** records events from a real battle.
+- **Benchmark** runs and displays server benchmarks.
+
+## Start the application
+
+Start the API server from the repository root:
 
 ```sh
-# 1. API server (release build matters — turn resolution is compute-heavy)
 cd poke_rust
-cargo run --release --bin server          # binds http://127.0.0.1:3001
-
-# 2. Frontend dev server
-cd frontend
-npm install
-npm run dev                               # http://localhost:5173, proxies /api → :3001
+cargo run --release --bin server
 ```
 
-The server takes the same dex-path flags as the CLI (`--poke-dex`,
-`--move-dex`, defaults point at `../pokemon_info/` so run it from
-`poke_rust/`), plus `--port` (default 3001).
+The server listens on http://127.0.0.1:3001.
+Use a release build because turn resolution uses much CPU time.
 
-## Testing
-
-`e2e/` has a Playwright suite (currently just tracker mode's input bar).
-`playwright.config.ts`'s `webServer` array launches both halves of the stack
-above automatically — `cargo build --release --bin server` once first so the
-binary exists, then:
+Start the frontend in another terminal:
 
 ```sh
 cd frontend
-npx playwright install chromium   # once
+npm install
+npm run dev
+```
+
+Open http://localhost:5173.
+The development server sends `/api` requests to port 3001.
+
+The API server accepts the CLI dex-file options.
+It also accepts `--port`.
+Run the server from `poke_rust/` when you use the default dex paths.
+
+## Test the frontend
+
+Build the release server once:
+
+```sh
+cd poke_rust
+cargo build --release --bin server
+```
+
+Install Chromium once:
+
+```sh
+cd frontend
+npx playwright install chromium
+```
+
+Run the end-to-end tests:
+
+```sh
 npx playwright test
 ```
 
-`reuseExistingServer` (the default outside CI) means it's fine to already have
-both dev processes running locally; the suite reuses them instead of
-relaunching. There's no unit-test runner configured yet — TypeScript/lint
-checks are `npx tsc -b` and `npm run lint`.
+Playwright starts the API and frontend servers.
+Outside CI, it uses compatible servers that already run.
 
-## Architecture
+Run the static checks:
 
+```sh
+npx tsc -b
+npm run lint
 ```
+
+The project does not have a frontend unit-test runner.
+
+## Source layout
+
+```text
 src/
-  api/types.ts        1:1 TS mirrors of the server DTOs (source of truth:
-                      poke_rust/src/bin/server/dto.rs — keep in sync by hand)
-  api/client.ts       typed fetch wrappers
-  store/battleStore.ts  hotseat command wizard (zustand): P1 picks per-slot
-                      commands, then P2, then both ship in one POST /turn
-  store/settingsStore.ts  theme (light/dark/custom), persisted
-  lib/storage.ts      localStorage schemas: pokerust.teams.v1, pokerust.formats.v1
-  lib/sprites.ts      Showdown name → PokeAPI slug + sprite URL cache
-                      (sprites are fetched at runtime, never committed)
-  lib/eventText.ts    EventNode tree → log lines (chronological walk with a
-                      slot→species resolver, since events carry slots not names)
-  lib/trackerGrammar.ts  word-by-word autocomplete mirror of tracker_parse.rs's
-                      keyword tables, for TrackerInputBar — completion-only,
-                      never the source of truth (the server still validates)
-  pages/simulate/     SetupPanel, BattleScreen, Arena, ControlPanel,
-                      PokemonHUD, FieldIndicators, BattleLogSidebar,
-                      TeamInfoSidebar
-  pages/tracker/      TrackerSetupPanel, TrackerScreen, TrackerArena,
-                      TrackerInputBar (the autocomplete editor — see "The
-                      input bar" above), TrackerLogSidebar, TrackerTeamSidebar
-  pages/benchmark/    ChartCard (renders a sweep's four states), BenchmarkChart
-                      + BenchmarkChartSkeleton, ProgressBar — hand-rolled
-                      inline-SVG bar chart + determinate progress bar (no
-                      charting dependency); used by pages/BenchmarkingPage.tsx
-  store/trackerStore.ts  single-perspective session store for tracker mode —
-                      no hotseat flip, no command wizard; owns the authored
-                      script (committedTurns) and the live per-event preview
-e2e/                  Playwright suite (tracker-input.spec.ts) — see "Testing"
+  api/
+    client.ts              Typed API requests
+    types.ts               Manual copies of Rust DTOs
+  lib/
+    eventText.ts           Event tree to battle-log text
+    sprites.ts             Sprite lookup and cache
+    storage.ts             Browser-storage schemas
+    trackerGrammar.ts      Tracker completion rules
+  store/
+    battleStore.ts         Hotseat command flow
+    benchmarkStore.ts      Benchmark stream state
+    settingsStore.ts       Saved display settings
+    trackerStore.ts        Tracker history and preview state
+  pages/
+    benchmark/             Benchmark charts
+    simulate/              Battle controls and display
+    tracker/               Tracker controls and display
+e2e/                       Playwright tests
 ```
 
-## The Benchmark page
+`poke_rust/src/bin/server/dto.rs` is the DTO source.
+Update `src/api/types.ts` after a DTO change.
 
-Three sweeps — turn resolution, fog-of-war inference, and the game-tree solver
-— run **one after another** on the server, but report independently over one SSE
-stream: `progress` events tagged with their sweep throughout, then one `result`
-per sweep the moment it finishes. A `failed` event takes down only its own sweep;
-a single terminal `done` closes the stream.
+`tracker_parse.rs` is the tracker grammar source.
+`trackerGrammar.ts` supplies completion only.
+The server always validates tracker input.
 
-Sequential is the point. Running the sweeps concurrently finishes much sooner,
-but three CPU-bound sweeps sharing a machine report contended times that no
-longer reproduce `poke_rust/benches/RESULTS.md` — so the numbers on screen match
-the recorded ones, and per-sweep streaming is what keeps the page responsive
-instead.
+## Benchmark page
 
-That protocol is what the page's structure follows. `benchmarkStore` keeps
-`status`/`rows`/`progress`/`error` **per sweep** rather than one global blob, so
-each `ChartCard` renders its own progress bar and skeleton and fills in the
-moment its sweep lands — which matters because the solver sweep runs minutes
-longer than turn speed. Cards keep their footprint across all four states
-(`idle`/`running`/`done`/`failed`), so an early finisher doesn't reflow the grid
-under the ones still loading. Charts are laid out two-up on `lg:` and stack on
-narrow screens.
+`GET /api/benchmark` runs three sweeps:
 
-Each sweep is the same unbounded grid the offline `cargo bench` binaries run,
-so the whole thing takes several minutes and the progress bars are real
-backend-reported counts, not a fake timer.
+1. Turn resolution.
+2. Fog-of-war inference.
+3. Game-tree solving.
 
-Charts carry several numeric columns, not just a time. Column headers and row
-labels with a dotted underline have a `title` tooltip; the engine concepts
-behind the labels — the three pruning algorithms, the chance-node sampling
-modes, enumerate-vs-sample turn resolution, and the fog-of-war information
-baselines — are explained in `pages/benchmark/glossary.ts`, which is the single
-place that wording lives. If the behaviour of any of those changes in the
-engine, update the glossary with it.
+The server runs the sweeps in order.
+Concurrent sweeps would compete for CPU time and make results hard to compare.
+
+One SSE stream carries all results.
+Each event includes its sweep name.
+
+The stream uses these event types:
+
+- `progress` updates one sweep.
+- `result` completes one sweep.
+- `failed` fails one sweep.
+- `done` closes the stream.
+
+`benchmarkStore` keeps separate state for each sweep.
+Each chart can finish while another chart continues.
+
+The page keeps each card at a fixed size.
+This prevents layout changes during a run.
+
+`pages/benchmark/glossary.ts` defines benchmark terms.
+Update the glossary after a related engine change.
 
 ## Tracker mode
 
-Follows a real battle you're playing or watching elsewhere: instead of a move
-selector, you type what happened (`o1 switch garchomp`, `p1 thunderbolt o1
-45%`, `endofturn`, …) into a plain textarea and the server translates it into
-the same `InformationEvent`/fog-of-war machinery the Simulate page's inference
-engine already runs on. There is no simulated opponent and no per-slot command
-flow — `POST /api/tracker/{id}/events` is the only turn-advancing call, and it
-expects one or more complete turns (each ending in an `endofturn` line) in a
-single request.
+Tracker mode records a battle that occurs outside the simulator.
+The user types each observed event.
+The server converts the text to `InformationEvent` values.
+The inference engine then updates the belief.
 
-Because there's no opponent to simulate, `BattleView.p1`/`p2` for a tracker
-session are rendered straight from the fog-of-war belief on the Rust side (see
-`poke_rust/src/bin/server/tracker.rs`'s module doc) — the client-side handling
-is unchanged from battle mode: `TrackerScreen` reuses `PokemonHUD` and
-`FieldIndicators` as-is, and `TrackerLogSidebar` reuses `lib/eventText.ts`'s
-`renderLog` unchanged, since both are pure functions of `BattleView`/
-`TurnLogEntry[]` with no assumption baked in about where that data came from.
+Tracker mode has no simulated opponent.
+It has no move selector.
 
-### The input bar
+Submit complete turns to:
 
-`TrackerInputBar.tsx` is a floating, single-line, Minecraft-chat-style
-autocomplete editor — not a plain textarea. `lib/trackerGrammar.ts` mirrors
-`tracker_parse.rs`'s fixed keyword tables (verbs, statuses, cant-reasons,
-volatiles, weather/terrain, stat/effect tokens) to rank word-by-word
-suggestions client-side, with a Levenshtein fallback when nothing prefix-
-matches; species/move/ability suggestions come from `GET
-/api/tracker/{id}/completions`, scoped to the Pokémon actually in the match
-(both rosters' learnsets/ability pools — never the full dex). Item
-suggestions reuse the existing `lib/items.ts` catalog directly (items aren't
-species-constrained, so no round trip is needed).
+```text
+POST /api/tracker/{id}/events
+```
 
-Two commit tiers, matching the inference engine's own turn-atomic design (see
-`poke_rust/src/information/README.md`):
+Each turn must end with `endofturn` or `eot`.
 
-- **Per event** (`Enter`) — `POST /api/tracker/{id}/preview` runs a
-  Pass-1-only structural pass (`apply_structural_preview` on the Rust side) on
-  a disposable clone of the committed belief, so obvious facts (HP, revealed
-  species/moves, status/volatiles/boosts) render immediately as the user
-  types. It never mutates the session — Pass 2 onward (item/stat inference,
-  speed ordering, EV/IV back-solve, BCP) all reason about *absence* across a
-  whole turn, which is unsound on a still-in-progress one.
-- **Per turn / on edit** (`Shift+Enter`, or editing an already-committed
-  event) — the frontend owns the full authored script as `committedTurns` in
-  `trackerStore.ts` and resubmits it in full to `PUT
-  /api/tracker/{id}/history`, which resets to the session's initial
-  (pre-first-turn) belief and re-applies every turn through the real six-pass
-  pipeline. This one endpoint uniformly handles ending a turn, correcting a
-  past event (`ArrowUp` navigates the flat history — every line ever typed,
-  committed or still-drafted — for in-place editing), and popping the current
-  last committed turn back via `Shift+Escape` when the current draft is empty,
-  since none of those are actually different operations from the belief's
-  point of view. If a draft is already in progress, `Shift+Escape` clears it
-  first.
+The server renders both sides from the belief.
+The tracker reuses the normal battle display and log renderer.
 
-`tracker_parse.rs`'s module doc lists the current grammar's scope and known
-simplifications (e.g. every targeted move needs an explicit target slot;
-guaranteed effects cover a starter set of abilities/moves, not the full dex
-yet). `e2e/tracker-input.spec.ts` (Playwright) drives the bar end-to-end
-against the real server — autocomplete ranking/ghost-text, the two-tier
-commit model, editing a past turn and watching the belief recompute, and the
-Escape/Shift+Escape navigation contract.
+### Input editor
 
-### Tracker text grammar
+`TrackerInputBar.tsx` provides one-line completion.
+It suggests tracker keywords, species, moves, abilities, and items.
 
-Tracker input is line-oriented. A submission contains one or more complete
-turns, and every turn ends with `endofturn` (or `eot`). Blank lines and lines
-whose first non-whitespace character is `#` are ignored. Errors report the
-1-based input line; the server applies the whole submission to a scratch belief
-and commits nothing if any line or turn fails.
+The server supplies match-specific species, move, and ability choices.
+The frontend supplies item choices from `lib/items.ts`.
 
-Names and keywords are case-insensitive and ignore punctuation. For example,
-`SwordsDance`, `swords-dance`, and `swords_dance` are equivalent. Whitespace
-still separates tokens, so multiword names must be joined (`rockyhelmet`, not
-`rocky helmet`; `mr-mime`, not `mr mime`). A complete normalized dex name works
-for any species, move, ability, or item; the aliases below are conveniences.
+Press `Enter` to preview one event.
+The server applies structural facts to a temporary belief.
+The preview does not change the session.
+
+Press `Shift+Enter` to complete the turn.
+The frontend sends the full authored history.
+The server rebuilds the belief from the initial state.
+
+Use `ArrowUp` to edit an earlier event.
+The frontend resubmits the full history after the edit.
+
+Press `Shift+Escape` to remove the last complete turn.
+If a draft exists, the first press clears the draft.
+
+## Tracker grammar
+
+Input is line based.
+Blank lines are valid.
+A line that starts with `#` is a comment.
+
+Names and keywords ignore case and punctuation.
+Whitespace separates tokens.
+Join the words in a multiword name.
+
+For example, use `rockyhelmet` instead of `rocky helmet`.
 
 ```text
 submission  := turn+
-turn        := (event-line | blank-line | comment-line)* ("endofturn" | "eot")
+turn        := event-line* ("endofturn" | "eot")
 slot        := ("p" | "o") [positive-integer]
 hpspec      := <unsigned-integer>("%" | "hp")
 boostspec   := <stat><signed-integer> | <signed-integer><stat>
 ```
 
-`p` is the tracker owner's side and `o` is the opponent. Slot numbers are
-1-based from left to right; an omitted number means slot 1. Thus `p`, `p1`,
-`o`, and `o1` are valid, while doubles also uses `p2` and `o2`.
+`p` identifies the tracker owner.
+`o` identifies the opponent.
+Slot numbers start at 1.
+An omitted number means slot 1.
 
-Every occupied active slot on both sides must have an action in each ordinary
-turn: a move, switch, cant reason, `mustrecharge`, or explicit `pass`. A slot
-does not need another action if it was knocked out before acting or the battle
-ended. A replacement-only turn requires switches only for slots whose fainted
-occupants have healthy reserves; an already fainted slot with no reserve can
-also be omitted.
+During a normal turn, each occupied slot needs one action.
+An action can be a move, switch, failure reason, recharge, or pass.
 
-#### Event lines
+A knocked-out slot does not need an action.
+A replacement turn needs switches only for slots that have a healthy reserve.
 
-| Form | Meaning |
+### Event lines
+
+| Form | Result |
 |---|---|
-| `leads [p\|o] <species>... [p\|o] <species>...` | Send out one or both sides, left to right, on a single line: `leads p tyranitar raichu o charizard aerodactyl`. Any digit on `p1`/`o1` is ignored — a side marker always means "this whole side". Opening ability reveals should immediately follow the leads line. |
-| `[slot] switch <species> [hpspec]` | Switch one slot. `switchin` and `sendout` are aliases. HP defaults to the known value for your roster and 100% for a newly seen opponent. |
-| `[slot] mega [species-or-suffix]` | Mega Evolve. `megaevolve` and `megaevolution` are aliases. The form may be omitted only if the active species is known and has exactly one Mega; a suffix such as `y` disambiguates Charizard. |
-| `[slot] tera <type>` | Terastallize into a type. `terastallize` and `terastallized` are aliases. |
-| `[slot] <move> [target-or-effect]...` | Record a move and its observed results; see “Move lines” below. |
-| `[slot] <ability>` | Reveal an ability, such as `o1 intimidate`. |
-| `[slot] <item>` | Reveal a held item without losing it, such as `o1 leftovers`. |
-| `[slot] <item-verb> <item>` | Record an item being lost, consumed, or gained; see the item verbs below. |
-| `[slot] hp <hpspec>` | Record HP outside a move line, usually residual damage or healing. |
-| `[slot] <cant-reason>` | Record why the slot could not act. This form must contain exactly two tokens. |
-| `[slot] mustrecharge` | Record the move-created must-recharge state. This is distinct from the `recharge` cant reason on the following turn. |
-| `[slot] charging <move>` | Record the charge turn of a two-turn move. Equivalent to the move line `[slot] <move> charging`, which is the preferred form; see “Charge turns” below. |
-| `[slot] pass` | Explicitly record no action, including a skipped action after the battle has already ended. |
-| `weather <weather>` | Set or clear the weather. |
-| `terrain <terrain>` | Set or clear the terrain. |
+| `leads [p\|o] <species>...` | Send one side into battle |
+| `[slot] switch <species> [hpspec]` | Switch one slot |
+| `[slot] mega [species-or-suffix]` | Mega Evolve |
+| `[slot] tera <type>` | Terastallize |
+| `[slot] <move> [target-or-effect]...` | Record a move |
+| `[slot] <ability>` | Reveal an ability |
+| `[slot] <item>` | Reveal a held item |
+| `[slot] <item-verb> <item>` | Change a held item |
+| `[slot] hp <hpspec>` | Record HP outside a move |
+| `[slot] <cant-reason>` | Record a failed action |
+| `[slot] mustrecharge` | Add a recharge state |
+| `[slot] charging <move>` | Record a charge turn |
+| `[slot] pass` | Record no action |
+| `weather <weather>` | Change or clear weather |
+| `terrain <terrain>` | Change or clear terrain |
 
-A single `leads` line covering both sides parses directly to one simultaneous
-switch event; a turn that instead spells the two sides out as separate
-consecutive `leads p ...` / `leads o ...` lines is merged into the same shape.
-Ability lines for those entrants that immediately follow are nested into that
-event, preserving entry-ability and ability-absence inference.
+One `leads` line can include both sides:
 
-#### Move lines
+```text
+leads p tyranitar raichu o charizard aerodactyl
+```
 
-A move line starts with its user and move. Every targeted move must name each
-target explicitly, even in singles — the one exception being a charge turn,
-which may name none (see “Charge turns” below):
+Place entry-ability lines directly after the leads line.
+The parser attaches those abilities to the switch event.
+
+### Move lines
+
+A move line starts with the user and move.
+Name each target.
+A charge turn can omit its target.
 
 ```text
 p1 thunderbolt o1 45% par
@@ -252,45 +247,45 @@ p1 rockslide o1 62% o2 miss
 o1 tackle p1 88hp p1 helmet o1 91%
 ```
 
-Reading left to right, a slot token changes the current attachment point. Each
-following effect belongs to the most recently named slot until another slot is
-seen. Naming a non-user slot also adds it to the move's target list. Repeating a
-slot is allowed, which is how multi-hit HP readings are represented.
+A slot token selects the current effect target.
+Later effects apply to that slot.
+Another slot token changes the effect target.
 
-| Effect token | Accepted forms |
+Repeat a slot to record multiple hits.
+
+| Token | Result |
 |---|---|
-| Critical hit | `crit` |
-| Miss | `miss`, `missed` |
-| Immunity | `immune` |
-| Protection/block | `block`, `blocked` |
-| Whole-move failure | `fail`, `failed` |
-| Charge turn of a two-turn move | `charging` |
-| HP after the effect | `45%` for masked percent HP, or `97hp` for exact HP |
-| Stat change | `atk+1`, `+1atk`, `spe-2`, `-2spe`, and the stat aliases below |
-| Major status inflicted | Any status word below |
-| Volatile started | Any volatile word below |
-| Ability revealed | Any complete normalized ability name |
-| Item revealed | Any complete normalized item name or item alias |
-| Item changed | An item verb followed by an item, e.g. `ate sitrus` |
+| `crit` | Critical hit |
+| `miss`, `missed` | Miss |
+| `immune` | Immunity |
+| `block`, `blocked` | Protection |
+| `fail`, `failed` | Complete move failure |
+| `charging` | Charge turn |
+| `45%`, `97hp` | New HP |
+| `atk+1`, `-2spe` | Stat-stage change |
+| Status word | Major status |
+| Volatile word | Volatile status |
+| Ability name | Ability reveal |
+| Item name | Item reveal |
+| Item verb and item | Item change |
 
-An HP token is classified by comparing it with that slot's believed HP at the
-start of the submitted batch: lower is damage, higher is healing, and unchanged
-is a direct HP set. If the old and new representations differ (exact HP versus
-percent) or no old reading exists, it is treated as damage. Own-side readings
-should normally use exact `hp`; opponent readings should normally use `%`. If
-HP direction in a later turn depends on an earlier turn's new value, submit the
-turns separately so the second parse sees the updated belief.
+The parser compares an HP value with the current belief.
+A lower value means damage.
+A higher value means healing.
+An equal value means a direct HP set.
 
-`miss`, `immune`, or `blocked` suppresses guaranteed target effects for that
-target. `fail` suppresses guaranteed effects for the entire move. Chance-based
-effects must be typed when observed: for example, include `par` when
-Thunderbolt actually paralyzes, but omit it otherwise.
+Use exact `hp` values for the owner.
+Use `%` values for the opponent.
 
-#### Charge turns
+Submit turns separately when a later HP direction depends on an earlier turn.
 
-The first turn of a two-turn move is a normal move line with a `charging`
-token, and — unlike every other targeted move — it may name **no target at
-all**, because the charge step usually does not reveal one:
+`miss`, `immune`, and `blocked` stop guaranteed effects for one target.
+`fail` stops guaranteed effects for the full move.
+Type a random secondary effect only when it occurs.
+
+### Charge turns
+
+Add `charging` to the first turn of a two-turn move:
 
 ```text
 o1 solarbeam charging
@@ -302,152 +297,137 @@ p2 substitute
 endofturn
 ```
 
-Give a target if you do know it. `charging` takes no argument: the move being
-charged is always the line's own move, so repeating it (`o1 solarbeam charging
-solarbeam`) is accepted but pointless, and naming a different move is an error.
-`o1 charging solarbeam` is also accepted and means the same thing.
+The charge turn can omit its target.
+The release turn uses a normal move line.
 
-`charging` suppresses the move's own effects for that turn — they belong to the
-release turn — and adds the charge-turn boost for the moves that have one
-(Meteor Beam and Electro Shot raise Special Attack, Skull Bash raises Defense).
-Geomancy is not one of those: its boosts land when it fires.
+`charging` stops release effects during the charge turn.
+The server still adds a guaranteed charge-turn boost.
 
-Because the suppression keys on the token rather than on the move, a use that
-skips the charge entirely needs no special handling — a Power Herb Geomancy,
-Solar Beam in harsh sun, or Electro Shot in rain is just an ordinary one-turn
-move line with no `charging` token. Meteor Beam, Electro Shot, and Skull Bash
-retain their charge-turn boost when Power Herb (or rain for Electro Shot)
-makes them one-turn moves. The tracker records pure charge state in the belief,
-so it adds that boost to a one-turn line but not again on the later release.
+Meteor Beam and Electro Shot raise Special Attack.
+Skull Bash raises Defense.
+Geomancy applies its boosts on release.
 
-A slot that spent its turn charging counts as having acted, and a move aimed at
-a slot that is mid-Fly, Dig, Dive, Bounce, Phantom Force, Shadow Force, or Sky
-Drop has its guaranteed effects suppressed automatically — you do not need to
-type `miss`.
+Do not use `charging` when Power Herb or weather skips the charge turn.
 
-#### Accepted words and aliases
+### Accepted words
 
-- Stats: `atk`/`attack`; `def`/`defense`/`defence`;
-  `spa`/`spatk`/`spattack`/`specialattack`;
-  `spd`/`spdef`/`spdefense`/`specialdefense`; `spe`/`speed`;
-  `acc`/`accuracy`; `eva`/`evasion`/`evasiveness`.
+Stats:
 
-- Major statuses: burn (`brn`, `burn`, `burned`); poison (`psn`, `poison`,
-  `poisoned`); toxic poison (`tox`, `badpoison`, `badlypoisoned`, `toxic`);
-  paralysis (`par`, `para`, `paralyzed`, `paralysis`, `paralysed`); sleep
-  (`slp`, `sleep`, `asleep`); freeze (`frz`, `frozen`, `freeze`).
+- `atk`, `attack`
+- `def`, `defense`, `defence`
+- `spa`, `spatk`, `spattack`, `specialattack`
+- `spd`, `spdef`, `spdefense`, `specialdefense`
+- `spe`, `speed`
+- `acc`, `accuracy`
+- `eva`, `evasion`, `evasiveness`
 
-- Weather: rain (`rain`, `raindance`, `drizzle`); heavy rain (`heavyrain`,
-  `primordialsea`); sandstorm (`sand`, `sandstorm`); snow (`snow`, `hail`);
-  sun (`sun`, `sunnyday`, `sunny`, `drought`); extreme sun (`extremesun`,
-  `desolateland`, `harshsunlight`); strong winds (`strongwinds`,
-  `deltastream`). Use `none` or `clear` to remove weather.
+Major statuses:
 
-- Terrain: Electric, Grassy, Misty, and Psychic accept either the short name
-  (`electric`) or full name (`electricterrain`). Use `none` or `clear` to
-  remove terrain.
+- Burn: `brn`, `burn`, `burned`
+- Poison: `psn`, `poison`, `poisoned`
+- Toxic poison: `tox`, `badpoison`, `badlypoisoned`, `toxic`
+- Paralysis: `par`, `para`, `paralyzed`, `paralysis`, `paralysed`
+- Sleep: `slp`, `sleep`, `asleep`
+- Freeze: `frz`, `frozen`, `freeze`
 
-- Item verbs: lost (`loses`, `lost`, `knockedoff`); consumed (`consumes`,
-  `consumed`, `ate`, `eats`, `used`); gained (`gains`, `gained`, `tricked`,
-  `switcheroo`, `recycles`).
+Weather:
 
-- Item aliases: `sitrus`, `lum`, `chesto`, `lefties`/`levs`, `helmet`, `lo`,
-  `scarf`, `specs`, `band`, `boots`, `wp`, `av`, and `sash` expand to Sitrus
-  Berry, Lum Berry, Chesto Berry, Leftovers, Rocky Helmet, Life Orb, the three
-  Choice items, Heavy-Duty Boots, Weakness Policy, Assault Vest, and Focus
-  Sash respectively.
+- Rain: `rain`, `raindance`, `drizzle`
+- Heavy rain: `heavyrain`, `primordialsea`
+- Sandstorm: `sand`, `sandstorm`
+- Snow: `snow`, `hail`
+- Sun: `sun`, `sunnyday`, `sunny`, `drought`
+- Extreme sun: `extremesun`, `desolateland`, `harshsunlight`
+- Strong winds: `strongwinds`, `deltastream`
+- Clear weather: `none`, `clear`
 
-- Cant reasons: `flinch`/`flinched`; `fullpara`/`fullyparalyzed`/
-  `fullparalysis`/`fullyparalysed`; `sleep`/`asleep`/`slp`;
-  `frozen`/`frz`/`freeze`; `recharge`/`mustrecharge`/`recharging`;
-  `taunt`/`taunted`; `disable`/`disabled`; `confusion`/`confused`;
-  `imprison`/`imprisoned`; `attract`/`infatuated`/`infatuation`;
-  `bound`/`trapped`; `throatchop`/`throatchopped`; `torment`/`tormented`;
-  `focuspunch`; `gravity`; `healblock`; `encore`/`encored`; `skydrop`; and
-  `beakblast`.
+Terrain accepts its short or full name.
+For example, use `electric` or `electricterrain`.
+Use `none` or `clear` to remove terrain.
 
-- Volatiles: `confusion`/`confused`, `leechseed`/`seeded`,
-  `taunt`/`taunted`, `flashfire`, `focusenergy`, `aquaring`,
-  `attract`/`infatuated`, `curse`/`cursed`, `torment`/`tormented`, `yawn`,
-  `saltcure`, `tarshot`, `minimize`/`minimized`, `ingrain`, `magnetrise`,
-  `protect`/`protected`, `endure`/`enduring`, `kingsshield`, `banefulbunker`,
-  `spikyshield`, `silktrap`, `obstruct`, `burningbulwark`, `destinybond`,
-  `grudge`, `embargo`, `healblock`, `imprison`, `electrify`, `powder`,
-  `syrupbomb`, `telekinesis`, `smackdown`, `uproar`, `roost`, `rage`,
-  `ragepowder`, `followme`, `magiccoat`, `snatch`, `laserfocus`,
-  `miracleeye`, `foresight`, `octolock`, `noretreat`, `gastroacid`,
-  `sparklingaria`, `glaiverush`, `charge`/`charged`,
-  `defensecurl`/`defensecurled`, `helpinghand`, `powertrick`,
-  `forestscurse`, `throatchop`/`throatchopped`,
-  `mustrecharge`/`recharging`, `substitute`/`sub`, `encore`/`encored`, and
-  `disable`/`disabled`.
+Item verbs:
 
-#### Effects filled in automatically
+- Lost: `loses`, `lost`, `knockedoff`
+- Consumed: `consumes`, `consumed`, `ate`, `eats`, `used`
+- Gained: `gains`, `gained`, `tricked`, `switcheroo`, `recycles`
 
-Users type observations, while the server adds consequences guaranteed by
-those observations:
+Common item aliases:
 
-- A revealed supported entry ability adds its deterministic reaction:
-  Intimidate, weather/terrain setters, Intrepid Sword, Dauntless Shield,
-  unambiguous Download, unambiguous Trace, and known Defiant/Competitive
-  reactions to opposing stat drops. The ordinary ability reveal itself must
-  still be typed. Mega Evolution automatically reveals its Mega form's fixed
-  ability and applies the same reactions.
-- A move adds its always-on self boost and all structured 100%-chance move-dex
-  effects, including guaranteed boosts, status, weather, terrain, and side
-  conditions. Random secondaries are never guessed.
-- Any recorded HP value of zero adds the corresponding faint event.
+- `sitrus`, `lum`, `chesto`
+- `lefties`, `levs`, `helmet`, `lo`
+- `scarf`, `specs`, `band`
+- `boots`, `wp`, `av`, `sash`
 
-Recoil, drain, reactive item/ability effects, and other observed consequences
-that are not guaranteed by the structured move data must be written explicitly.
+The server also accepts normalized item names.
 
-#### Phase-1 limits
+For failure reasons and volatile aliases, read the tables in `tracker_parse.rs`.
+That file is the authoritative list.
 
-The grammar has dedicated forms for status cures, volatile endings,
-Encore/Disable move payloads, Stockpile levels, side conditions,
-pseudo-weather, boost copying/inversion, Illusion ending, hit counts, and
-explicit `@slot` targets. It still cannot represent every payload-bearing
-volatile (such as Choice Lock or Substitute HP), and slot-condition payloads
-such as Wish, Future Sight, and Doom Desire are not synthesized. Form changes
-other than Mega/Tera/Illusion and Transform remain unsupported. Unrecognized
-input is rejected rather than guessed.
+### Automatic effects
 
-Tracker fuzz coverage lives in the server binary tests. The default sweep runs
-deterministic full battles through simulator events -> tracker text -> parser ->
-the production submission pipeline. Seeds are replayable and scalable:
+The server adds deterministic results that follow from a typed observation.
+
+It adds supported entry-ability effects.
+Examples include Intimidate, weather setters, terrain setters, Intrepid Sword, and Dauntless Shield.
+
+Mega Evolution reveals a fixed Mega ability.
+The server then adds that ability's deterministic entry effect.
+
+The server adds structured move effects with a 100% chance.
+These can include boosts, status, weather, terrain, and side conditions.
+
+The server never guesses a random secondary effect.
+The user must type that effect.
+
+An HP value of zero adds a faint event.
+
+Type recoil, drain, reactive items, and reactive abilities when you observe them.
+
+### Limits
+
+The grammar does not represent every engine event.
+It rejects unknown input.
+
+Current limits include these cases:
+
+- Payloads for some volatile statuses.
+- Wish, Future Sight, and Doom Desire payloads.
+- Form changes other than Mega Evolution, Tera, Illusion, and Transform.
+
+Run the tracker fuzz tests:
 
 ```sh
 cd poke_rust
 cargo test --bin server randomized_tracker_text_round_trips_do_not_contradict
-POKERUST_TRACKER_FUZZ_ITERS=1000 cargo test --release --bin server randomized_tracker_text_round_trips_do_not_contradict -- --nocapture
-POKERUST_TRACKER_FUZZ_SEED_START=42 POKERUST_TRACKER_FUZZ_ITERS=1 POKERUST_TRACKER_FUZZ_REPLAY=1 cargo test --release --bin server randomized_tracker_text_round_trips_do_not_contradict -- --nocapture
 ```
 
-The stronger truth-subset oracle is opt-in, matching the inference fuzz suite
-while its shared inference-engine over-narrowing families remain open:
-`cargo test --release --bin server -- --ignored randomized_tracker_text_beliefs_stay_sound_subset`.
+Set `POKERUST_TRACKER_FUZZ_ITERS` to increase the test count.
+Set `POKERUST_TRACKER_FUZZ_SEED_START` to replay a seed range.
+Set `POKERUST_TRACKER_FUZZ_REPLAY=1` to show a replay.
 
-## Notes
+Run the slower soundness test:
 
-- **Hotseat model**: the server never holds half a turn. The frontend collects
-  P1's full command set, flips to P2, then submits both together.
-- **Doubles targeting**: legal targets come from the server's pre-expanded
-  command options — the client has no targeting rules. A multi-target move
-  parks in `pendingAttack` and the Arena highlights clickable target slots.
-- **Damage rolls**: the server resolves turns with the engine's sample mode
-  (`simulator::sample_turn`) — one weighted trajectory instead of the full
-  outcome tree — so every format runs at full 16-roll granularity. The
-  `probability` in the turn response is the joint probability of the sampled
-  trajectory.
-- **Battle restore**: the active battle id lives in sessionStorage; a page
-  refresh re-fetches state + full event log from `GET /api/battles/{id}`.
-  Server sessions are in-memory — restarting the server loses battles.
-- **Sprites**: resolved through the PokeAPI `pokemon/{slug}` endpoint with an
-  exception table for forme names, cached in localStorage. Unknown slugs fall
-  back to the species endpoint's default variety, then progressively strip
-  forme suffixes (Champions-only megas render the base species sprite); total
-  failures show a gray Pokéball placeholder.
-- **Item catalog**: `lib/items.ts` is a static list — exactly the Pokémon
-  Champions held-item pool (general items, Mega Stones, berries) — not a
-  PokeAPI fetch. Item sprite slugs still resolve against the PokeAPI sprites
-  repo; Champions-only Mega Stones have no sprite and render label-only.
+```sh
+cargo test --release --bin server -- --ignored randomized_tracker_text_beliefs_stay_sound_subset
+```
+
+## Implementation notes
+
+The hotseat client collects all P1 commands before it collects P2 commands.
+It sends both command sets in one request.
+
+The server supplies all legal targets.
+The client does not implement target rules.
+
+The server uses `simulator::sample_turn`.
+It returns one weighted trajectory with 16 damage rolls.
+
+The active battle identifier uses session storage.
+A page reload requests the state and event log again.
+A server restart removes all in-memory sessions.
+
+The frontend gets sprites from PokeAPI and caches their URLs.
+If all lookups fail, it shows a gray Poké Ball.
+
+`lib/items.ts` contains the Champions held-item list.
+The frontend does not get this list from PokeAPI.

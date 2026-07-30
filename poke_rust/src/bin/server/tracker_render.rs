@@ -1,44 +1,24 @@
-//! The inverse of `tracker_parse.rs`: renders a real (masked) engine event
-//! stream back into tracker-syntax text, for the round-trip fidelity fuzz
-//! test (see `tracker_render_fuzz` below and the plan this implements —
-//! "if I have a simulated run and manually input the events that are
-//! happening into the tracker then it should be accurately tracking the
-//! state of the game").
+//! Converts a masked engine event stream to tracker text.
+//! Round-trip tests use this module to check tracker accuracy.
 //!
 //! # Scope
 //!
-//! The tracker's own grammar is a deliberately-scoped "Phase 1 MVP" subset
-//! (see `tracker_parse.rs`'s module doc) — it cannot express every
-//! `EventKind` the engine can produce (no grammar exists yet for e.g.
-//! `SlotConditionStart`/`FormeChange`/`Transformed`/`IllusionEnded`). This
-//! renderer covers the common, high-value subset a real tracker session
-//! actually exercises (moves with damage/status/boost/volatile secondaries,
-//! switches, weather/terrain, abilities, items, mega evolution,
-//! Terastallization) and returns `Err` for anything else, rather than
-//! guessing at unsupported syntax. The randomized gating sweep uses a
-//! renderer-complete battle corpus and fails on an unsupported event;
-//! unsupported engine vocabulary remains an explicit grammar-expansion task.
+//! The tracker grammar does not represent every `EventKind`.
+//! The renderer supports common moves, switches, field effects, abilities, items, Mega Evolution, and Terastallization.
+//! It returns `Err` for unsupported events.
+//! The randomized test corpus contains only supported events.
 //!
 //! # Avoiding double-application
 //!
-//! A real user never re-types a move's *guaranteed* consequences — Thunder
-//! Wave's paralysis, Stealth Rock's hazard, an ability's on-reveal effect —
-//! because `tracker_effects::augment_turn` re-synthesizes them automatically
-//! once the text is re-parsed. If this renderer echoed those reactions back
-//! as literal tokens too, re-augmenting the rendered text would apply them
-//! TWICE (double boosts, re-set statuses, etc.) — unsound and unrealistic.
-//! `reactions_requiring_explicit_render` closes this gap: it diffs a real
-//! event's reactions against what `augment_with_guaranteed_effects` would
-//! synthesize for a bare (reaction-less) clone of the same event, and only
-//! the leftover (non-synthesizable) reactions get rendered as explicit text
-//! — exactly mirroring how a real tracker user only types what they'd
-//! actually have to type by hand.
+//! Users do not enter guaranteed effects.
+//! `tracker_effects::augment_turn` adds them after parsing.
+//! The renderer must omit these effects to prevent duplicate application.
+//! `reactions_requiring_explicit_render` compares actual reactions with generated reactions.
+//! It renders only reactions that the generator cannot add.
 //!
-//! Not yet wired into any HTTP route — today this module drives the
-//! hand-authored and randomized tracker-fidelity tests below, hence the
-//! blanket `dead_code` allow (a normal, non-test build has no other caller).
-//! A natural next step is exposing this as a real
-//! "narrate this simulated battle as tracker text" feature.
+//! No HTTP route uses this module.
+//! It supports the hand-written and randomized tracker tests.
+//! Normal builds therefore permit unused code here.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

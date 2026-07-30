@@ -1,45 +1,36 @@
-//! Collapse a fog-of-war belief into one concrete, playable `BattleState`.
+//! Converts a fog-of-war belief to one playable `BattleState`.
 //!
-//! The inference engine produces *bounds*: this Pokemon's item is not a Choice
-//! Scarf, its Speed lies in 130..=152, it knows Protect and three unknown moves.
-//! A Nash solver or bot cannot play against bounds — `simulate_turn` needs an
-//! actual team. The determinizer picks one world consistent with those bounds,
-//! biased toward what people actually run, using the usage cache in `crate::meta`.
+//! Inference produces sets and numeric bounds.
+//! `simulate_turn` requires one complete team.
+//! The determinizer samples a permitted world from the usage cache in `crate::meta`.
 //!
-//! # What "consistent" means here
+//! # Consistency
 //!
-//! Every choice is filtered through the belief before the usage weights are
-//! applied, so no sampled world can contradict an observation. That property is
-//! independent of the meta data being good: bad weights make worlds *unlikely*,
-//! never *illegal*. `information::subset_check` is the external check on this,
-//! and `check_determinization` covers the three blind spots it documents
-//! (EVs/IVs, HP, and revealed move slots).
+//! The belief filters each choice before the code applies usage weights.
+//! Thus, poor usage data changes probability but does not permit an invalid world.
+//! `information::subset_check` checks this rule.
+//! `check_determinization` also checks EVs, IVs, HP, and revealed move slots.
 //!
-//! # Sample-only, by design
+//! # Sampling
 //!
-//! There is no enumerate mode. Per Pokemon the cache admits up to 10 items x 3
-//! abilities x 10 natures x 12 spreads x C(10,4) move sets — roughly 750k worlds
-//! — and four opponents cross-multiply past 10^23. Enumeration was never on the
-//! table, so the API is a single seeded draw. `probability` on the result is the
-//! joint probability of the *draw sequence*, which is a lower bound on the
-//! probability of the resulting state (distinct draws can coalesce to the same
-//! `BattleState`) and is comparable only between draws from the same belief.
-//! This mirrors the contract `simulator::sample_turn` already carries.
+//! The API makes one seeded draw and does not enumerate worlds.
+//! One Pokémon can have about 750,000 permitted builds.
+//! Four opponents can produce more than 10^23 combinations.
 //!
-//! # The independence assumption
+//! `probability` is the joint probability of the draw sequence.
+//! Different draw sequences can produce the same state.
+//! Compare probabilities only between draws from one belief.
 //!
-//! Choices are drawn independently given the species:
-//! `P(item)·P(ability)·P(nature)·P(spread)·P_CP(moves)`. The cache reports only
-//! marginals, so nothing else is available. Two consequences worth knowing:
-//! nature and spread really are correlated in play (Bold + 252 Atk is a build no
-//! one runs), and item constrains moves (Choice Scarf + Swords Dance likewise).
+//! # Independence
 //!
-//! The first is modelled. `nature_spread_coherence` damps pairs whose nature
-//! fights their investment, applied *within* each nature's row of the joint
-//! table rather than across it — so it reshapes `P(spread | nature)` and leaves
-//! `P(nature)` at the rate the cache reports, which is the one number the usage
-//! data actually pins down. The second is unmodelled. Neither is a soundness
-//! bug: both are biases in *which* legal world you get.
+//! The sampler treats item, ability, nature, spread, and moves as independent for one species.
+//! The cache contains only marginal rates.
+//! Real builds can contain correlations that the cache does not describe.
+//!
+//! `nature_spread_coherence` reduces the weight of conflicting nature and spread pairs.
+//! It keeps each reported nature rate unchanged.
+//! The sampler does not model item and move correlations.
+//! These limits affect selection probability, not soundness.
 
 use std::collections::{HashMap, HashSet};
 

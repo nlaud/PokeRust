@@ -20,54 +20,53 @@ pub enum Unknown<T> {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PokemonHP {
-    Number(u16), //Allies use number
-    Percent(u8), //Opponents use percent
+    Number(u16), // Allies use an exact value.
+    Percent(u8), // Opponents use a percentage.
 }
 
-/// Selects the starting fog-of-war baseline for an opponent's Pokémon at team preview.
-/// `PerfectInformation` means no belief is tracked at all (the server keeps `belief =
-/// None` and ships ground truth) — this variant exists for completeness/testing only;
-/// `from_opponent_open_sheet` is never actually invoked with it in production.
+/// Selects the initial opponent information at team preview.
+/// `PerfectInformation` does not track a belief.
+/// The variant exists for tests and complete matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InformationMode {
     PerfectInformation,
-    /// Only the opponent's species are visible at team preview (the traditional VGC/
-    /// Champions competitive format); moves/item/ability/nature/EVs/IVs/Tera type all
-    /// stay fully unknown until revealed through play.
+    /// Shows opponent species at team preview.
+    /// Battle events can reveal all other data.
     ClosedTeamSheet,
-    /// Species/ability/item/moves/Tera type revealed up front (like a real VGC open
-    /// team sheet); nature/EVs/IVs/exact stats still hidden.
+    /// Shows species, ability, item, moves, and Tera type at team preview.
+    /// Nature, EVs, IVs, and exact stats remain hidden.
     OpenTeamSheet,
-    /// `OpenTeamSheet` plus the Pokémon's nature.
+    /// Shows the open team sheet and nature.
     OpenTeamSheetNatures,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnknownPokemonState {
-    pub possible_mon_id: Unknown<u8>, //1:1 with species if there is only 1 of each pokemon
+    pub possible_mon_id: Unknown<u8>, // Matches species when each species is unique.
     pub fainted: bool,
     pub possible_species: Unknown<Species>,
-    pub possible_types: Unknown<Vec<PokemonType>>, //These two fields correspond 1:1
+    pub possible_types: Unknown<Vec<PokemonType>>, // Matches `possible_species`.
     pub is_tera: bool,
     pub is_mega: bool,
 
     pub level: u8,
     pub hp: PokemonHP,
-    pub known_moves: [Option<PokemonMove>; 4], //None = We don't know this move
-    pub move_pp: [i8; 4],                      //-1 = We don't know this move's PP
-    pub max_pp: [i8; 4],                       //-1 = We don't know this move's max PP
+    pub known_moves: [Option<PokemonMove>; 4], // `None` means that the move is unknown.
+    pub move_pp: [i8; 4],                      // `-1` means that the current PP is unknown.
+    pub max_pp: [i8; 4],                       // `-1` means that the maximum PP is unknown.
     pub item: Unknown<Item>,
-    /// The last item consumed by this Pokémon (set when eating a Berry or consuming an item).
-    /// Used by Harvest to restore a Berry, and Recycle to recover any consumed item.
-    /// Not set for items lost via Knock Off, theft, or other non-consumption means.
+    /// Stores the last item that this Pokémon consumed.
+    /// Harvest and Recycle use this item.
+    /// Item removal and theft do not set this field.
     pub consumed_item: Option<Item>,
-    /// Cud Chew delayed re-eat: `Some((berry, armed))`.
-    /// `armed=false` means one EOT has not yet passed; `armed=true` means the re-eat fires
-    /// this EOT. Cleared on switch-out or when the re-eat fires.
+    /// Stores Cud Chew state as `Some((berry, armed))`.
+    /// `false` waits for one end-of-turn phase.
+    /// `true` consumes the Berry in the current phase.
+    /// A switch or consumption clears the state.
     pub cud_chew_pending: Option<(Item, bool)>,
-    /// True once this Pokémon's held item has been consumed or removed while it was on the
-    /// field, and no replacement item has been gained since. Powers Unburden's ×2 Speed.
-    /// Cleared on switch-out and whenever an item is gained.
+    /// Records whether this Pokémon lost its item while active.
+    /// Unburden doubles Speed while this field is true.
+    /// A switch or new item clears the field.
     pub item_lost: bool,
     /// Item revealed when it was taken or knocked off (Knock Off, Thief loser side, Fling).
     /// Not set for consumed items (use `consumed_item`) or Trick/Switcheroo (use `item`).

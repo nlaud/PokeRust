@@ -1,21 +1,15 @@
-//! Deciding how much of a turn's outcome distribution the search will look at.
+//! Selects the turn outcomes that the search examines.
 //!
-//! `simulate_turn` hands back every possible result of a joint action with its
-//! probability, and that fan-out is what makes deep search expensive: the tree
-//! multiplies by the branch count at every ply. One singles turn at 16 damage
-//! rolls with crits enabled returns over five hundred successors, so an honest
-//! depth-3 search of it is out of reach no matter how good the pruning is.
+//! `simulate_turn` returns each outcome and its probability.
+//! Each search depth multiplies the tree by the outcome count.
+//! One 16-roll singles turn can return more than 500 outcomes.
 //!
-//! This module is the knob for that trade. `Enumerate` is exact and shallow;
-//! everything else buys depth by looking at less of the distribution, and each
-//! is wrong in a different, documented way. None of them is a default that
-//! quietly degrades accuracy — the search reports the discarded mass so a caller
-//! can see what it paid.
+//! `Enumerate` keeps the exact distribution but limits practical depth.
+//! Other modes discard outcomes to permit more depth.
+//! The search reports the discarded probability.
 //!
-//! **`simulate_turn` already returns branches sorted by descending
-//! probability** — its last step is `coalesce_branches`, which sorts, and the
-//! `observer: None` path the solver uses does not reorder afterwards. So
-//! `TopK` is a truncation, not a selection: no heap, no partial sort, no cost.
+//! `simulate_turn` sorts outcomes by decreasing probability.
+//! `TopK` takes the first outcomes without another sort.
 
 use crate::simulator::helpers::sample_one_weighted;
 

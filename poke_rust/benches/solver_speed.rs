@@ -1,73 +1,52 @@
-//! Game-tree solver benchmark: sweeps the three simultaneous-move algorithms
-//! (backward induction, serialized alpha-beta bounds, double oracle) across
-//! search depth, damage-roll count and chance-node policy, in singles and
-//! doubles, over the real teamsheets in `../teamsheets/`.
+//! Measures the three simultaneous-move solver algorithms.
+//! It varies search depth, damage rolls, chance mode, and battle format.
+//! It uses the teamsheets in `../teamsheets/`.
 //!
 //! Run from `poke_rust/`:
 //! ```sh
 //! cargo bench --bench solver_speed
 //! ```
 //!
-//! The implementation lives in `poke_rust::benchmarking::run_solver` so the web
-//! server's benchmark endpoint can drive the identical sweep; this file is only
-//! the table printer.
+//! `poke_rust::benchmarking::run_solver` implements the test.
+//! The web endpoint uses the same function.
+//! This file prints the result table.
 //!
 //! ## Reading the table
 //!
-//! **`turns` is the column that matters.** A `simulate_turn` call costs
-//! hundreds of microseconds while a matrix LP costs single-digit microseconds,
-//! so a configuration's wall-clock time is very nearly its turn count times a
-//! constant, and `lps` is nearly free either way. `cells` versus `total` is what
-//! the pruning actually bought: backward induction evaluates every cell by
-//! definition, so its ratio is 1.00, and anything double oracle saves shows up
-//! directly there.
+//! `turns` counts the expensive `simulate_turn` calls.
+//! `lps` counts the faster matrix linear programs.
+//! `cells` counts evaluated cells, and `total` counts all cells.
+//! Backward induction evaluates every cell.
 //!
-//! ## Why cells are skipped, and why pairing counts differ
+//! ## Omitted tests
 //!
-//! The search tree grows as `(actions² · branches)` per ply, which spans three
-//! orders of magnitude across this grid. Cells predicted to exceed
-//! `MAX_ESTIMATED_TURNS` are not attempted and print their reason instead of a
-//! time. The rest each get a fixed turn-resolution budget spent on as many
-//! teamsheet pairings as fit, so cheap cells average over many matchups and
-//! expensive ones over few — the `pairs` column reports which. A wall-clock stop
-//! per cell backstops the estimate being wrong.
+//! The search tree grows by `(actions² · branches)` at each depth.
+//! The benchmark omits a test above `MAX_ESTIMATED_TURNS`.
+//! Other tests use a fixed turn budget.
+//! The `pairs` column gives the number of tested teamsheet pairs.
+//! A time limit stops a test when the estimate is too low.
 //!
-//! Doubles is capped to one ply and to a bounded joint-action set (the `cap`
-//! column). Two slots choosing together produce a few hundred joint actions and
-//! a matrix with tens of thousands of cells, every one of them a turn
-//! resolution; without the cap the doubles rows would measure nothing but that.
-//! A capped solve is an equilibrium over a subset of the real options, so those
-//! rows are a cost measurement, not a quality one.
+//! Doubles uses one depth and a limited joint-command set.
+//! The `cap` column gives this command limit.
+//! These results measure cost, not strategy quality.
 //!
 //! ## What reproduces, and what does not
 //!
-//! Within one process the solver is fully deterministic outside
-//! `ChanceMode::Sample` — solving the same position twice gives an identical
-//! value and identical work counts (`solver_tests::repeated_solves_are_identical`).
+//! Outside `ChanceMode::Sample`, repeated solves match within one process.
 //!
-//! **Across processes the count columns are stable only to about 1%.** The cause
-//! is upstream of the solver: `coalesce_branches` builds each expansion level by
-//! draining a `HashMap`, so intermediate branch order varies run to run, and
-//! floating-point addition is not associative — a successor's probability can
-//! land a few ulps apart on two runs of the same input. That is enough to
-//! reorder a near-tie, change which successors a truncating `ChanceMode` keeps,
-//! and shift the tree the search walks. Backward induction, which prunes
-//! nothing, drifts as much as the pruning algorithms do, which is what
-//! identifies the cause as the transition function rather than the search.
-//! Reported *values* are unaffected in practice, agreeing bit for bit or within
-//! one ulp.
+//! Work counts can vary by about one percent between processes.
+//! `coalesce_branches` reads a `HashMap` in an unstable order.
+//! Floating-point addition can then change close successor probabilities.
+//! This change can alter the search order.
+//! Reported values match exactly or differ by one unit in the last place.
 //!
-//! So: treat a few percent of movement in `turns`/`cells` between runs as noise,
-//! and look for changes larger than that when comparing after an engine change.
-//! `time` varies freely. The `pairs` column can shift too — a cell spends a
-//! turn-resolution budget and stops on a wall-clock limit, both timing-dependent
-//! — and a row averaged over a different number of pairings is not comparable to
-//! the previous one even when nothing else changed.
+//! Treat small `turns` and `cells` changes as noise.
+//! Time can change freely.
+//! Compare rows only when they use the same number of pairs.
 //!
-//! Memory is bounded by construction rather than by the grid: the search is
-//! depth-first, so live state is proportional to depth times branching rather
-//! than to the tree, and each successor's subtree is dropped before the next is
-//! expanded. The node budget in `SolveConfig::default` is the backstop.
+//! Depth-first search releases each subtree before it expands the next successor.
+//! Live memory therefore depends on depth and branching.
+//! `SolveConfig::default` also limits the node count.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
