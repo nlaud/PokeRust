@@ -660,13 +660,18 @@ pub(crate) fn sample_nature_and_spread(
     sample_uniform_spread(mon_idx, unk, species, base_stats, cfg, log)
 }
 
-/// Uniform fallback: any nature the belief allows, plus a uniformly random legal
-/// point allocation.
+/// Uniform fallback: any nature the belief allows, plus a legal point
+/// allocation drawn under the coherence weights.
 ///
 /// This only runs once the belief has excluded every authored spread, which
 /// means its stat bounds are tight and the usage data has nothing left to
 /// contribute. The result looks unlike a real EV spread — smeared rather than
 /// lumpy — and that is the honest maximum-entropy answer at that point.
+///
+/// Maximum entropy over *legal* spreads, though, not over incoherent ones: the
+/// belief having ruled out the authored spreads says nothing about whether
+/// people pair a minus-Attack nature with 32 Attack points. That evidence is
+/// independent of the stat bounds, so the fallback keeps using it.
 fn sample_uniform_spread(
     mon_idx: usize,
     unk: &UnknownPokemonState,
@@ -697,6 +702,10 @@ fn sample_uniform_spread(
 
     for nature in &nature_order {
         for budget in candidate_budgets(&lo, &hi) {
+            // Collect the feasible allocations before picking one. Returning the
+            // first hit, as this did, leaves coherence nothing to express a
+            // preference over.
+            let mut pool: Vec<(SpreadCandidate, f64)> = Vec::new();
             for _ in 0..8 {
                 let Some(points) = sample_bounded_composition(&lo, &hi, budget) else {
                     break;
@@ -708,10 +717,31 @@ fn sample_uniform_spread(
                 if let Some(mut candidate) =
                     build_spread_candidate(unk, base_stats, *nature, arr, cfg)
                 {
-                    candidate.weight = 1.0;
-                    log.observe(1.0 / natures.len() as f64);
-                    return Ok(candidate);
+                    candidate.weight = coherence(*nature, &arr, cfg);
+                    let weight = candidate.weight;
+                    pool.push((candidate, weight));
                 }
+            }
+            if pool.is_empty() {
+                continue;
+            }
+            // Weighted *within* one nature, never across them. The shuffle above
+            // is the nature draw, and with no usage data to say otherwise
+            // uniform is the right marginal — weighting the pool across natures
+            // would quietly hand extra mass to whichever nature happened to
+            // offer more coherent allocations. `enumerate_nature_spreads`
+            // declines the same shortcut for the same reason.
+            let total: f64 = pool.iter().map(|(_, w)| *w).sum();
+            let chosen = if total > 0.0 {
+                draw_weighted(pool, log)
+            } else {
+                // Every allocation here is incoherent and both controls are 0.0.
+                // Staying agnostic beats deleting a nature the belief permits.
+                draw_uniform(pool.into_iter().map(|(c, _)| c).collect(), log)
+            };
+            if let Some(candidate) = chosen {
+                log.observe(1.0 / natures.len() as f64);
+                return Ok(candidate);
             }
         }
     }

@@ -996,6 +996,105 @@ fn item_fallback_is_isolated_to_the_item() {
     assert!(rate > 0.4, "Jolly rate collapsed to {rate:.2}");
 }
 
+/// The fallback must keep applying coherence.
+///
+/// It runs only once the belief has excluded every authored spread, and it is
+/// tempting to read that as "no information left to use". The two are
+/// independent: ruling out the cache's spreads says nothing about whether people
+/// pair a minus-Attack nature with heavy Attack investment. So the fallback is
+/// maximum-entropy over *legal* spreads, not over incoherent ones.
+///
+/// A 108-EV ceiling on every stat excludes every authored spread, since all of
+/// them put 252 somewhere. It leaves 0..=14 points per stat, which keeps the
+/// 66-point budget reachable and — because five stats at 14 clear 66 — leaves a
+/// zeroed stat reachable too. Without that headroom the raise-an-unused-stat
+/// fault could never appear and half the damping would go unmeasured.
+#[test]
+fn the_uniform_fallback_still_applies_coherence() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Dragonite, 0);
+    belief.p2_active_mons[0].max_evs = [108; 6];
+
+    const DRAWS: u64 = 1_200;
+
+    let sweep = |lowers: f64, raises: f64| {
+        let cfg = DeterminizeConfig {
+            nature_lowers_invested: lowers,
+            nature_raises_unused: raises,
+            ..config_with_learnsets()
+        };
+        let mut fell_back = 0usize;
+        let mut incoherent = 0usize;
+        let mut natures: HashMap<Nature, usize> = HashMap::new();
+        for seed in 0..DRAWS {
+            let world =
+                determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &cfg).unwrap();
+            let mon = &world.state.p2_active_mons[0];
+            if world.warnings.iter().any(|w| {
+                matches!(
+                    w,
+                    DeterminizeWarning::UniformFallback {
+                        attribute: "nature_spread",
+                        ..
+                    }
+                )
+            }) {
+                fell_back += 1;
+            }
+            if lowers_an_invested_stat(mon) || raises_an_unused_stat(mon) {
+                incoherent += 1;
+            }
+            *natures.entry(mon.nature).or_default() += 1;
+        }
+        let pct = |n: usize| n as f64 / DRAWS as f64 * 100.0;
+        (pct(fell_back), pct(incoherent), natures)
+    };
+
+    let (fallback_rate, off_rate, off_natures) = sweep(1.0, 1.0);
+    let (_, on_rate, on_natures) = sweep(0.10, 0.35);
+
+    // The belief has to actually reach the fallback, or the rest is vacuous.
+    assert!(
+        fallback_rate > 99.0,
+        "only {fallback_rate:.1}% of draws took the nature_spread fallback — \
+         an authored spread now fits this belief, tighten the ceiling"
+    );
+    assert!(
+        off_rate > 10.0,
+        "the fallback produced only {off_rate:.2}% incoherent spreads undamped — \
+         this belief no longer exercises the rules"
+    );
+    // Measured 67.8% -> 41.8%, a ratio of ~0.62. The drop is gentler than the
+    // main path's because the pool is at most the eight allocations sampled for
+    // that nature, and they are often all incoherent — with nothing coherent to
+    // move mass onto, the weighting has no effect on that draw.
+    assert!(
+        on_rate < off_rate * 0.8,
+        "the fallback left {on_rate:.2}% incoherent, barely down from {off_rate:.2}%"
+    );
+
+    // The nature marginal must stay flat. This is the guard on weighting inside
+    // one nature instead of across natures: a cross-nature weighting would move
+    // mass onto whichever nature offered more coherent allocations, and it would
+    // show up here as one nature pulling far above its uniform share.
+    //
+    // Measured: all 25 natures appear under both settings, and the busiest one
+    // takes 5.1% against a 4.0% uniform share — the same 5.1% with the damping
+    // on as with it off, which is the point.
+    for (label, natures) in [("off", &off_natures), ("on", &on_natures)] {
+        let share = |n: &HashMap<Nature, usize>| {
+            n.values().map(|c| *c as f64 / DRAWS as f64 * 100.0).fold(0.0, f64::max)
+        };
+        let uniform = 100.0 / natures.len() as f64;
+        assert!(
+            share(natures) < uniform * 2.5,
+            "coherence {label}: one nature took {:.1}% of draws against a {uniform:.1}% \
+             uniform share — the fallback is weighting across natures",
+            share(natures)
+        );
+    }
+}
+
 /// A species outside the 235-entry cache is fully uniform but still legal.
 #[test]
 fn species_absent_from_the_cache_still_determinizes() {

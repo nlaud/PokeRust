@@ -4,7 +4,6 @@ Remove items when the work is complete.
 
 ## Determinizer
 
-- [ ] Apply the coherence rules in `sample_uniform_spread`.
 - [ ] Make `meta/team_gen.rs` sample a spread after it samples the nature.
 - [ ] Merge duplicate nature rows in `collect_natures`.
 - [ ] Add an item-clause check to `check_determinization`.
@@ -13,9 +12,6 @@ Two controls now damp these two faults separately.
 Across 235 species, the full incoherent rate is 19.4%.
 A raised stat with no points accounts for 12.9 percentage points.
 A lowered invested stat accounts for 3.9 percentage points.
-
-`sample_uniform_spread` runs only when no authored spread satisfies the belief.
-This fallback has the highest risk of an incoherent build.
 
 `meta/team_gen.rs` samples the nature and spread independently.
 This process keeps the old 19.4% incoherent rate.
