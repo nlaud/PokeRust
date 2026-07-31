@@ -28820,8 +28820,10 @@ mod priority_abilities {
         use crate::data::ability::Ability;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
-        use crate::state::dex_data::Status;
+        use crate::simulator::helpers as simulator_helpers;
+        use crate::simulator::helpers::ProtectKind;
+        use crate::state::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+        use crate::state::dex_data::{SideCondition, Status};
         use crate::state::pokemon::{PokemonState, build_pokemon_state};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
@@ -29344,6 +29346,138 @@ mod priority_abilities {
             let after = extract_battle_state(outcomes).0;
             assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0]);
             assert_eq!(after.p1_active_mons[1].hp, after.p1_active_mons[1].stats[0]);
+        }
+
+        // ── Protection against an ally's move (doubles) ─────────────────────────────────────
+
+        /// Doubles turn where P1's slot 1 uses Earthquake and P1's slot 0 uses move slot `s0`.
+        /// Both P2 mons are Flying, so Earthquake reaches only P1's slot 0 and the turn keeps
+        /// one outcome whenever that slot is protected.
+        fn run_ally_earthquake(guard: PokemonMove, s0: usize) -> Vec<(MatchState, f64)> {
+            let p1a = mon(
+                Species::Whimsicott,
+                Ability::Pressure,
+                guard,
+                PokemonMove::Splash,
+            );
+            let p1b = mon(
+                Species::Garchomp,
+                Ability::Pressure,
+                PokemonMove::Earthquake,
+                PokemonMove::Splash,
+            );
+            let p2a = mon(
+                Species::Skarmory,
+                Ability::Pressure,
+                PokemonMove::Splash,
+                PokemonMove::Splash,
+            );
+            let p2b = mon(
+                Species::Talonflame,
+                Ability::Pressure,
+                PokemonMove::Splash,
+                PokemonMove::Splash,
+            );
+            let state = battle_state_from_lists(vec![p1a, p1b], vec![], vec![p2a, p2b], vec![]);
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![s0, 0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                move_dex(),
+                pokemon_dex(),
+            )
+        }
+
+        #[test]
+        fn protect_blocks_an_ally_earthquake() {
+            // Move slot 1 is Splash, so this run raises no protection and proves that the ally
+            // Earthquake really does reach slot 0.
+            for (state, _) in run_ally_earthquake(PokemonMove::Protect, 1) {
+                let MatchState::BattleState(after) = state else {
+                    panic!("expected a battle state outcome");
+                };
+                let m = &after.p1_active_mons[0];
+                assert!(
+                    m.hp < m.stats[0],
+                    "an unprotected ally takes the Earthquake"
+                );
+            }
+
+            let after = extract_battle_state(run_ally_earthquake(PokemonMove::Protect, 0)).0;
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "Protect blocks the ally's Earthquake");
+        }
+
+        #[test]
+        fn wide_guard_blocks_an_ally_earthquake() {
+            // Bulbapedia: Wide Guard stops multi-target moves "even those used by an ally that
+            // strike all Pokémon on the field (such as Earthquake and Surf)".
+            let after = extract_battle_state(run_ally_earthquake(PokemonMove::WideGuard, 0)).0;
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "Wide Guard blocks the ally's Earthquake");
+        }
+
+        /// Build a doubles state whose P1 side holds Quick Guard, then ask the protection gate
+        /// about `attack` coming from P1's slot 1 into P1's slot 0.
+        fn ally_move_under_quick_guard(attack: PokemonMove) -> Option<ProtectKind> {
+            let user = mon(
+                Species::Clefable,
+                Ability::Pressure,
+                PokemonMove::Splash,
+                PokemonMove::Splash,
+            );
+            let ally = mon(
+                Species::Snorlax,
+                Ability::Pressure,
+                attack.clone(),
+                PokemonMove::Splash,
+            );
+            let foe = mon(
+                Species::Snorlax,
+                Ability::Pressure,
+                PokemonMove::Splash,
+                PokemonMove::Splash,
+            );
+            let mut state =
+                battle_state_from_lists(vec![user, ally], vec![], vec![foe.clone(), foe], vec![]);
+            state.p1_side_conditions.push(SideCondition::QuickGuard);
+            state.p1_side_condition_turns.push(0);
+            let move_data = move_dex().get(&attack).expect("move is in the dex");
+            simulator_helpers::protect_blocks_move(
+                &state,
+                FieldSlot {
+                    player: Player::P1,
+                    slot_index: 1,
+                },
+                FieldSlot {
+                    player: Player::P1,
+                    slot_index: 0,
+                },
+                &state.p1_active_mons[0],
+                move_data,
+                simulator_helpers::move_is_spread_target(&move_data.target),
+            )
+        }
+
+        #[test]
+        fn quick_guard_lets_an_ally_helping_hand_through() {
+            // Helping Hand has +5 priority and no protect flag. Showdown gates every protection
+            // on that flag, so Quick Guard must not eat an ally's boost.
+            assert_eq!(
+                ally_move_under_quick_guard(PokemonMove::HelpingHand),
+                None,
+                "Quick Guard has no hold on a move without the protect flag"
+            );
+        }
+
+        #[test]
+        fn quick_guard_blocks_an_ally_priority_attack() {
+            // Quick Attack carries the protect flag, so the side-wide guard still catches it.
+            assert_eq!(
+                ally_move_under_quick_guard(PokemonMove::QuickAttack),
+                Some(ProtectKind::QuickGuard),
+                "Quick Guard covers every source of a +priority attack"
+            );
         }
 
         // ── Stall counter lifecycle ─────────────────────────────────────────────────────────

@@ -35,8 +35,8 @@
 //!    a shallower value only where the horizons agree.
 //! 3. The root support, through [`RootSeed`].
 //!
-//! The node budget spans the whole solve, not one pass. `run` returns the last
-//! pass that the budget did not stop.
+//! The node budget and the deadline span the whole solve, not one pass. `run`
+//! returns the last pass that neither limit stopped.
 //!
 //! # Midturn decisions
 //!
@@ -96,7 +96,7 @@ pub(super) fn run(
     }
 
     let started = Instant::now();
-    let mut ctx = SearchContext::new(pokemon_dex, move_dex, config);
+    let mut ctx = SearchContext::new(pokemon_dex, move_dex, config, started);
 
     // Depth 0 would make every cell an evaluation of the same position, so the
     // matrix would be constant and the "equilibrium" arbitrary. One ply is the
@@ -110,8 +110,9 @@ pub(super) fn run(
 
     for depth in first..=target {
         // The first pass must produce a strategy. Later passes must not exceed
-        // the node budget only to find that no search work remains.
-        if solved.is_some() && ctx.over_budget() {
+        // the node budget or the deadline only to find that no search work
+        // remains.
+        if solved.is_some() && ctx.should_stop() {
             break;
         }
 
@@ -123,9 +124,9 @@ pub(super) fn run(
         let action_truncations = ctx.action_truncations;
         let pass = ctx.solve_position(state, depth, 0, LOSS, WIN, seed.as_ref());
 
-        // `budget_hit` latches, and the loop stops at the first pass that sets
-        // it, so the flag describes this pass alone.
-        if ctx.budget_hit {
+        // `budget_hit` and `deadline_hit` latch, and the loop stops at the first
+        // pass that sets either, so the flags describe this pass alone.
+        if ctx.stopped() {
             // A complete shallower answer beats a partial deeper one. The
             // partial pass is kept only when no pass ever finished, because
             // something has to be returned.
@@ -151,8 +152,13 @@ pub(super) fn run(
 
     let value = position.value.clamp(LOSS, WIN);
     let mut warnings = Vec::new();
-    if let (true, Some(budget)) = (returned_pass_is_partial, config.node_budget) {
-        warnings.push(SolveWarning::BudgetExhausted { budget });
+    if returned_pass_is_partial {
+        if let (true, Some(budget)) = (ctx.budget_hit, config.node_budget) {
+            warnings.push(SolveWarning::BudgetExhausted { budget });
+        }
+        if let (true, Some(budget)) = (ctx.deadline_hit, config.deadline) {
+            warnings.push(SolveWarning::DeadlineExceeded { budget });
+        }
     }
     if reached < target {
         warnings.push(SolveWarning::DepthNotReached { target, reached });
@@ -261,6 +267,10 @@ struct SearchContext<'a> {
     /// capped, the returned equilibrium is approximate.
     action_truncations: [Option<(usize, usize)>; 2],
     budget_hit: bool,
+    deadline_hit: bool,
+    /// When the solve began. Every deepening pass shares it, so the deadline
+    /// bounds the whole solve rather than one pass.
+    started: Instant,
     /// The previous deepening pass's root support, if there was one.
     root_seed: Option<RootSeed>,
 }
@@ -270,6 +280,7 @@ impl<'a> SearchContext<'a> {
         pokemon_dex: &'a HashMap<Species, PokemonData>,
         move_dex: &'a HashMap<PokemonMove, MoveData>,
         cfg: &'a SolveConfig,
+        started: Instant,
     ) -> Self {
         SearchContext {
             pokemon_dex,
@@ -281,6 +292,8 @@ impl<'a> SearchContext<'a> {
             max_discarded: 0.0,
             action_truncations: [None, None],
             budget_hit: false,
+            deadline_hit: false,
+            started,
             root_seed: None,
         }
     }
@@ -290,16 +303,37 @@ impl<'a> SearchContext<'a> {
         self.cfg.algorithm == SolverAlgorithm::SerializedBounds || self.cfg.use_serialized_bounds
     }
 
-    /// Whether the node budget is spent. Latches `budget_hit` so the caller can
-    /// report it once, rather than the search failing loudly mid-flight.
-    fn over_budget(&mut self) -> bool {
-        match self.cfg.node_budget {
-            Some(budget) if self.stats.nodes_expanded >= budget => {
-                self.budget_hit = true;
-                true
-            }
-            _ => false,
+    /// Whether the search must stop: the node budget is spent, or the deadline
+    /// has passed. Latches the reason so the caller can report it once, rather
+    /// than the search failing loudly mid-flight. A stopped search evaluates the
+    /// rest of the tree statically; it never abandons a node half-solved, so
+    /// every matrix cell keeps an exact value.
+    ///
+    /// Both tests read a monotone quantity, so a stop never becomes a resume.
+    fn should_stop(&mut self) -> bool {
+        if let Some(budget) = self.cfg.node_budget
+            && self.stats.nodes_expanded >= budget
+        {
+            self.budget_hit = true;
+            return true;
         }
+        self.deadline_expired()
+    }
+
+    /// Check the deadline and save the result for the solve warning.
+    fn deadline_expired(&mut self) -> bool {
+        if let Some(deadline) = self.cfg.deadline
+            && self.started.elapsed() >= deadline
+        {
+            self.deadline_hit = true;
+            return true;
+        }
+        false
+    }
+
+    /// Whether a stop reason has latched.
+    fn stopped(&self) -> bool {
+        self.budget_hit || self.deadline_hit
     }
 
     // ── The simultaneous-move search ────────────────────────────────────────
@@ -326,7 +360,7 @@ impl<'a> SearchContext<'a> {
             MatchState::BattleState(battle) => battle,
         };
 
-        if depth == 0 || self.over_budget() {
+        if depth == 0 || self.should_stop() {
             return (self.cfg.eval)(battle);
         }
 
@@ -734,6 +768,12 @@ impl<'a> SearchContext<'a> {
         chain: u8,
     ) -> f64 {
         self.stats.matrix_cells_evaluated += 1;
+        // The root does not enter node_value before it resolves a matrix cell.
+        // Check here to stop new turn simulations after the deadline.
+        if self.deadline_expired() {
+            let battle = as_battle(state).expect("cell_value requires a battle position");
+            return (self.cfg.eval)(battle);
+        }
         let branches = self.resolve(state, p1_commands, p2_commands);
 
         let mut expected = 0.0;
@@ -774,7 +814,7 @@ impl<'a> SearchContext<'a> {
             MatchState::TeamPreviewState(_) => return 0.5,
             MatchState::BattleState(battle) => battle,
         };
-        if depth == 0 || self.over_budget() {
+        if depth == 0 || self.should_stop() {
             return (self.cfg.eval)(battle);
         }
 
@@ -856,6 +896,11 @@ impl<'a> SearchContext<'a> {
         beta: f64,
         second: Player,
     ) -> f64 {
+        // A deadline can expire after serial_ab starts and before it resolves a cell.
+        if self.deadline_expired() {
+            let battle = as_battle(state).expect("serial_cell requires a battle position");
+            return (self.cfg.eval)(battle);
+        }
         let branches = self.resolve(state, p1_commands, p2_commands);
 
         let mut accumulated = 0.0;

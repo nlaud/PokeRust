@@ -8,6 +8,7 @@
 //! Tests therefore use few moves, short benches, and one damage roll.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::data::ability::Ability;
 use crate::data::pokemon_move::PokemonMove;
@@ -778,13 +779,19 @@ fn iterative_deepening_matches_every_algorithm() {
 
     // Three passes, so the seed is carried twice. Neither side can damage the
     // other, which keeps the branching low enough for the extra ply to be cheap.
-    let quiet = MatchState::BattleState(battle_state_from_lists(
+    assert_deepening_matches_direct_search(&quiet_position(), 3);
+}
+
+/// Neither side can cause damage, and neither side has a bench.
+/// A depth-1 pass expands only the root under the node budget.
+/// Its successors return a static value before they check the node budget.
+fn quiet_position() -> MatchState {
+    MatchState::BattleState(battle_state_from_lists(
         vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
         vec![],
         vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
         vec![],
-    ));
-    assert_deepening_matches_direct_search(&quiet, 3);
+    ))
 }
 
 /// Deepen to `depth`, search straight to `depth`, and require the same answer
@@ -993,19 +1000,9 @@ fn iterative_deepening_reuses_resolved_transitions() {
 #[test]
 fn a_partial_first_pass_still_warns_about_the_budget() {
     let (pokemon_dex, move_dex) = dexes();
-    let mut battle = battle_state_from_lists(
-        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
-        vec![],
-        vec![mon(Species::Gyarados, &[PokemonMove::Splash])],
-        vec![
-            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
-            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
-        ],
-    );
-    battle.p2_active_mons[0].hp = 1;
 
     let result = solve(
-        &MatchState::BattleState(battle),
+        &partial_first_pass_position(),
         pokemon_dex,
         move_dex,
         &SolveConfig {
@@ -1025,6 +1022,152 @@ fn a_partial_first_pass_still_warns_about_the_budget() {
             .iter()
             .any(|w| matches!(w, SolveWarning::BudgetExhausted { .. })),
         "the returned pass was partial and did not say so: {:?}",
+        result.warnings
+    );
+}
+
+/// A position whose depth-1 pass cannot finish under a spent node budget. P2's
+/// Gyarados is on 1 HP and Thunderbolt is four times effective, so the first
+/// cell reaches a replacement node — a decision that does not consume a ply and
+/// checks the node budget.
+fn partial_first_pass_position() -> MatchState {
+    let mut battle = battle_state_from_lists(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Splash])],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+    );
+    battle.p2_active_mons[0].hp = 1;
+    MatchState::BattleState(battle)
+}
+
+// ── Deadlines ───────────────────────────────────────────────────────────────
+
+/// The exact mode is the regression oracle. A deadline the search cannot
+/// possibly reach must return the same answer as no deadline at all, and must
+/// warn about nothing.
+#[test]
+fn a_generous_deadline_does_not_change_the_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let exact = solve(&state, pokemon_dex, move_dex, &base_config()).expect("solvable");
+    let result = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            deadline: Some(Duration::from_secs(3600)),
+            ..base_config()
+        },
+    )
+    .expect("solvable");
+
+    assert_valid_strategies(&result);
+    assert!(
+        (result.value - exact.value).abs() < 1e-9,
+        "the exact solve returned {}, the deadlined solve {}",
+        exact.value,
+        result.value
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::DeadlineExceeded { .. })),
+        "a deadline that never expired was reported: {:?}",
+        result.warnings
+    );
+}
+
+/// A zero deadline stops all algorithms before they resolve a root action pair.
+/// The solver still returns a valid partial strategy.
+/// The zero duration makes the result independent of machine speed.
+#[test]
+fn an_expired_deadline_stops_root_turn_simulation() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = quiet_position();
+
+    for algorithm in [
+        SolverAlgorithm::BackwardInduction,
+        SolverAlgorithm::SerializedBounds,
+        SolverAlgorithm::DoubleOracle,
+    ] {
+        let result = solve(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &SolveConfig {
+                depth: 2,
+                iterative_deepening: true,
+                algorithm,
+                deadline: Some(Duration::ZERO),
+                ..base_config()
+            },
+        )
+        .expect("a solve with a deadline still returns an answer");
+
+        assert_valid_strategies(&result);
+        assert_eq!(result.depth_reached, 1);
+        assert_eq!(
+            result.stats.turns_simulated, 0,
+            "{algorithm:?} resolved a turn after the deadline"
+        );
+        assert!(
+            result.warnings.contains(&SolveWarning::DeadlineExceeded {
+                budget: Duration::ZERO
+            }),
+            "{algorithm:?} did not report the partial pass: {:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings.contains(&SolveWarning::DepthNotReached {
+                target: 2,
+                reached: 1
+            }),
+            "{algorithm:?} did not report the missed depth: {:?}",
+            result.warnings
+        );
+    }
+}
+
+/// When even depth 1 does not finish, the partial pass is the only answer there
+/// is, and `DeadlineExceeded` has to say so.
+#[test]
+fn a_partial_first_pass_still_warns_about_the_deadline() {
+    let (pokemon_dex, move_dex) = dexes();
+
+    let result = solve(
+        &partial_first_pass_position(),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            deadline: Some(Duration::ZERO),
+            ..base_config()
+        },
+    )
+    .expect("a deadlined solve still returns an answer");
+
+    assert_valid_strategies(&result);
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        result.warnings.contains(&SolveWarning::DeadlineExceeded {
+            budget: Duration::ZERO
+        }),
+        "the returned pass was partial and did not say so: {:?}",
+        result.warnings
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::BudgetExhausted { .. })),
+        "the node budget was ample, so it must not be blamed: {:?}",
         result.warnings
     );
 }

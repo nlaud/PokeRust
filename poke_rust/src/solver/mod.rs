@@ -107,7 +107,7 @@ pub struct SolveConfig {
     pub depth: u8,
     /// Searches depth 1 first, then each depth up to `depth`.
     /// The result holds the last complete depth.
-    /// A pass that runs out of node budget never replaces a complete pass.
+    /// A pass that reaches a stop limit never replaces a complete pass.
     pub iterative_deepening: bool,
     /// Damage rolls per attack.
     pub damage_rolls: u8,
@@ -128,6 +128,12 @@ pub struct SolveConfig {
     /// Maximum expanded nodes.
     /// Static evaluation replaces later search.
     pub node_budget: Option<u64>,
+    /// Wall-clock limit from the start of the solve.
+    /// Static evaluation replaces later search, as for a spent node budget.
+    /// The solver does not start a new turn simulation after the limit expires.
+    /// A turn simulation that is already active can finish after the limit.
+    /// `None` keeps the solve exact.
+    pub deadline: Option<Duration>,
     /// Transposition-table capacity.
     /// Zero disables the table.
     pub tt_capacity: usize,
@@ -152,6 +158,7 @@ impl Default for SolveConfig {
             use_serialized_bounds: false,
             max_actions_per_player: None,
             node_budget: Some(2_000_000),
+            deadline: None,
             tt_capacity: 1 << 18,
             turn_cache_capacity: 0,
             max_forced_chain: 8,
@@ -202,6 +209,10 @@ pub enum SolveWarning {
     /// pass finished, because a complete shallower pass is returned in
     /// preference to a partial deep one.
     BudgetExhausted { budget: u64 },
+    /// The wall-clock deadline expired; nodes past that point were scored
+    /// statically rather than searched. Under iterative deepening this appears
+    /// only when no pass finished, for the same reason as `BudgetExhausted`.
+    DeadlineExceeded { budget: Duration },
     /// The search stopped short of the requested depth. Only iterative deepening
     /// reports this: a single-pass search always returns the depth it was asked
     /// for, however much of it was scored statically.
@@ -223,6 +234,12 @@ impl fmt::Display for SolveWarning {
         match self {
             SolveWarning::BudgetExhausted { budget } => {
                 write!(f, "node budget of {budget} exhausted; deeper nodes were evaluated statically")
+            }
+            SolveWarning::DeadlineExceeded { budget } => {
+                write!(
+                    f,
+                    "the deadline of {budget:?} expired; deeper nodes were evaluated statically"
+                )
             }
             SolveWarning::DepthNotReached { target, reached } => write!(
                 f,

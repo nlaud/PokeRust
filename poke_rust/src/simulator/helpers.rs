@@ -472,16 +472,26 @@ pub(crate) fn protect_blocks_move(
     move_data: &MoveData,
     is_spread: bool,
 ) -> Option<ProtectKind> {
-    // Never block the user's own move or an ally's move.
-    if attacker_slot.player == target_slot.player {
+    // A protection never blocks its own user's move. An ally's move is blocked normally:
+    // Bulbapedia's Wide Guard page states that the guard stops "moves that can target multiple
+    // Pokémon, even those used by an ally that strike all Pokémon on the field (such as
+    // Earthquake and Surf)", and Protect blocks an ally's Earthquake the same way.
+    if attacker_slot == target_slot {
         return None;
     }
     // Feint and similar moves ignore all protection.
     if move_data.breaks_protect {
         return None;
     }
+    // Every protection needs the protect flag, the side-wide guards included. Showdown routes
+    // Protect, Quick Guard, and Wide Guard through one `checkMoveBypassesProtect` call, and that
+    // call returns early for a move without the flag. The gate matters for an ally source:
+    // Helping Hand has +5 priority and no protect flag, so Quick Guard must let it through.
+    if !move_has_flag(move_data, &MoveFlag::Protect) {
+        return None;
+    }
 
-    // Side-wide guards: independent of the protect flag and of the stall counter.
+    // Side-wide guards: independent of the stall counter.
     let side_conditions = match target_slot.player {
         Player::P1 => &state.p1_side_conditions,
         Player::P2 => &state.p2_side_conditions,
@@ -502,10 +512,6 @@ pub(crate) fn protect_blocks_move(
         return Some(ProtectKind::WideGuard);
     }
 
-    // Single-target self-protects only block moves carrying the protect flag.
-    if !move_has_flag(move_data, &MoveFlag::Protect) {
-        return None;
-    }
     let kind = target.volatiles.iter().find_map(|v| match v {
         VolatileStatusState::TurnStatus(VolatileStatus::Protect, _) => Some(ProtectKind::Protect),
         VolatileStatusState::TurnStatus(VolatileStatus::KingsShield, _) => {

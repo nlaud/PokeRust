@@ -1,18 +1,6 @@
 Remove items when the work is complete.
 
 # Fixes: If there is only 1 top-level item below here, should be included in ADDITION to another major TODO item
-- Some simulator bug where protect doesn't work with rage powder + earthquake: '''P1's Whimsicott used Protect!
-
-P1's Whimsicott protected itself!
-
-P2's Sinistcha used Rage Powder!
-
-P2's Sinistcha gained Rage Powder!
-
-P1's Garchomp used Earthquake!
-
-P1's Whimsicott took damage (now 27 HP)'''
-
 
 # New Features
 ## Solver target
@@ -60,11 +48,6 @@ The solver must support these game properties:
 - Private information.
 
 ## Perfect-information solver
-
-### Search control
-
-- [ ] Implement deadlines for the solver
-  - [ ] Keep the exact solver as the regression oracle for small positions.
 
 ### Team preview
 
