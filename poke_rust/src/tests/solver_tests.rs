@@ -17,8 +17,8 @@ use crate::solver::{
     SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval, solve, solve_seeded,
 };
 use crate::state::battle::{BattleCommand, MatchState, Player};
-use crate::state::dex_data::{MoveData, PokemonData};
-use crate::state::pokemon::{Nature, PokemonState, build_pokemon_state};
+use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus};
+use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
 use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
 
 fn dexes() -> (
@@ -755,6 +755,276 @@ fn capping_a_child_action_set_is_reported() {
             } if *total > 1
         )),
         "child-node capping went unreported: {:?}",
+        result.warnings
+    );
+}
+
+/// Iterative deepening is a schedule, not a different search: the pass that
+/// finishes at the requested depth has to return exactly what a single search at
+/// that depth returns.
+///
+/// The seeded restricted game is what makes this worth pinning. A deepening pass
+/// opens double oracle on the previous pass's root support rather than on action
+/// 0, so it grows the restricted game in a different order and converges in a
+/// different number of rounds. Double oracle terminates on a best response over
+/// the full action set, so the order must not move the value — and the two
+/// algorithms that ignore the seed are here to show the comparison itself is
+/// sound.
+#[test]
+fn iterative_deepening_matches_every_algorithm() {
+    // A real matrix, but only two passes: a depth-3 search of a contested
+    // position costs about a minute per algorithm in a debug build.
+    assert_deepening_matches_direct_search(&contested_position(), 2);
+
+    // Three passes, so the seed is carried twice. Neither side can damage the
+    // other, which keeps the branching low enough for the extra ply to be cheap.
+    let quiet = MatchState::BattleState(battle_state_from_lists(
+        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![],
+        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![],
+    ));
+    assert_deepening_matches_direct_search(&quiet, 3);
+}
+
+/// Deepen to `depth`, search straight to `depth`, and require the same answer
+/// from every algorithm.
+fn assert_deepening_matches_direct_search(state: &MatchState, depth: u8) {
+    let (pokemon_dex, move_dex) = dexes();
+
+    for algorithm in [
+        SolverAlgorithm::BackwardInduction,
+        SolverAlgorithm::SerializedBounds,
+        SolverAlgorithm::DoubleOracle,
+    ] {
+        let direct = SolveConfig {
+            algorithm,
+            depth,
+            ..base_config()
+        };
+        let deepened = SolveConfig {
+            iterative_deepening: true,
+            ..direct
+        };
+
+        let expected = solve(state, pokemon_dex, move_dex, &direct).expect("solvable");
+        let result = solve(state, pokemon_dex, move_dex, &deepened).expect("solvable");
+
+        assert_valid_strategies(&result);
+        assert_eq!(
+            result.depth_reached, depth,
+            "{algorithm:?} stopped short of depth {depth} with an ample budget"
+        );
+        assert!(
+            (result.value - expected.value).abs() < 1e-6,
+            "{algorithm:?} deepened to {}, searched directly to {}",
+            result.value,
+            expected.value
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, SolveWarning::DepthNotReached { .. })),
+            "{algorithm:?} reached the target but still warned: {:?}",
+            result.warnings
+        );
+    }
+}
+
+/// The point of deepening: a budget that runs out part way through must fall
+/// back to the last depth that finished, not hand back the half-searched one.
+///
+/// The budget is taken from a depth-1 solve, so it is exactly enough for the
+/// first pass and nothing more. Note which warnings that implies. The returned
+/// answer is a complete depth-1 search, so `BudgetExhausted` — which says the
+/// answer itself is part static — must not appear. `DepthNotReached` must,
+/// because the caller asked for depth 2.
+#[test]
+fn iterative_deepening_keeps_the_last_complete_depth() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let shallow = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 1,
+            ..base_config()
+        },
+    )
+    .expect("solvable");
+
+    let result = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            node_budget: Some(shallow.stats.nodes_expanded),
+            ..base_config()
+        },
+    )
+    .expect("a budgeted solve still returns an answer");
+
+    assert_valid_strategies(&result);
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        (result.value - shallow.value).abs() < 1e-9,
+        "expected the depth-1 value {}, got {}",
+        shallow.value,
+        result.value
+    );
+    assert_eq!(
+        result.stats.nodes_expanded, shallow.stats.nodes_expanded,
+        "the solver started another pass after it spent the node budget"
+    );
+    assert!(
+        result.warnings.contains(&SolveWarning::DepthNotReached {
+            target: 2,
+            reached: 1
+        }),
+        "the abandoned depth went unreported: {:?}",
+        result.warnings
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::BudgetExhausted { .. })),
+        "a complete pass was returned, so nothing in it was static: {:?}",
+        result.warnings
+    );
+}
+
+/// Warnings must describe the returned pass.
+///
+/// The first pass has one legal move because Encore is active. Encore then
+/// ends. The incomplete second pass sees and caps the larger action set.
+#[test]
+fn iterative_deepening_discards_warnings_from_an_incomplete_pass() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut p1 = mon(
+        Species::Pikachu,
+        &[
+            PokemonMove::Thunder,
+            PokemonMove::QuickAttack,
+            PokemonMove::Protect,
+            PokemonMove::Splash,
+        ],
+    );
+    p1.volatiles.push(VolatileStatusState::MoveStatus(
+        VolatileStatus::Encore(PokemonMove::Thunder),
+        1,
+    ));
+    let mut battle = battle_state_from_lists(
+        vec![p1],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Splash])],
+        vec![],
+    );
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+
+    let result = solve(
+        &MatchState::BattleState(battle),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            max_actions_per_player: Some(2),
+            node_budget: Some(3),
+            ..base_config()
+        },
+    )
+    .expect("a budgeted solve still returns an answer");
+
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, SolveWarning::ActionsTruncated { .. })),
+        "the returned pass did not cap actions: {:?}",
+        result.warnings
+    );
+}
+
+/// Resolved transitions are the expensive thing the passes share. Every root
+/// cell a pass evaluates was already resolved by the pass before it, and the
+/// turn cache has no depth in its key, so the deeper pass must read them back
+/// instead of calling `simulate_turn` again.
+#[test]
+fn iterative_deepening_reuses_resolved_transitions() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let result = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            turn_cache_capacity: 4096,
+            ..base_config()
+        },
+    )
+    .expect("solvable");
+
+    assert_eq!(result.depth_reached, 2);
+    assert!(
+        result.stats.turn_cache_hits > 0,
+        "the passes shared nothing, so the deepening was pure overhead"
+    );
+}
+
+/// When even depth 1 does not finish there is no complete pass to fall back on,
+/// so the partial one is returned and `BudgetExhausted` still has to say so.
+///
+/// Reaching that case takes a little care. A depth-1 pass normally scores its
+/// successors at depth 0, which returns before the budget is ever consulted, so
+/// the pass finishes whatever the budget is. Here P2's Gyarados is on 1 HP and
+/// Thunderbolt is four times effective, so the first cell reaches a replacement
+/// node — a decision that does not consume a ply and so does check the budget.
+#[test]
+fn a_partial_first_pass_still_warns_about_the_budget() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut battle = battle_state_from_lists(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Splash])],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+    );
+    battle.p2_active_mons[0].hp = 1;
+
+    let result = solve(
+        &MatchState::BattleState(battle),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            node_budget: Some(1),
+            ..base_config()
+        },
+    )
+    .expect("a budgeted solve still returns an answer");
+
+    assert_valid_strategies(&result);
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::BudgetExhausted { .. })),
+        "the returned pass was partial and did not say so: {:?}",
         result.warnings
     );
 }

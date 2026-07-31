@@ -4,6 +4,15 @@
 //! The solver searches to a fixed depth.
 //! It returns each optimal mixed strategy and P1's win probability.
 //!
+//! # Iterative deepening
+//!
+//! [`SolveConfig::iterative_deepening`] searches depth 1 first, then each depth
+//! up to [`SolveConfig::depth`].
+//! Each pass completes before the next pass starts.
+//! The solver returns the last complete pass, and reports its depth in
+//! [`SolveResult::depth_reached`].
+//! A partial pass is returned only when no pass finished.
+//!
 //! # Why not minimax
 //!
 //! Both players select commands without seeing the other commands.
@@ -96,6 +105,10 @@ pub struct SolveConfig {
     /// Turns of lookahead.
     /// Replacement and self-switch choices do not consume depth.
     pub depth: u8,
+    /// Searches depth 1 first, then each depth up to `depth`.
+    /// The result holds the last complete depth.
+    /// A pass that runs out of node budget never replaces a complete pass.
+    pub iterative_deepening: bool,
     /// Damage rolls per attack.
     pub damage_rolls: u8,
     /// Whether to branch on critical hits, likewise passed through.
@@ -130,6 +143,7 @@ impl Default for SolveConfig {
     fn default() -> Self {
         SolveConfig {
             depth: 2,
+            iterative_deepening: false,
             damage_rolls: 1,
             consider_crit: false,
             chance: ChanceMode::Enumerate,
@@ -184,8 +198,14 @@ pub struct SolveStats {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveWarning {
     /// The node budget ran out; nodes past that point were scored statically
-    /// rather than searched.
+    /// rather than searched. Under iterative deepening this appears only when no
+    /// pass finished, because a complete shallower pass is returned in
+    /// preference to a partial deep one.
     BudgetExhausted { budget: u64 },
+    /// The search stopped short of the requested depth. Only iterative deepening
+    /// reports this: a single-pass search always returns the depth it was asked
+    /// for, however much of it was scored statically.
+    DepthNotReached { target: u8, reached: u8 },
     /// [`ChanceMode`] discarded outcome probability mass. The figure is the
     /// largest fraction dropped at any single chance node, not a total.
     ChanceMassDiscarded { max_fraction: f64 },
@@ -204,6 +224,10 @@ impl fmt::Display for SolveWarning {
             SolveWarning::BudgetExhausted { budget } => {
                 write!(f, "node budget of {budget} exhausted; deeper nodes were evaluated statically")
             }
+            SolveWarning::DepthNotReached { target, reached } => write!(
+                f,
+                "the search completed depth {reached} of the {target} requested"
+            ),
             SolveWarning::ChanceMassDiscarded { max_fraction } => write!(
                 f,
                 "up to {:.1}% of outcome probability was discarded at a chance node",
@@ -257,6 +281,10 @@ pub struct SolveResult {
     pub p1_strategy: Vec<JointActionProb>,
     /// P2's optimal mixed strategy, likewise.
     pub p2_strategy: Vec<JointActionProb>,
+    /// The depth of the pass that produced this result. Equal to the requested
+    /// depth unless iterative deepening stopped early, in which case
+    /// [`SolveWarning::DepthNotReached`] accompanies it.
+    pub depth_reached: u8,
     pub stats: SolveStats,
     pub warnings: Vec<SolveWarning>,
 }

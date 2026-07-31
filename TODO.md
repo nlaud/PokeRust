@@ -50,33 +50,23 @@ The solver must support these game properties:
 
 ### Search control
 
-- [ ] Add iterative deepening.
-  - Complete each depth before the next depth starts.
-  - Keep the last complete result after cancellation.
-  - Reuse root support, action order, and resolved transitions.
-  - Keep transposition values keyed by depth.
-- [ ] Add a deadline.
-- [ ] Keep the exact solver as the regression oracle for small positions.
+- [ ] Implement deadlines for the solver
+  - [ ] Keep the exact solver as the regression oracle for small positions.
 
 ### Team preview
 
 - [ ] Solve perfect-information and open-list team preview.
-- [ ] Use double oracle over the 180 preview choices.
-- [ ] Cache requested preview cells.
-- [ ] Train a preview policy from replay data or self-play.
-
-The current meta cache has teammate and build marginals.
-It does not have bring rates, lead rates, matchup results, or win rates.
-Do not use teammate rank as a lead rate.
+  - [ ] Use double oracle over the 180 preview choices.
+  - [ ] Cache or precompute requested preview cells.
 
 ### Action selection
 
 - [ ] Replace the stride-based action cap.
-- [ ] Keep Tera and Mega actions in capped searches.
-- [ ] Seed the restricted game with the prior depth support.
-- [ ] Add actions through full best-response checks.
-- [ ] Generate commands by resource choice, slot command, and target.
-- [ ] Remove proven duplicate or dominated commands.
+  - [ ] Keep Tera and Mega actions in capped searches.
+  - [ ] Seed the restricted game with the prior depth support.
+  - [ ] Add actions through full best-response checks.
+  - [ ] Generate commands by resource choice, slot command, and target.
+  - [ ] Remove proven duplicate or dominated commands.
 
 Do not assume that both active slots are independent.
 Targets, spread moves, redirection, Protect, switching, Tera, and Mega couple the slots.
@@ -84,32 +74,32 @@ Targets, spread moves, redirection, Protect, switching, Tera, and Mega couple th
 ### Approximate search
 
 - [ ] Compare simultaneous-move MCTS with exact shallow search.
-- [ ] Test regret matching and Exp3 with explicit exploration.
-- [ ] Test sparse chance sampling.
-- [ ] Report sampling error and omitted probability mass.
-- [ ] Keep exact outcome enumeration as the test oracle.
-- [ ] Test progressive action widening only with full-set exploitability checks.
+  - [ ] Test regret matching and Exp3 with explicit exploration.
+  - [ ] Test sparse chance sampling.
+  - [ ] Report sampling error and omitted probability mass.
+  - [ ] Keep exact outcome enumeration as the test oracle.
+  - [ ] Test progressive action widening only with full-set exploitability checks.
 
 `ChanceMode::Sample` currently builds the full outcome distribution before sampling.
 This does not reduce the cost of turn resolution.
 
 - [ ] Add a generative transition API.
-  - Sample inside turn resolution.
-  - Return the next state.
-  - Return public and private observations.
-  - Return the true trajectory probability.
-  - Return the sampling probability.
-- [ ] Test stratified sampling for hits, critical hits, secondary effects, and speed ties.
-- [ ] Test common random numbers and control variates.
+    - Sample inside turn resolution.
+    - Return the next state.
+    - Return public and private observations.
+    - Return the true trajectory probability.
+    - Return the sampling probability.
+  - [ ] Test stratified sampling for hits, critical hits, secondary effects, and speed ties.
+  - [ ] Test common random numbers and control variates.
 
 ### Evaluation
 
 - [ ] Calibrate or replace `solver::eval::heuristic`.
-- [ ] Train value and policy models from deeper search or self-play.
-- [ ] Include speed control, damage, KO ranges, Protect pressure, and targeting.
-- [ ] Include field effects, status, boosts, bench resources, Tera, and Mega.
-- [ ] Test calibration, side-swap symmetry, slot-order symmetry, and policy agreement.
-- [ ] Add an evaluator API that supports batches and belief context.
+  - [ ] Train value and policy models from deeper search or self-play.
+  - [ ] Include speed control, damage, KO ranges, Protect pressure, and targeting.
+  - [ ] Include field effects, status, boosts, bench resources, Tera, and Mega.
+  - [ ] Test calibration, side-swap symmetry, slot-order symmetry, and policy agreement.
+  - [ ] Add an evaluator API that supports batches and belief context.
 
 ## Fog-of-war solver
 
@@ -118,33 +108,33 @@ That method lets the solver choose a different action for each hidden world.
 Use it only as a labeled perfect-information Monte Carlo baseline.
 
 - [ ] Add ISMCTS as a fast heuristic baseline.
-- [ ] Add outcome-sampling MCCFR as the first equilibrium baseline.
-- [ ] Test public-belief continual solving after the baseline works.
-- [ ] Compare MCCFR with extensive-form double oracle.
+  - [ ] Add outcome-sampling MCCFR as the first equilibrium baseline.
+  - [ ] Test public-belief continual solving after the baseline works.
+  - [ ] Compare MCCFR with extensive-form double oracle.
 
-Build these data structures first:
+  Build these data structures first:
+  
+  - Weighted beliefs over both players' private data.
+  - Normalized particle weights.
+  - Posterior updates.
+  - Effective sample-size checks.
+  - Particle resampling.
+  - Observation-based state grouping.
+  - Public-belief counterfactual values at depth limits.
 
-- Weighted beliefs over both players' private data.
-- Normalized particle weights.
-- Posterior updates.
-- Effective sample-size checks.
-- Particle resampling.
-- Observation-based state grouping.
-- Public-belief counterfactual values at depth limits.
-
-Use `mask_events_for` and the event log as the observation model.
-Do not group hidden worlds only by `MatchState` hash.
-
-- [ ] Add opponent exploitation as a separate mode.
-- [ ] Keep Nash as the default.
-- [ ] Show the exploitability budget for safe exploitation.
+  Use `mask_events_for` and the event log as the observation model.
+  Do not group hidden worlds only by `MatchState` hash.
+  
+  - [ ] Add opponent exploitation as a separate mode.
+  - [ ] Keep Nash as the default.
+  - [ ] Show the exploitability budget for safe exploitation.
 
 ## Simulator bot
 
 - [ ] Add an optional P2 solver profile to battle creation.
-- [ ] Support exact and approximate algorithms.
-- [ ] Support time, node, depth, worker, sampling, seed, and action limits.
-- [ ] Show every approximation and fallback in the interface.
+  - [ ] Support exact and approximate algorithms.
+  - [ ] Support time, node, depth, worker, sampling, seed, and action limits.
+  - [ ] Show every approximation and fallback in the interface.
 
 Start P2 analysis after each turn resolves.
 Use an immutable state and belief snapshot.
@@ -155,24 +145,24 @@ Sample one P2 command from the latest complete mixed strategy.
 Resolve both commands together.
 
 - [ ] Add a generation ID to each analysis job.
-- [ ] Cancel an old job after a state or configuration change.
-- [ ] Ignore results from an old generation.
-- [ ] Keep the last complete checkpoint after failure or cancellation.
-- [ ] Add fast, balanced, strong, and custom bot profiles.
-- [ ] Show private progress without showing the live P2 strategy.
-- [ ] Store deterministic replay data.
-- [ ] Show the sampled P2 action only after both commands lock.
+  - [ ] Cancel an old job after a state or configuration change.
+  - [ ] Ignore results from an old generation.
+  - [ ] Keep the last complete checkpoint after failure or cancellation.
+  - [ ] Add fast, balanced, strong, and custom bot profiles.
+  - [ ] Show private progress without showing the live P2 strategy.
+  - [ ] Store deterministic replay data.
+  - [ ] Show the sampled P2 action only after both commands lock.
 
 ## Parallel search
 
 - [ ] Use a bounded CPU pool that is separate from Tokio and benchmark workers.
-- [ ] Keep the matrix solver and double-oracle control loop serial.
-- [ ] Parallelize missing matrix cells and full best-response checks.
-- [ ] Give each worker a local RNG, statistics set, and cache.
-- [ ] Derive RNG seeds from stable job identifiers.
-- [ ] Merge results in a stable order.
-- [ ] Bound in-flight work.
-- [ ] Add cancellation checks between cells, successors, and nodes.
+  - [ ] Keep the matrix solver and double-oracle control loop serial.
+  - [ ] Parallelize missing matrix cells and full best-response checks.
+  - [ ] Give each worker a local RNG, statistics set, and cache.
+  - [ ] Derive RNG seeds from stable job identifiers.
+  - [ ] Merge results in a stable order.
+  - [ ] Bound in-flight work.
+  - [ ] Add cancellation checks between cells, successors, and nodes.
 
 Do not calculate a full matrix only to fill all CPU cores.
 Do not prioritize parallel serialized alpha-beta.
@@ -185,24 +175,24 @@ Record time, simulated turns, cache hits, memory, reproducibility, and strategy 
 ## Live analysis
 
 - [ ] Add `POST /api/solve`.
-- [ ] Add an SSE stream at `/api/solve/{id}/events`.
-- [ ] Stream `started`, `update`, `done`, `failed`, and `cancelled`.
-- [ ] Include a stable generation and revision in each update.
-- [ ] Include depth, time, value, strategy, and search statistics.
-- [ ] Include sampling and model details for approximate results.
+  - [ ] Add an SSE stream at `/api/solve/{id}/events`.
+  - [ ] Stream `started`, `update`, `done`, `failed`, and `cancelled`.
+  - [ ] Include a stable generation and revision in each update.
+  - [ ] Include depth, time, value, strategy, and search statistics.
+  - [ ] Include sampling and model details for approximate results.
 
-Publish a result only after a complete depth.
-During double oracle, publish after both full best-response checks.
-
-For exact cells, show the certified value interval.
-For sampled cells, show an empirical search gap and confidence information.
-Do not label a partial matrix as an equilibrium.
-
-Show the full mixed strategy.
-Keep the last complete result visible while the next depth runs.
-Show value stability and support changes.
-Limit progress messages to a readable rate.
-Do not submit a suggested command automatically.
+  Publish a result only after a complete depth.
+  During double oracle, publish after both full best-response checks.
+  
+  For exact cells, show the certified value interval.
+  For sampled cells, show an empirical search gap and confidence information.
+  Do not label a partial matrix as an equilibrium.
+  
+  Show the full mixed strategy.
+  Keep the last complete result visible while the next depth runs.
+  Show value stability and support changes.
+  Limit progress messages to a readable rate.
+  Do not submit a suggested command automatically.
 
 ## Research
 

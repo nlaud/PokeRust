@@ -22,6 +22,22 @@
 //! These windows contain the exact value.
 //! Thus, the transposition table does not need bound flags.
 //!
+//! # Iterative deepening
+//!
+//! [`SolveConfig::iterative_deepening`](super::SolveConfig::iterative_deepening)
+//! makes [`run`] search depth 1, then depth 2, and so on to the requested depth.
+//! Each pass finishes before the next pass starts.
+//!
+//! One context serves every pass, so three things carry forward:
+//!
+//! 1. The turn cache. It holds resolved transitions and has no depth in its key.
+//! 2. The transposition table. Its key holds the depth, so a deeper pass reuses
+//!    a shallower value only where the horizons agree.
+//! 3. The root support, through [`RootSeed`].
+//!
+//! The node budget spans the whole solve, not one pass. `run` returns the last
+//! pass that the budget did not stop.
+//!
 //! # Midturn decisions
 //!
 //! A faint can require a replacement before the turn ends.
@@ -60,6 +76,11 @@ const WIN: f64 = 1.0;
 const SALT_SIMULTANEOUS: u64 = 0x243F_6A88_85A3_08D3;
 
 /// Entry point behind [`super::solve`].
+///
+/// [`SolveConfig::iterative_deepening`](super::SolveConfig::iterative_deepening)
+/// turns the single search into a sequence of passes at depth 1, 2, and so on.
+/// One `SearchContext` serves every pass, so the passes share the transposition
+/// table, the turn cache, and the statistics.
 pub(super) fn run(
     state: &MatchState,
     pokemon_dex: &HashMap<Species, PokemonData>,
@@ -80,13 +101,61 @@ pub(super) fn run(
     // Depth 0 would make every cell an evaluation of the same position, so the
     // matrix would be constant and the "equilibrium" arbitrary. One ply is the
     // minimum that means anything.
-    let depth = config.depth.max(1);
-    let position = ctx.solve_position(state, depth, 0, LOSS, WIN);
+    let target = config.depth.max(1);
+    let first = if config.iterative_deepening { 1 } else { target };
+
+    let mut reached = first;
+    let mut solved: Option<Position> = None;
+    let mut returned_pass_is_partial = false;
+
+    for depth in first..=target {
+        // The first pass must produce a strategy. Later passes must not exceed
+        // the node budget only to find that no search work remains.
+        if solved.is_some() && ctx.over_budget() {
+            break;
+        }
+
+        // Taken rather than borrowed: the seed lives in the context so it
+        // survives between passes, but `solve_position` needs the context
+        // mutably. The pass writes a fresh seed back at the end.
+        let seed = ctx.root_seed.take();
+        let max_discarded = ctx.max_discarded;
+        let action_truncations = ctx.action_truncations;
+        let pass = ctx.solve_position(state, depth, 0, LOSS, WIN, seed.as_ref());
+
+        // `budget_hit` latches, and the loop stops at the first pass that sets
+        // it, so the flag describes this pass alone.
+        if ctx.budget_hit {
+            // A complete shallower answer beats a partial deeper one. The
+            // partial pass is kept only when no pass ever finished, because
+            // something has to be returned.
+            if solved.is_none() {
+                reached = depth;
+                solved = Some(pass);
+                returned_pass_is_partial = true;
+            } else {
+                // The warnings must describe the returned pass. Discard
+                // approximation metadata from the incomplete pass.
+                ctx.max_discarded = max_discarded;
+                ctx.action_truncations = action_truncations;
+            }
+            break;
+        }
+
+        ctx.root_seed = Some(root_seed_of(&pass));
+        reached = depth;
+        solved = Some(pass);
+    }
+
+    let position = solved.expect("the depth range is never empty, so one pass always runs");
 
     let value = position.value.clamp(LOSS, WIN);
     let mut warnings = Vec::new();
-    if let (true, Some(budget)) = (ctx.budget_hit, config.node_budget) {
+    if let (true, Some(budget)) = (returned_pass_is_partial, config.node_budget) {
         warnings.push(SolveWarning::BudgetExhausted { budget });
+    }
+    if reached < target {
+        warnings.push(SolveWarning::DepthNotReached { target, reached });
     }
     if ctx.max_discarded > EPS {
         warnings.push(SolveWarning::ChanceMassDiscarded {
@@ -115,9 +184,26 @@ pub(super) fn run(
         p2_win_odds: WIN - value,
         p1_strategy: strategy_of(&position.p1, &position.row_strategy),
         p2_strategy: strategy_of(&position.p2, &position.col_strategy),
+        depth_reached: reached,
         stats,
         warnings,
     })
+}
+
+/// The root actions that a completed pass played with positive probability.
+fn root_seed_of(position: &Position) -> RootSeed {
+    RootSeed {
+        rows: support_of(&position.row_strategy),
+        cols: support_of(&position.col_strategy),
+    }
+}
+
+/// The indices a mixed strategy actually plays, in ascending order and without
+/// repeats.
+fn support_of(strategy: &[f64]) -> Vec<usize> {
+    (0..strategy.len())
+        .filter(|&index| strategy[index] > EPS)
+        .collect()
 }
 
 /// Pair actions with their probabilities, dropping the ones never played.
@@ -146,6 +232,21 @@ struct Position {
     col_strategy: Vec<f64>,
 }
 
+/// The root support carried from one deepening pass to the next.
+///
+/// Every pass derives the root action set from the same position with the same
+/// deterministic generator, so an index means the same action in each pass. The
+/// next pass therefore opens its restricted game on the actions the previous
+/// pass settled on, rather than on action 0.
+///
+/// This is an ordering heuristic and nothing more. Double oracle terminates on a
+/// best response over the *full* action set, so it converges to the same value
+/// from any starting set — a good seed only reduces the number of rounds.
+struct RootSeed {
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+}
+
 struct SearchContext<'a> {
     pokemon_dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
@@ -160,6 +261,8 @@ struct SearchContext<'a> {
     /// capped, the returned equilibrium is approximate.
     action_truncations: [Option<(usize, usize)>; 2],
     budget_hit: bool,
+    /// The previous deepening pass's root support, if there was one.
+    root_seed: Option<RootSeed>,
 }
 
 impl<'a> SearchContext<'a> {
@@ -178,6 +281,7 @@ impl<'a> SearchContext<'a> {
             max_discarded: 0.0,
             action_truncations: [None, None],
             budget_hit: false,
+            root_seed: None,
         }
     }
 
@@ -248,12 +352,20 @@ impl<'a> SearchContext<'a> {
             beta = beta.min(upper);
         }
 
-        let value = self.solve_position(state, depth, chain, alpha, beta).value;
+        // No seed below the root: the seed indexes the root action set, and it
+        // means nothing at any other position.
+        let value = self
+            .solve_position(state, depth, chain, alpha, beta, None)
+            .value;
         self.tt.store(key, depth, chain, value);
         value
     }
 
     /// Build and solve the matrix game at `state`.
+    ///
+    /// `seed` is the previous deepening pass's root support. Only the root call
+    /// supplies it, and only double oracle reads it.
+    #[allow(clippy::too_many_arguments)]
     fn solve_position(
         &mut self,
         state: &MatchState,
@@ -261,6 +373,7 @@ impl<'a> SearchContext<'a> {
         chain: u8,
         alpha: f64,
         beta: f64,
+        seed: Option<&RootSeed>,
     ) -> Position {
         let battle = as_battle(state).expect("solve_position requires a battle position");
         let phase = actions::phase_of(state);
@@ -284,9 +397,16 @@ impl<'a> SearchContext<'a> {
         }
 
         let solution = match self.cfg.algorithm {
-            SolverAlgorithm::DoubleOracle => {
-                self.double_oracle(state, depth, chain, alpha, beta, &p1.actions, &p2.actions)
-            }
+            SolverAlgorithm::DoubleOracle => self.double_oracle(
+                state,
+                depth,
+                chain,
+                alpha,
+                beta,
+                &p1.actions,
+                &p2.actions,
+                seed,
+            ),
             SolverAlgorithm::BackwardInduction | SolverAlgorithm::SerializedBounds => {
                 self.full_matrix(state, depth, chain, &p1.actions, &p2.actions)
             }
@@ -366,6 +486,10 @@ impl<'a> SearchContext<'a> {
     /// The two best-response values bracket the true value from above and below,
     /// which is both the termination test and the source of the bound tightening
     /// that makes the next round's pruning sharper.
+    ///
+    /// `seed`, when present, replaces the one-by-one start with the previous
+    /// deepening pass's root support. See [`RootSeed`] for why that cannot move
+    /// the value.
     #[allow(clippy::too_many_arguments)]
     fn double_oracle(
         &mut self,
@@ -376,6 +500,7 @@ impl<'a> SearchContext<'a> {
         mut beta: f64,
         rows: &[Vec<BattleCommand>],
         cols: &[Vec<BattleCommand>],
+        seed: Option<&RootSeed>,
     ) -> MatrixSolution {
         let m = rows.len();
         let n = cols.len();
@@ -383,8 +508,8 @@ impl<'a> SearchContext<'a> {
         // Lazily filled; shared across best-response calls so no cell is ever
         // computed twice within this node. That sharing is most of the win.
         let mut cells: Vec<Vec<Option<f64>>> = vec![vec![None; n]; m];
-        let mut restricted_rows: Vec<usize> = vec![0];
-        let mut restricted_cols: Vec<usize> = vec![0];
+        let mut restricted_rows = seeded_start(seed.map(|seed| seed.rows.as_slice()), m);
+        let mut restricted_cols = seeded_start(seed.map(|seed| seed.cols.as_slice()), n);
 
         let mut best = MatrixSolution {
             value: 0.5,
@@ -886,6 +1011,24 @@ fn as_battle(state: &MatchState) -> Option<&BattleState> {
         MatchState::BattleState(battle) => Some(battle),
         _ => None,
     }
+}
+
+/// The action indices double oracle opens its restricted game with.
+///
+/// Falls back to action 0, which is what an unseeded search always uses. An
+/// index at or past `len` is dropped: a capped action set can shrink between
+/// passes, and a stale index would then name a different action or none at all.
+fn seeded_start(seed: Option<&[usize]>, len: usize) -> Vec<usize> {
+    let mut start: Vec<usize> = seed
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .filter(|&index| index < len)
+        .collect();
+    if start.is_empty() {
+        start.push(0);
+    }
+    start
 }
 
 /// Lift a restricted game's strategy back onto the full action indices.
