@@ -1,7 +1,10 @@
-# TODO
-
 Remove items when the work is complete.
 
+# Fixes: If there are <3 below here, should be included in ADDITION to another major TODO item
+- Auto team generation only generates pokemon up to the brought number, but should generate until 6 always independent of how many you bring to the format.
+
+
+ #New Features
 ## Solver target
 
 Name these games separately:
