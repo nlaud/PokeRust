@@ -35,11 +35,11 @@ Run this gate first. Do no other work before the gate passes.
 1. Find the newest `<channel source="discord" ...>` block in this conversation.
 2. If no such block exists, stop now. Print `discord-todo requires a Discord channel.` Read no files. Change no files.
 3. Record `chat_id` and `message_id` from that block.
-4. Send a start message with `mcp__plugin_discord_discord__reply`.
-5. If the send returns an error, send the same message one more time.
-6. If the second send also returns an error, stop now. Print the error text.
+4. Read the current usage limits. Follow the section *Usage limits*.
+5. Send a gate message with the task-start usage.
+6. If the send returns an error, send the same message one more time.
+7. If the second send also returns an error, stop now. Print the error text.
    Change no files.
-7. Record the message id that `reply` returns. This is the progress message.
 
 A `<channel>` block does not prove that the bot can send. The plugin checks an
 allowlist on every send. A successful send is the only proof. This is why the
@@ -62,7 +62,7 @@ Read `.claude/discord-todo/state.json`.
 If the file exists, a task is active. Do these steps:
 
 1. Read `stage` and `task` from the file.
-2. Say in the start message which task you resume, and at which stage.
+2. Do not send a second gate message. The generic gate message is sufficient.
 3. Go to the section for that stage. Continue there.
 4. Choose no new task. Read no new item from `TODO.md`.
 5. If `$ARGUMENTS` holds text, do not use it. Tell the user on Discord that the
@@ -83,8 +83,8 @@ If `$ARGUMENTS` contains text, use that text as the task. Go to step 7.
 4. Read the indented sub-bullets under the item. They hold the acceptance rules.
 5. Read the prose paragraphs after the item list. They hold the rationale.
 6. If the section holds no `- [ ]` item, use the next `## ` section.
-7. Write `state.json` with the task, the source, and the stage `researching`.
-8. Quote the chosen task in the progress message.
+7. Write `state.json` with the task, source, stage, and task-start usage.
+8. Quote the chosen task in the approval summary.
 
 ## 4. Research
 
@@ -130,7 +130,25 @@ approval arrives.
 If the user asks for changes, revise `plan.md`. Send it again. End the turn
 again. Repeat until the user approves.
 
-When the user approves, set the stage to `implementing`.
+When the user approves, do these steps immediately:
+
+1. Send a new `reply` with the first progress log entry.
+2. If the send fails, send the same message one more time.
+3. If the second send fails, keep the stage `awaiting-approval` and stop.
+4. Record the returned message id as `progress_message_id` in `state.json`.
+5. Set the stage to `implementing` in `state.json`.
+
+The new reply is the progress message. All later progress edits target this
+message.
+
+Use this initial text:
+
+```text
+discord-todo — <task>
+Now: Starting the approved implementation
+Usage: Daily/5h <remaining>% left | Weekly <remaining>% left
+[6/13] Approval — plan approved <time>
+```
 
 ## 7. Implement
 
@@ -139,8 +157,11 @@ When the user approves, set the stage to `implementing`.
 3. Match the style of the surrounding code.
 4. Use the `ste-writing` skill for every comment and document you write.
 5. Update the progress message after each file that you finish.
+6. Set `Now:` to the next file or action before you start it.
 
-## 8. Verify
+## 8. Verify the implementation
+
+Set the stage to `verifying` in `state.json`.
 
 Run these commands from `poke_rust/`:
 
@@ -154,68 +175,203 @@ not see. If a command fails, fix the cause, then run the command again.
 
 Set the stage to `committing`.
 
-## 9. Commit
+## 9. Commit the review target
 
 1. Stay on the current branch. Create no branch. Push nothing.
-2. Stage only the files that this task changed.
-3. Never stage `.claude/discord-todo/`. It holds loop state, not project work.
-4. If the task came from `TODO.md`, remove the finished item from `TODO.md`.
+2. If the task came from `TODO.md`, remove the finished item from `TODO.md`.
    The file says to remove completed work.
+3. Stage only the files that this task changed. Include `TODO.md` when step 2
+   changed it.
+4. Never stage `.claude/discord-todo/`. It holds loop state, not project work.
 5. Write a commit message in the style of the recent log. Read it with
    `git log --oneline -10`.
 6. Commit.
-7. Delete `state.json` and `plan.md`. The task is now closed.
+7. Record the new commit hash in `state.json` as `review_commit`.
+8. Delete `plan.md`.
+9. Set the stage to `reviewing`.
+
+The commit gives Codex an exact review target. Do not delete `state.json` yet.
+
+## 10. Independent Codex review
+
+Invoke `/codex:rescue` for the review. Do not call the raw Codex MCP tools
+directly.
+
+Do not give Codex the current Claude chat, the Discord chat, or a chat summary.
+Do not give Codex the plan, the task text, Claude's reasoning, or expected
+findings. Do not tell Codex which code Claude thinks is correct.
+
+Give Codex only the repository and the Git history. Tell Codex to review the
+commit named by `review_commit`. Codex must compare that commit with its first
+parent.
+
+Before the review, confirm that `HEAD` equals `review_commit`. Confirm that no
+task file has an uncommitted change.
+
+Use this command and neutral prompt:
+
+```text
+/codex:rescue --wait --fresh --model gpt-5.6-sol --effort high Review the
+commit at HEAD independently. Use only repository files and Git history. Do
+not read .claude/discord-todo. Find anything wrong with the code introduced by
+HEAD, including its interactions with existing code. Fix every problem that
+you find within HEAD's scope. Add or update tests for each fix. Run the
+applicable Rust and Playwright tests. Use Playwright to inspect each affected
+browser workflow and capture screenshots. Do not commit.
+```
+
+Inspect `git status --short` and `git diff` after Codex finishes. Make sure that
+Codex changed only files related to the reviewed commit.
+
+If Codex needs a follow-up, invoke `/codex:rescue` with `--wait`, `--resume`,
+`--model gpt-5.6-sol`, and `--effort high`. Do not add chat context or the
+deleted plan. Give only repository facts that Codex can verify.
+
+If Codex finds a required fix outside the commit scope, ask the user first.
+Update the progress message for each file that Codex changes.
+
+Set the stage to `reverifying`.
+
+## 11. Verify the Codex changes
+
+Run these commands from `poke_rust/`:
+
+```sh
+cargo test
+cargo clippy
+cargo build --release --bin server
+```
+
+Run the applicable Playwright specs from `frontend/`:
+
+```sh
+npm exec playwright -- test <spec-files>
+```
+
+Use Playwright to inspect each affected page and interaction. Capture a
+screenshot of each affected page. Inspect every screenshot before you report
+success.
+
+If a command fails, fix the cause and run it again. Never report a pass that
+you did not see.
+
+Set the stage to `finalizing`.
+
+## 12. Finalize the commit
+
+1. Inspect all uncommitted Codex changes.
+2. If Codex changed files, stage only those files.
+3. If Codex changed files, run `git commit --amend --no-edit`.
+4. Record the final commit hash.
+5. Read the current usage limits.
+6. Edit the progress message with `Now: Done` and the task-end usage.
+7. Delete `state.json`. The task is now closed.
 
 Step 7 ends the task. A later loop run then starts a new task.
 
-## 10. Report
+## 13. Report
 
 Send a new `reply`. Include these facts:
 
 - The commit hash and subject.
 - The count of changed files.
+- The Codex review result and any fixes that Codex made.
 - The test result and the clippy result.
+- The Playwright result and the screenshot paths.
+- The task-start and task-end usage limits.
 - Any work that you left undone.
 
 Send a new message. Do not report the result with `edit_message`. An edit sends
 no push notification, so the user gets no alert on their phone.
 
+## Usage limits
+
+Read `.claude/discord-todo/usage-limits.json`. The configured Claude Code
+status line writes this cache from the live session data.
+
+Read these fields:
+
+- `five_hour_used_percentage`
+- `seven_day_used_percentage`
+- `captured_at`
+
+Calculate each remaining percentage as `100 - used_percentage`. Round the
+result to the nearest whole percent.
+
+Label the 5-hour value as `Daily/5h`. Label the 7-day value as `Weekly`. Claude
+Code does not expose a separate 24-hour value.
+
+If the cache or a field is missing, print `unavailable` for that value. Never
+estimate a usage limit. Never edit the cache.
+
+Print both values at these times:
+
+1. Before a new task starts.
+2. In every progress message edit.
+3. After the task finishes.
+
+Use this shape:
+
+```text
+Usage: Daily/5h 72% left | Weekly 59% left
+```
+
+Store the task-start values in `state.json`. Do not replace them when the skill
+resumes an active task.
+
 ## Progress updates
 
-The start message from section 1 is the progress message. The skill creates it
-once, at the start of a task. After that the skill only adds to it. The user
-can open it at any time and read the whole run.
+The reply after plan approval is the progress message. Section 6 creates it
+immediately after the approval. The skill does not edit the gate message or an
+approval message.
 
-1. Add one line to the progress message at each stage boundary.
-2. Keep every earlier line. The message grows into a log.
-3. Send the full new text with `edit_message`.
-4. Never send a progress update with `reply`.
+1. Keep a `Now:` line directly below the task title.
+2. Set `Now:` to the exact file, test, review, or action in progress.
+3. Replace the `Now:` line before each new action starts.
+4. Set `Now:` to `Waiting for user: <reason>` when a question blocks progress.
+5. Set `Now:` to `Done` only after section 12 finishes.
+6. Refresh the `Usage:` line in every edit.
+7. Add one log line at each later stage boundary.
+8. Keep every earlier log line. The message grows into a log.
+9. Send the full new text with `edit_message`.
+10. Never send a progress update with `reply`.
 
 An edit changes one message and sends no push notification. A `reply` sends a
 notification to the phone of the user. A progress update must never do that.
+
+The progress message must always show the current work until the task ends.
+Do not leave a completed action in the `Now:` line.
 
 Use this shape:
 
 ```text
 discord-todo — Split nature_spread_coherence into two controls
-[1/9] Gate — run started 12:00
-[4/9] Research — read cps.rs and team_gen.rs
-[5/9] Plan — sent for approval
-[7/9] Implement — 2 files of 4 done
+Now: Running tracker-input.spec.ts with Playwright
+Usage: Daily/5h 68% left | Weekly 57% left
+[6/13] Approval — plan approved 12:15
+[7/13] Implement — 2 files of 4 done
+[8/13] Verify — tests and clippy passed
+[9/13] Commit — created the review target
+[10/13] Codex review — fixed one edge case
+[11/13] Verify fixes — Playwright passed
+[12/13] Finalize — amended the task commit
 ```
 
-Discord limits one message to 2000 characters. If the next line crosses that
-limit, replace the oldest lines with one summary line. Keep the newest four
-lines. Do not create a second progress message.
+Discord limits one message to 2000 characters. Always keep the title, `Now:`,
+and `Usage:` lines. If the next line crosses the limit, summarize the oldest
+log lines. Keep the newest four log lines. Do not create a second progress
+message.
 
-Send a new `reply` for these three events only:
+Send a new `reply` only for these events:
 
-1. The start of a run, which creates the progress message.
-2. A question that blocks progress.
-3. The final report after the commit.
+1. The Discord gate acknowledgment.
+2. A plan approval request or a revised plan.
+3. The first progress message after plan approval.
+4. A question that blocks progress.
+5. The final report after the commit.
 
-Each of these three events needs the attention of the user. No other event
-does.
+Each event needs the attention of the user or creates required workflow state.
+Do not send a reply for a later progress update.
 
 ## Never mention the user
 
@@ -258,14 +414,22 @@ Path: `.claude/discord-todo/state.json`
   "source": "todo",
   "stage": "awaiting-approval",
   "chat_id": "123",
-  "progress_message_id": "456",
+  "progress_message_id": null,
+  "review_commit": null,
+  "usage_before": {
+    "daily_five_hour_remaining": 72,
+    "weekly_remaining": 59
+  },
   "branch": "main",
   "started": "2026-07-29T12:00:00Z"
 }
 ```
 
+The value of `progress_message_id` stays `null` until the user approves the
+plan. Section 6 replaces it with the Discord message id.
+
 Valid stages: `researching`, `awaiting-approval`, `implementing`, `verifying`,
-`committing`.
+`committing`, `reviewing`, `reverifying`, `finalizing`.
 
 Write the file after every stage change. The next loop run reads it.
 
@@ -277,3 +441,5 @@ Write the file after every stage change. The next loop run reads it.
 - `edit_message` takes `chat_id`, `message_id`, and `text`.
 - `fetch_messages` takes `channel`. It does not take `chat_id`.
 - `react` gives the cheapest progress signal. Use it to acknowledge the start.
+- `/codex:rescue --fresh` starts a new Codex task without an old Codex thread.
+- `/codex:rescue --resume` continues only the current task's Codex thread.

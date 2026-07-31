@@ -55,7 +55,7 @@ use crate::simulator::scoped_sample_rng;
 use crate::state::battle::{BattleState, Player};
 use crate::state::dex_data::{MoveData, PokemonData, PokemonType};
 use crate::state::pokemon::{
-    Nature, PokemonState, PokemonStatsTable, build_pokemon_state, calc_hp, calc_stat,
+    Nature, PokemonGender, PokemonState, PokemonStatsTable, build_pokemon_state, calc_hp, calc_stat,
     calc_stats_for_level, nature_stat_modifiers, scale_evs_for_stat_points,
 };
 
@@ -175,11 +175,13 @@ pub enum DeterminizeError {
     NoLegalMoves { mon_idx: usize, species: Species },
     /// The EV/stat bounds admit no assignment.
     InfeasibleSpread { mon_idx: usize, species: Species },
-    /// An attribute was exhausted and `allow_uniform_fallback` is off.
+    /// An attribute has no valid candidate.
     NoCandidates {
         mon_idx: usize,
         attribute: &'static str,
     },
+    /// The species has no entry in the Pokemon dex.
+    UnknownSpecies { mon_idx: usize, species: Species },
 }
 
 impl std::fmt::Display for DeterminizeError {
@@ -197,8 +199,11 @@ impl std::fmt::Display for DeterminizeError {
             ),
             DeterminizeError::NoCandidates { mon_idx, attribute } => write!(
                 f,
-                "mon {mon_idx}: no candidates for {attribute} and uniform fallback is disabled"
+                "mon {mon_idx}: no valid candidates for {attribute}"
             ),
+            DeterminizeError::UnknownSpecies { mon_idx, species } => {
+                write!(f, "mon {mon_idx} ({species:?}): species is not in the Pokemon dex")
+            }
         }
     }
 }
@@ -260,6 +265,80 @@ fn draw_uniform<T: Clone>(candidates: Vec<T>, log: &mut DrawLog) -> Option<T> {
     Some(value)
 }
 
+fn draw_from_unknown<T: Clone + PartialEq>(
+    lattice: &Unknown<T>,
+    domain: Vec<T>,
+    mon_idx: usize,
+    attribute: &'static str,
+    log: &mut DrawLog,
+) -> Result<T, DeterminizeError> {
+    if let Unknown::Known(value) = lattice {
+        return Ok(value.clone());
+    }
+    let candidates = match lattice {
+        Unknown::Possibly(values) => values.clone(),
+        Unknown::Not(_) => domain
+            .into_iter()
+            .filter(|value| !unknown_is_excluded(lattice, value))
+            .collect(),
+        Unknown::Known(_) => unreachable!(),
+    };
+    draw_uniform(candidates, log).ok_or(DeterminizeError::NoCandidates {
+        mon_idx,
+        attribute,
+    })
+}
+
+fn sample_gender(
+    mon_idx: usize,
+    unk: &UnknownPokemonState,
+    data: &PokemonData,
+    log: &mut DrawLog,
+) -> Result<PokemonGender, DeterminizeError> {
+    let domain = vec![data.default_gender];
+    draw_from_unknown(
+        &unk.possible_genders,
+        domain,
+        mon_idx,
+        "gender",
+        log,
+    )
+}
+
+fn sample_tera_type(
+    mon_idx: usize,
+    unk: &UnknownPokemonState,
+    log: &mut DrawLog,
+) -> Result<PokemonType, DeterminizeError> {
+    let domain = vec![
+        PokemonType::Normal,
+        PokemonType::Fire,
+        PokemonType::Water,
+        PokemonType::Electric,
+        PokemonType::Grass,
+        PokemonType::Ice,
+        PokemonType::Fighting,
+        PokemonType::Poison,
+        PokemonType::Ground,
+        PokemonType::Flying,
+        PokemonType::Psychic,
+        PokemonType::Bug,
+        PokemonType::Rock,
+        PokemonType::Ghost,
+        PokemonType::Dragon,
+        PokemonType::Dark,
+        PokemonType::Steel,
+        PokemonType::Fairy,
+    ];
+    draw_from_unknown(
+        &unk.possible_tera_type,
+        domain,
+        mon_idx,
+        "tera_type",
+        log,
+    )
+}
+
 // ── Item ─────────────────────────────────────────────────────────────────────
 
 /// Pick a held item.
@@ -276,11 +355,6 @@ pub(crate) fn sample_item(
     cfg: &DeterminizeConfig,
     log: &mut DrawLog,
 ) -> Result<Item, DeterminizeError> {
-    // A revealed item is not a choice.
-    if let crate::information::unknowns::Unknown::Known(item) = &unk.item {
-        return Ok(item.clone());
-    }
-
     let admissible = |item: &Item| {
         !unknown_is_excluded(&unk.item, item)
             && cfg.inference.legal_item_ok(item)
@@ -288,6 +362,16 @@ pub(crate) fn sample_item(
                 || cfg.inference.allow_repeat_items
                 || !used_items.contains(item))
     };
+
+    // A revealed item must satisfy the format rules.
+    if let Unknown::Known(item) = &unk.item {
+        return admissible(item)
+            .then(|| item.clone())
+            .ok_or(DeterminizeError::NoCandidates {
+                mon_idx,
+                attribute: "item",
+            });
+    }
 
     if let Some(meta) = meta {
         let candidates: Vec<(Item, f64)> = meta
@@ -301,31 +385,43 @@ pub(crate) fn sample_item(
         }
     }
 
-    // Fallback: the union of every item anyone runs in this format. Legal by
-    // construction, and far tighter than enumerating the ~1,000-variant enum,
-    // most of which is unobtainable in competitive play.
+    // Use an explicit belief domain before the format domain.
     if !cfg.allow_uniform_fallback {
         return Err(DeterminizeError::NoCandidates {
             mon_idx,
             attribute: "item",
         });
     }
-    let pool: Vec<Item> = cfg
-        .inference
-        .legal_items
-        .as_ref()
-        .map(|l| l.iter().cloned().collect::<Vec<_>>())
-        .unwrap_or_else(|| meta_item_pool(meta))
-        .into_iter()
-        .filter(admissible)
-        .collect();
+    let source = match &unk.item {
+        Unknown::Possibly(items) => items.clone(),
+        _ => cfg
+            .inference
+            .legal_items
+            .as_ref()
+            .map(|items| items.iter().cloned().collect())
+            .unwrap_or_else(|| {
+                let mut items = meta_item_pool(meta);
+                items.push(Item::None);
+                items
+            }),
+    };
+    let pool: Vec<Item> = source.into_iter().filter(admissible).collect();
+    if pool.is_empty() {
+        return Err(DeterminizeError::NoCandidates {
+            mon_idx,
+            attribute: "item",
+        });
+    }
 
     log.warnings.push(DeterminizeWarning::UniformFallback {
         mon_idx,
         attribute: "item",
         reason: "every listed item was excluded by the belief".to_string(),
     });
-    Ok(draw_uniform(pool, log).unwrap_or(Item::None))
+    draw_uniform(pool, log).ok_or(DeterminizeError::NoCandidates {
+        mon_idx,
+        attribute: "item",
+    })
 }
 
 fn meta_item_pool(meta: Option<&SpeciesMeta>) -> Vec<Item> {
@@ -365,18 +461,20 @@ pub(crate) fn sample_ability(
         }
     }
 
-    // Three species in the cache have no ability rows at all, and the dex's
-    // slot list is the legally correct domain anyway — it is what the inference
-    // engine seeds `possible_abilities` from.
-    let pool: Vec<Ability> = pokemon_dex
-        .get(species)
-        .map(|d| d.abilities.clone())
-        .unwrap_or_default()
+    // A changed ability can be outside the species ability slots.
+    let source = match lattice {
+        Unknown::Possibly(abilities) => abilities.clone(),
+        _ => pokemon_dex
+            .get(species)
+            .map(|data| data.abilities.clone())
+            .unwrap_or_default(),
+    };
+    let pool: Vec<Ability> = source
         .into_iter()
         .filter(|a| !unknown_is_excluded(lattice, a))
         .collect();
 
-    if pool.is_empty() && !cfg.allow_uniform_fallback {
+    if pool.is_empty() || !cfg.allow_uniform_fallback {
         return Err(DeterminizeError::NoCandidates {
             mon_idx,
             attribute: "ability",
@@ -387,9 +485,10 @@ pub(crate) fn sample_ability(
         attribute: "ability",
         reason: "no listed ability survived the belief".to_string(),
     });
-    // `Ability::Illuminate` matches `build_pokemon_state`'s own default, so a
-    // species with no dex data at least stays internally consistent.
-    Ok(draw_uniform(pool, log).unwrap_or(Ability::Illuminate))
+    draw_uniform(pool, log).ok_or(DeterminizeError::NoCandidates {
+        mon_idx,
+        attribute: "ability",
+    })
 }
 
 // ── Nature and EV spread, jointly ────────────────────────────────────────────
@@ -937,15 +1036,16 @@ pub(crate) fn sample_moves(
         let mut pool: Vec<PokemonMove> = learnset
             .map(|l| l.iter().filter(|m| !taken.contains(m)).cloned().collect())
             .unwrap_or_default();
-        // Deterministic order before the seeded shuffle, so a HashSet's
-        // iteration order cannot make the draw irreproducible.
+        // Sort the set to make the seeded draw reproducible.
         pool.sort_by_key(|m| format!("{m:?}"));
-        let pool = shuffle(pool);
 
         let mut added = Vec::new();
-        for m in pool.into_iter().take(wanted) {
-            log.observe(1.0);
-            added.push(m);
+        let weights = vec![1.0; pool.len()];
+        let (picked, probability) =
+            sample_fixed_size_subset(&weights, wanted.min(pool.len()));
+        log.observe(probability);
+        for index in picked {
+            added.push(pool[index].clone());
         }
         if !added.is_empty() {
             log.warnings.push(DeterminizeWarning::LearnsetTopUp {
@@ -956,12 +1056,6 @@ pub(crate) fn sample_moves(
         }
     }
 
-    // Last resort: reuse listed moves the filter rejected rather than emitting a
-    // moveless Pokemon.
-    if chosen.is_empty() && revealed.is_empty()
-        && let Some(meta) = meta {
-            chosen.extend(meta.moves.iter().take(free_slots).map(|w| w.value.clone()));
-        }
     if chosen.is_empty() && revealed.is_empty() {
         return Err(DeterminizeError::NoLegalMoves {
             mon_idx,
@@ -1009,10 +1103,13 @@ pub(crate) fn determinize_pokemon(
         });
     }
 
-    let base_stats = pokemon_dex
+    let pokemon_data = pokemon_dex
         .get(&species)
-        .map(|d| d.base_stats)
-        .unwrap_or([100u16; 6]);
+        .ok_or_else(|| DeterminizeError::UnknownSpecies {
+            mon_idx,
+            species: species.clone(),
+        })?;
+    let base_stats = pokemon_data.base_stats;
 
     // Item first: a mega stone rewrites species and base stats inside
     // `build_pokemon_state`, so it has to be settled before the spread.
@@ -1050,10 +1147,8 @@ pub(crate) fn determinize_pokemon(
         sample_nature_and_spread(mon_idx, unk, &species, base_stats, meta, cfg, log)?;
     let moves = sample_moves(mon_idx, unk, &species, meta, cfg, log)?;
 
-    let gender = match &unk.possible_genders {
-        crate::information::unknowns::Unknown::Known(g) => Some(*g),
-        _ => None,
-    };
+    let gender = sample_gender(mon_idx, unk, pokemon_data, log)?;
+    let tera_type = sample_tera_type(mon_idx, unk, log)?;
 
     let mut mon = build_pokemon_state(
         species,
@@ -1061,20 +1156,11 @@ pub(crate) fn determinize_pokemon(
         move_dex,
         Some(unk.level.max(1)),
         Some(moves),
-        gender,
+        Some(gender),
         Some(ability.clone()),
         Some(spread.nature),
         Some(item),
-        // TODO(tera): Tera is not implemented yet and the usage cache carries no
-        // tera data, so this defaults to Normal. A *known* tera type is still
-        // honoured — anything else would contradict the belief and trip the
-        // subset oracle. When tera lands, the `_` arm should sample from
-        // `possible_tera_type` instead; `is_tera` and the battle-level
-        // `p*_has_tera` are already faithful.
-        Some(match &unk.possible_tera_type {
-            crate::information::unknowns::Unknown::Known(t) => t.clone(),
-            _ => PokemonType::Normal,
-        }),
+        Some(tera_type),
         // Raw authoring points, NOT scaled EVs: `build_pokemon_state` applies
         // `scale_evs_for_stat_points` itself when `use_stat_points` is set, and
         // passing pre-scaled values would apply `8p − 4` twice.
@@ -1109,6 +1195,12 @@ fn copy_known_pokemon(
     let Unknown::Known(species) = &unk.possible_species else {
         return Err(DeterminizeError::SpeciesUndetermined { mon_idx });
     };
+    if !pokemon_dex.contains_key(species) {
+        return Err(DeterminizeError::UnknownSpecies {
+            mon_idx,
+            species: species.clone(),
+        });
+    }
 
     let known_or = |lattice: &Unknown<Ability>, fallback: Ability| match lattice {
         Unknown::Known(a) => a.clone(),
@@ -1516,7 +1608,7 @@ pub fn determinize(
     let oracle_belief = UnknownMatchState::Battle(belief.clone());
     let mut last: Option<(Determinized, Vec<String>)> = None;
 
-    for _ in 0..=cfg.max_repair_passes.max(1) {
+    for _ in 0..=cfg.max_repair_passes {
         let world = determinize_once(belief, meta_dex, pokemon_dex, move_dex, cfg)?;
         let violations = collect_true_state_subset_violations(
             &world.state,

@@ -16,8 +16,8 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::determinize::{
-    DeterminizeConfig, DeterminizeError, DeterminizeWarning, check_determinization, determinize,
-    determinize_seeded,
+    DeterminizeConfig, DeterminizeError, DeterminizeWarning, DrawLog, check_determinization,
+    determinize, determinize_pokemon, determinize_seeded,
 };
 use crate::information::inference::InferenceConfig;
 use crate::information::subset_check::collect_true_state_subset_violations;
@@ -27,7 +27,8 @@ use crate::information::unknowns::{
 use crate::meta::{MetaDex, MetaFormat};
 use crate::simulator::sample_turn_raw_seeded;
 use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
-use crate::state::pokemon::{Nature, PokemonState, nature_stat_modifiers};
+use crate::state::dex_data::PokemonType;
+use crate::state::pokemon::{Nature, PokemonGender, PokemonState, nature_stat_modifiers};
 use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -1210,6 +1211,89 @@ fn no_move_source_is_a_hard_error() {
     let err = determinize_seeded(1, &belief, meta, pokemon_dex(), move_dex(), &config())
         .expect_err("a Pokemon with no move source must not be silently built");
     assert!(matches!(err, DeterminizeError::NoLegalMoves { .. }), "{err:?}");
+}
+
+// ── Error paths ──────────────────────────────────────────────────────────────
+
+#[test]
+fn explicit_hidden_domains_replace_default_values() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+    let opponent = &mut belief.p2_active_mons[0];
+    opponent.possible_genders = Unknown::Possibly(vec![PokemonGender::Female]);
+    opponent.possible_tera_type = Unknown::Possibly(vec![PokemonType::Fire]);
+    opponent.item = Unknown::Possibly(vec![Item::OranBerry]);
+    opponent.ability_changed_on_field = true;
+    opponent.possible_abilities = Unknown::Possibly(vec![Ability::Intimidate]);
+
+    let world =
+        determinize_seeded(2, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+    let mon = &world.state.p2_active_mons[0];
+    assert_eq!(mon.gender, PokemonGender::Female);
+    assert_eq!(mon.tera_type, PokemonType::Fire);
+    assert_eq!(mon.item, Item::OranBerry);
+    assert_eq!(mon.ability, Ability::Intimidate);
+    assert!(check_determinization(&world, &belief, pokemon_dex()).is_empty());
+}
+
+#[test]
+fn an_empty_item_domain_is_an_error() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+    belief.p2_active_mons[0].item = Unknown::Possibly(Vec::new());
+
+    let err = determinize_seeded(2, &belief, meta, pokemon_dex(), move_dex(), &config())
+        .expect_err("an empty item domain must not produce Item::None");
+    assert!(
+        matches!(
+            err,
+            DeterminizeError::NoCandidates {
+                attribute: "item",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_learnset_rejection_is_not_bypassed() {
+    with_meta!(meta);
+    let belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+    let mut learnset_dex = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, HashSet::new());
+    let cfg = DeterminizeConfig {
+        inference: InferenceConfig {
+            learnset_dex,
+            ..InferenceConfig::default()
+        },
+        observer: Player::P1,
+        ..Default::default()
+    };
+
+    let err = determinize_seeded(2, &belief, meta, pokemon_dex(), move_dex(), &cfg)
+        .expect_err("the determinizer must not restore rejected moves");
+    assert!(matches!(err, DeterminizeError::NoLegalMoves { .. }), "{err:?}");
+}
+
+#[test]
+fn a_missing_pokemon_dex_entry_is_an_error() {
+    with_meta!(meta);
+    let opponent = opponent(Species::Garchomp);
+    let mut used_items = HashSet::new();
+    let mut log = DrawLog::new();
+    let err = determinize_pokemon(
+        0,
+        &opponent,
+        meta,
+        &HashMap::new(),
+        move_dex(),
+        &mut used_items,
+        &config(),
+        &mut log,
+    )
+    .expect_err("an unknown species must not use fabricated base stats");
+    assert!(matches!(err, DeterminizeError::UnknownSpecies { .. }), "{err:?}");
 }
 
 // ── 6. Bench construction ────────────────────────────────────────────────────
