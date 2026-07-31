@@ -1,7 +1,17 @@
 Remove items when the work is complete.
 
-# Fixes: If there are <3 below here, should be included in ADDITION to another major TODO item
-- Auto team generation only generates pokemon up to the brought number, but should generate until 6 always independent of how many you bring to the format.
+# Fixes: If there is only 1 top-level item below here, should be included in ADDITION to another major TODO item
+- Some simulator bug where protect doesn't work with rage powder + earthquake: '''P1's Whimsicott used Protect!
+
+P1's Whimsicott protected itself!
+
+P2's Sinistcha used Rage Powder!
+
+P2's Sinistcha gained Rage Powder!
+
+P1's Garchomp used Earthquake!
+
+P1's Whimsicott took damage (now 27 HP)'''
 
 
 # New Features

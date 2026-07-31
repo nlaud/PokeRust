@@ -74,6 +74,9 @@ export default function SetupPanel() {
       p2TeamMode: team2Source === 'meta' ? 'meta' : 'sheet',
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
+      // A generated side gets the full roster of the format.
+      // Team preview then picks the brought Pokemon out of it.
+      totalPerSide: format.totalPokemon,
       forceMaxIvs: format.forceMaxIvs,
       teraEnabled: format.teraEnabled,
       megaEnabled: format.megaEnabled,

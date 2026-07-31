@@ -525,6 +525,12 @@ pub struct CreateBattleRequest {
     pub meta_seed: Option<u64>,
     pub active_per_side: u8,
     pub brought_per_side: u8,
+    /// The roster size of the format.
+    /// A generated team gets this many Pokemon, and team preview brings
+    /// `brought_per_side` of them.
+    /// The default of 6 keeps an older client working.
+    #[serde(default = "default_roster_size")]
+    pub total_per_side: u8,
     #[serde(default = "default_true")]
     pub stat_points: bool,
     #[serde(default = "default_true")]
@@ -557,6 +563,11 @@ fn default_true() -> bool {
 
 fn default_damage_rolls() -> u8 {
     16
+}
+
+/// The Champions roster size.
+fn default_roster_size() -> u8 {
+    6
 }
 
 fn default_team_mode() -> String {

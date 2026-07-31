@@ -76,13 +76,18 @@ fn lock_sessions(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, Ba
 
 /// Returns pasted teamsheet text or generates a teamsheet.
 /// Generated teams use the same parser and validation as pasted teams.
+///
+/// `roster_size` is the roster of the format, not the brought count. A meta
+/// side must own a full roster, because team preview then picks the brought
+/// Pokemon out of it. A roster equal to the brought count removes that choice
+/// and leaves the side with no reserve.
 fn resolve_team_text(
     label: &str,
     mode: &str,
     sheet: &str,
     app: &AppState,
     format: MetaFormat,
-    brought_per_side: u8,
+    roster_size: u8,
     seed: u64,
 ) -> Result<String, String> {
     if mode != "meta" {
@@ -98,19 +103,44 @@ fn resolve_team_text(
         meta_dex,
         &app.dexes.pokemon_dex,
         &app.dexes.learnset_dex,
-        brought_per_side as usize,
+        roster_size as usize,
         seed,
     )
     .map_err(|e| format!("{label}: {e}"))?;
     Ok(poke_rust::meta::render_teamsheet(&team))
 }
 
+/// Checks the three per-side counts of a create-battle request.
+/// Returns the error message of the first broken rule.
+///
+/// A roster below the brought count cannot fill team preview. A generated team
+/// would then fail the roster-length check in `create_battle`, and that message
+/// blames the generator instead of the counts.
+fn side_count_error(
+    active_per_side: u8,
+    brought_per_side: u8,
+    total_per_side: u8,
+) -> Option<&'static str> {
+    if active_per_side == 0 || brought_per_side < active_per_side {
+        return Some("activePerSide must be >= 1 and <= broughtPerSide");
+    }
+    if total_per_side < brought_per_side {
+        return Some("totalPerSide must be >= broughtPerSide");
+    }
+    if total_per_side > 6 {
+        return Some("totalPerSide must be <= 6");
+    }
+    None
+}
+
 pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
 ) -> Response {
-    if req.active_per_side == 0 || req.brought_per_side < req.active_per_side {
-        return unprocessable("activePerSide must be >= 1 and <= broughtPerSide");
+    if let Some(message) =
+        side_count_error(req.active_per_side, req.brought_per_side, req.total_per_side)
+    {
+        return unprocessable(message);
     }
     if !(1..=16).contains(&req.damage_rolls) {
         return unprocessable("damageRolls must be between 1 and 16");
@@ -146,7 +176,7 @@ pub async fn create_battle(
         &req.p1_team,
         &app,
         format,
-        req.brought_per_side,
+        req.total_per_side,
         meta_seed,
     ) {
         Ok(text) => text,
@@ -158,7 +188,7 @@ pub async fn create_battle(
         &req.p2_team,
         &app,
         format,
-        req.brought_per_side,
+        req.total_per_side,
         // Distinct from p1's seed so two "meta" sides in one request don't
         // draw the same team; `StdRng` decorrelates adjacent seeds fine, no
         // fancier mixing needed.
@@ -765,6 +795,8 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
 #[cfg(test)]
 mod tests {
     use super::catch_benchmark_panic;
+    use super::side_count_error;
+    use crate::dto::CreateBattleRequest;
 
     #[test]
     fn benchmark_panics_become_sweep_failures() {
@@ -773,5 +805,67 @@ mod tests {
             result,
             Err("benchmark sweep panicked: synthetic sweep failure".to_string())
         );
+    }
+
+    #[test]
+    fn a_full_roster_with_a_smaller_brought_count_is_valid() {
+        assert_eq!(side_count_error(2, 4, 6), None);
+        assert_eq!(side_count_error(1, 3, 6), None);
+        assert_eq!(side_count_error(2, 6, 6), None);
+    }
+
+    #[test]
+    fn a_roster_below_the_brought_count_is_rejected() {
+        assert_eq!(
+            side_count_error(2, 4, 3),
+            Some("totalPerSide must be >= broughtPerSide")
+        );
+    }
+
+    #[test]
+    fn a_roster_above_six_is_rejected() {
+        assert_eq!(
+            side_count_error(2, 4, 7),
+            Some("totalPerSide must be <= 6")
+        );
+    }
+
+    #[test]
+    fn the_active_count_rule_still_runs_first() {
+        assert_eq!(
+            side_count_error(0, 4, 6),
+            Some("activePerSide must be >= 1 and <= broughtPerSide")
+        );
+        assert_eq!(
+            side_count_error(4, 2, 6),
+            Some("activePerSide must be >= 1 and <= broughtPerSide")
+        );
+    }
+
+    /// An older client sends no `totalPerSide`, and it must still get a roster
+    /// of 6.
+    #[test]
+    fn an_absent_roster_size_defaults_to_six() {
+        let body = r#"{
+            "p1Team": "",
+            "p2Team": "",
+            "activePerSide": 2,
+            "broughtPerSide": 4
+        }"#;
+        let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(req.total_per_side, 6);
+    }
+
+    #[test]
+    fn a_sent_roster_size_wins_over_the_default() {
+        let body = r#"{
+            "p1Team": "",
+            "p2Team": "",
+            "activePerSide": 2,
+            "broughtPerSide": 4,
+            "totalPerSide": 5
+        }"#;
+        let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(req.total_per_side, 5);
     }
 }

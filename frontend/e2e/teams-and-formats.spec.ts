@@ -19,6 +19,58 @@ test.describe('Teams page', () => {
 })
 
 test.describe('Formats page', () => {
+  test('default Champions formats disable Tera', async ({ page }) => {
+    await page.goto('/formats')
+
+    await expect(page.getByText('Mega only', { exact: true })).toHaveCount(2)
+  })
+
+  test('v1 migration keeps a custom Tera setting', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'pokerust.formats.v1',
+        JSON.stringify({
+          formats: [
+            {
+              id: 'champions-s2-singles',
+              name: 'Pokémon Champions Season 2 Singles',
+              activePokemon: 1,
+              totalPokemon: 6,
+              broughtPokemon: 3,
+              bannedItems: [],
+              forceMaxIvs: true,
+              teraEnabled: true,
+              megaEnabled: true,
+              favorite: false,
+            },
+            {
+              id: 'custom-tera-format',
+              name: 'Custom Tera Format',
+              activePokemon: 1,
+              totalPokemon: 4,
+              broughtPokemon: 3,
+              bannedItems: [],
+              forceMaxIvs: true,
+              teraEnabled: true,
+              megaEnabled: true,
+              favorite: false,
+            },
+          ],
+        }),
+      )
+    })
+
+    await page.goto('/formats')
+
+    const champions = page.locator('div').filter({ hasText: 'Pokémon Champions Season 2 Singles' })
+    const custom = page.locator('div').filter({ hasText: 'Custom Tera Format' })
+    await expect(champions.getByText('Mega only', { exact: true }).first()).toBeVisible()
+    await expect(custom.getByText('Tera + Mega', { exact: true }).first()).toBeVisible()
+
+    await page.reload()
+    await expect(custom.getByText('Tera + Mega', { exact: true }).first()).toBeVisible()
+  })
+
   test('creating a format persists it with the right brought/active summary', async ({ page }) => {
     await page.goto('/formats')
     await page.getByRole('button', { name: 'Add format' }).click()

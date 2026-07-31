@@ -250,6 +250,8 @@ export interface CreateBattleRequest {
   metaSeed?: number
   activePerSide: number
   broughtPerSide: number
+  /** The roster size of the format. A generated team gets this many Pokemon. */
+  totalPerSide: number
   statPoints?: boolean
   considerCrit?: boolean
   /** Sets all inferred opponent IVs to 31. */

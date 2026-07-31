@@ -206,6 +206,31 @@ fn rendered_teamsheet_round_trips_through_the_real_parser() {
     }
 }
 
+/// Champions has no Terastallization, so a generated sheet must carry no Tera
+/// type. The sheets in `teamsheets/` write no `Tera Type:` line either, and the
+/// parser then leaves the field at its default.
+///
+/// This locks the current behavior. A later change that adds a `tera_type` row
+/// to the usage cache, or a Tera line to the renderer, fails here.
+#[test]
+fn a_generated_sheet_carries_no_tera_type() {
+    with_meta!(meta);
+    for seed in [1u64, 7, 99, 2026] {
+        let team = generate_meta_team(meta, pokemon_dex(), learnset_dex(), 6, seed)
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        let sheet_text = render_teamsheet(&team);
+        // Match the sheet field, not the word. A species name such as Terapagos
+        // and a move name such as Tera Blast both hold the same three letters.
+        let tera_line = sheet_text
+            .lines()
+            .find(|line| line.trim().to_lowercase().starts_with("tera type"));
+        assert!(
+            tera_line.is_none(),
+            "seed {seed}: a generated sheet must write no Tera Type line:\n{sheet_text}"
+        );
+    }
+}
+
 #[test]
 fn shorter_teams_are_supported() {
     with_meta!(meta);

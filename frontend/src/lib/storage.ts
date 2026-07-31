@@ -27,7 +27,10 @@ export interface StoredFormat {
 }
 
 const TEAMS_KEY = 'pokerust.teams.v1'
-const FORMATS_KEY = 'pokerust.formats.v1'
+const FORMATS_KEY = 'pokerust.formats.v2'
+/** The v1 formats key. `loadFormats` migrates these rows once. */
+const FORMATS_KEY_V1 = 'pokerust.formats.v1'
+const CHAMPIONS_FORMAT_IDS = new Set(['champions-s2-doubles', 'champions-s2-singles'])
 
 function readJson<T>(key: string): T | null {
   try {
@@ -61,7 +64,8 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     broughtPokemon: 4,
     bannedItems: [],
     forceMaxIvs: true,
-    teraEnabled: true,
+    // Pokémon Champions has no Terastallization.
+    teraEnabled: false,
     megaEnabled: true,
     favorite: false,
   },
@@ -73,26 +77,43 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     broughtPokemon: 3,
     bannedItems: [],
     forceMaxIvs: true,
-    teraEnabled: true,
+    // Pokémon Champions has no Terastallization.
+    teraEnabled: false,
     megaEnabled: true,
     favorite: false,
   },
 ]
 
-export function loadFormats(): StoredFormat[] {
-  const stored = readJson<{ formats: StoredFormat[] }>(FORMATS_KEY)
-  if (!stored) {
-    saveFormats(DEFAULT_FORMATS)
-    return DEFAULT_FORMATS
-  }
-  // Add new fields to old stored rows.
-  return stored.formats.map((f) => ({
+/** Adds fields that an older row can lack. */
+function withDefaults(f: StoredFormat): StoredFormat {
+  return {
     ...f,
     favorite: f.favorite ?? false,
     forceMaxIvs: f.forceMaxIvs ?? true,
-    teraEnabled: f.teraEnabled ?? true,
+    teraEnabled: f.teraEnabled ?? false,
     megaEnabled: f.megaEnabled ?? true,
-  }))
+  }
+}
+
+export function loadFormats(): StoredFormat[] {
+  const stored = readJson<{ formats: StoredFormat[] }>(FORMATS_KEY)
+  if (stored) return stored.formats.map(withDefaults)
+
+  // Champions has no Terastallization. Disable Tera for the built-in formats.
+  // Keep the saved setting for a user-created format.
+  const v1 = readJson<{ formats: StoredFormat[] }>(FORMATS_KEY_V1)
+  if (v1) {
+    const migrated = v1.formats.map((f) => {
+      const format = withDefaults(f)
+      return CHAMPIONS_FORMAT_IDS.has(format.id) ? { ...format, teraEnabled: false } : format
+    })
+    saveFormats(migrated)
+    localStorage.removeItem(FORMATS_KEY_V1)
+    return migrated
+  }
+
+  saveFormats(DEFAULT_FORMATS)
+  return DEFAULT_FORMATS
 }
 
 export function saveFormats(formats: StoredFormat[]) {

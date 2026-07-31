@@ -57,7 +57,8 @@ export default function FormatsPage() {
               broughtPokemon: 3,
               bannedItems: [],
               forceMaxIvs: true,
-              teraEnabled: true,
+              // Pokémon Champions has no Terastallization.
+              teraEnabled: false,
               megaEnabled: true,
               favorite: false,
             }}
