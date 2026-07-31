@@ -4,7 +4,7 @@ Remove items when the work is complete.
 - Auto team generation only generates pokemon up to the brought number, but should generate until 6 always independent of how many you bring to the format.
 
 
- #New Features
+# New Features
 ## Solver target
 
 Name these games separately:
