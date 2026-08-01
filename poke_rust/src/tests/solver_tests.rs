@@ -1623,11 +1623,6 @@ fn open_list_determinize_config() -> DeterminizeConfig {
 }
 
 /// An open-list belief over `p1` and `p2`.
-///
-/// `OpenTeamSheetNatures` is the tournament mode: the sheet shows every field
-/// except the numeric stats. Each opponent Pokemon therefore needs all four move
-/// slots filled, or the determinizer treats an empty slot as unrevealed and
-/// draws a move into it.
 fn open_list_belief(p1: Vec<PokemonState>, p2: Vec<PokemonState>) -> UnknownTeamPreviewState {
     // Bring one and lead one, so the choice count stays at the team size.
     let belief = UnknownMatchState::team_preview_open_sheet_from_perspective(
@@ -1647,20 +1642,11 @@ fn open_list_belief(p1: Vec<PokemonState>, p2: Vec<PokemonState>) -> UnknownTeam
     }
 }
 
-/// One Pokemon a side. P1 brings one move so its own action set stays at one,
-/// and P2 fills every move slot so the sheet reveals a complete move set.
+/// One Pokemon on each side with one move on each Pokemon.
 fn open_list_belief_1v1() -> UnknownTeamPreviewState {
     open_list_belief(
         vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
-        vec![mon(
-            Species::Snorlax,
-            &[
-                PokemonMove::BodySlam,
-                PokemonMove::Crunch,
-                PokemonMove::Rest,
-                PokemonMove::Yawn,
-            ],
-        )],
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
     )
 }
 
@@ -1709,6 +1695,31 @@ fn open_list_preview_draws_distinct_worlds() {
         opponent_stats.len() > 1,
         "every world drew the same opponent stats: {opponent_stats:?}"
     );
+}
+
+#[test]
+fn open_list_preview_preserves_revealed_empty_move_slots() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+
+    let worlds = open_list_worlds(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(3),
+        &open_list_determinize_config(),
+    )
+    .expect("the belief is well formed");
+
+    for world in worlds {
+        assert_eq!(
+            world.state.p2_mons[0].moves,
+            [Some(PokemonMove::BodySlam), None, None, None]
+        );
+        assert_eq!(world.state.p2_mons[0].max_pp[1..], [0, 0, 0]);
+    }
 }
 
 /// The soundness test. Build every cell of every world by hand, average them,

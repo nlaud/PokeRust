@@ -961,8 +961,8 @@ fn shuffle<T: Clone>(mut items: Vec<T>) -> Vec<T> {
 /// number of unlisted moves matches the data. Each one that gets drawn is then
 /// filled from the species' learnset.
 ///
-/// Revealed moves keep their original slot indices — `move_pp[i]`,
-/// `used_moves_this_field[i]` and Last Resort are all slot-indexed.
+/// Revealed moves keep their original slot indices. An open sheet also reveals
+/// empty slots. Such a slot has no move and has zero maximum PP.
 pub(crate) fn sample_moves(
     mon_idx: usize,
     unk: &UnknownPokemonState,
@@ -973,7 +973,12 @@ pub(crate) fn sample_moves(
 ) -> Result<[Option<PokemonMove>; 4], DeterminizeError> {
     let mut slots = unk.known_moves.clone();
     let revealed: HashSet<PokemonMove> = slots.iter().flatten().cloned().collect();
-    let free_slots = slots.iter().filter(|s| s.is_none()).count();
+    let unknown_slots: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| (slot.is_none() && unk.max_pp[index] < 0).then_some(index))
+        .collect();
+    let free_slots = unknown_slots.len();
     if free_slots == 0 {
         return Ok(slots);
     }
@@ -1064,10 +1069,8 @@ pub(crate) fn sample_moves(
     }
 
     let mut fill = chosen.into_iter();
-    for slot in slots.iter_mut() {
-        if slot.is_none() {
-            *slot = fill.next();
-        }
+    for index in unknown_slots {
+        slots[index] = fill.next();
     }
     Ok(slots)
 }

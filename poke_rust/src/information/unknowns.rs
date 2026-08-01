@@ -51,9 +51,10 @@ pub struct UnknownPokemonState {
 
     pub level: u8,
     pub hp: PokemonHP,
-    pub known_moves: [Option<PokemonMove>; 4], // `None` means that the move is unknown.
-    pub move_pp: [i8; 4],                      // `-1` means that the current PP is unknown.
-    pub max_pp: [i8; 4],                       // `-1` means that the maximum PP is unknown.
+    // `None` with `max_pp == -1` is unknown. `None` with `max_pp == 0` is a known empty slot.
+    pub known_moves: [Option<PokemonMove>; 4],
+    pub move_pp: [i8; 4], // `-1` means that the current PP is unknown.
+    pub max_pp: [i8; 4],  // `-1` means that the maximum PP is unknown.
     pub item: Unknown<Item>,
     /// Stores the last item that this Pokémon consumed.
     /// Harvest and Recycle use this item.
