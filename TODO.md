@@ -56,12 +56,7 @@ It runs double oracle over the 180 choices, and it caches or precomputes cells.
 
 ### Action selection
 
-- [ ] Replace the stride-based action cap.
-  - [ ] Keep Tera and Mega actions in capped searches.
-  - [ ] Seed the restricted game with the prior depth support.
-  - [ ] Add actions through full best-response checks.
-  - [ ] Generate commands by resource choice, slot command, and target.
-  - [ ] Remove proven duplicate or dominated commands.
+- [ ] Remove proven dominated commands from the action set.
 
 Do not assume that both active slots are independent.
 Targets, spread moves, redirection, Protect, switching, Tera, and Mega couple the slots.

@@ -11,11 +11,13 @@
 //! Replacement phases use `replacement_commands_are_valid`.
 //! The replacement validator uses each available bench Pokémon before it permits an empty slot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::simulator::{get_possible_commands_for_active_slot, validate_battle_command_combination};
+use crate::simulator::{
+    get_possible_commands_for_active_slot, validate_battle_command_combination,
+};
 use crate::state::battle::{
     BattleCommand, BattleState, FieldSlot, MatchState, Player, SwitchCommand,
 };
@@ -150,7 +152,11 @@ pub fn per_slot_commands(
             }
 
             Phase::Normal => get_possible_commands_for_active_slot(
-                state, player, slot_idx, move_dex, pokemon_dex,
+                state,
+                player,
+                slot_idx,
+                move_dex,
+                pokemon_dex,
             ),
         })
         .collect()
@@ -190,6 +196,10 @@ pub fn joint_actions(
         actions.push(vec![BattleCommand::Pass; actives.len()]);
     }
 
+    // Duplicate removal is lossless, so it runs before `total`. A capped set
+    // then reports only the actions that the cap really dropped.
+    actions = remove_duplicate_actions(actions, actives);
+
     let total = actions.len();
     if let Some(cap) = cap {
         actions = reduce_to_cap(actions, cap);
@@ -197,35 +207,372 @@ pub fn joint_actions(
     JointActions { actions, total }
 }
 
+/// The battle resources that one joint action spends.
+///
+/// A joint action spends at most one Tera and at most one Mega.
+/// `validate_battle_command_combination` rejects the other combinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ResourceChoice {
+    Plain,
+    Tera,
+    Mega,
+    TeraMega,
+}
+
+/// The resource groups, in the order that the cap gives them a share.
+const RESOURCE_CHOICES: [ResourceChoice; 4] = [
+    ResourceChoice::Plain,
+    ResourceChoice::Tera,
+    ResourceChoice::Mega,
+    ResourceChoice::TeraMega,
+];
+
+fn resource_choice(combo: &[BattleCommand]) -> ResourceChoice {
+    let mut tera = false;
+    let mut mega = false;
+    for command in combo {
+        if let BattleCommand::Attack(attack) = command {
+            tera |= attack.terastallize;
+            mega |= attack.mega_evolve;
+        }
+    }
+    match (tera, mega) {
+        (false, false) => ResourceChoice::Plain,
+        (true, false) => ResourceChoice::Tera,
+        (false, true) => ResourceChoice::Mega,
+        (true, true) => ResourceChoice::TeraMega,
+    }
+}
+
+/// One slot command without its target or resource flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SlotKey {
+    Pass,
+    Struggle,
+    Switch(usize),
+    Attack(usize),
+}
+
+/// One complete slot command for action-cap coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ExactSlotKey {
+    Pass,
+    Struggle(Option<FieldSlot>),
+    Switch(usize),
+    Attack {
+        move_slot: usize,
+        target: Option<FieldSlot>,
+        terastallize: bool,
+        mega_evolve: bool,
+    },
+}
+
+fn exact_slot_key(command: &BattleCommand) -> ExactSlotKey {
+    match command {
+        BattleCommand::Pass => ExactSlotKey::Pass,
+        BattleCommand::Struggle { target } => ExactSlotKey::Struggle(*target),
+        BattleCommand::Switch(switch) => ExactSlotKey::Switch(switch.party_index),
+        BattleCommand::Attack(attack) => ExactSlotKey::Attack {
+            move_slot: attack.move_slot,
+            target: attack.target,
+            terastallize: attack.terastallize,
+            mega_evolve: attack.mega_evolve,
+        },
+    }
+}
+
+/// Identifies the slots that use Tera and Mega in one joint action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ResourceAssignment {
+    tera_slot: Option<usize>,
+    mega_slot: Option<usize>,
+}
+
+fn resource_assignment(combo: &[BattleCommand]) -> ResourceAssignment {
+    let mut assignment = ResourceAssignment {
+        tera_slot: None,
+        mega_slot: None,
+    };
+    for (slot_idx, command) in combo.iter().enumerate() {
+        if let BattleCommand::Attack(attack) = command {
+            if attack.terastallize {
+                assignment.tera_slot = Some(slot_idx);
+            }
+            if attack.mega_evolve {
+                assignment.mega_slot = Some(slot_idx);
+            }
+        }
+    }
+    assignment
+}
+
+fn slot_key(command: &BattleCommand) -> SlotKey {
+    match command {
+        BattleCommand::Pass => SlotKey::Pass,
+        BattleCommand::Struggle { .. } => SlotKey::Struggle,
+        BattleCommand::Switch(switch) => SlotKey::Switch(switch.party_index),
+        BattleCommand::Attack(attack) => SlotKey::Attack(attack.move_slot),
+    }
+}
+
+/// The lowest move slot that holds the same move with the same PP.
+///
+/// A Pokemon can know one move in two slots. Both commands queue the same move
+/// name. Move execution also finds the PP slot by that name.
+///
+/// The equal-PP check makes this reduction conservative. Name-based effects,
+/// such as Disable and Choice Lock, also treat the commands equally.
+fn canonical_move_slot(mon: &PokemonState, move_slot: usize) -> usize {
+    if move_slot >= mon.moves.len() {
+        return move_slot;
+    }
+    let Some(name) = mon.moves[move_slot].as_ref() else {
+        return move_slot;
+    };
+    let pp = mon.move_pp[move_slot];
+    (0..move_slot)
+        .find(|&earlier| mon.moves[earlier].as_ref() == Some(name) && mon.move_pp[earlier] == pp)
+        .unwrap_or(move_slot)
+}
+
+/// One slot command with its move slot replaced by the canonical move slot.
+/// The target and both resource flags stay in the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DuplicateKey {
+    command: SlotKey,
+    target: Option<FieldSlot>,
+    terastallize: bool,
+    mega_evolve: bool,
+}
+
+/// One joint action with each repeated move slot replaced by its canonical slot.
+/// Two joint actions with the same key have the same value.
+///
+/// The key holds the resource flags of each slot. Two joint actions that
+/// Terastallize a different slot therefore keep a different key.
+fn duplicate_key(combo: &[BattleCommand], actives: &[PokemonState]) -> Vec<DuplicateKey> {
+    combo
+        .iter()
+        .enumerate()
+        .map(|(slot_idx, command)| match command {
+            BattleCommand::Attack(attack) => DuplicateKey {
+                command: match actives.get(slot_idx) {
+                    Some(mon) => SlotKey::Attack(canonical_move_slot(mon, attack.move_slot)),
+                    None => SlotKey::Attack(attack.move_slot),
+                },
+                target: attack.target,
+                terastallize: attack.terastallize,
+                mega_evolve: attack.mega_evolve,
+            },
+            BattleCommand::Struggle { target } => DuplicateKey {
+                command: SlotKey::Struggle,
+                target: *target,
+                terastallize: false,
+                mega_evolve: false,
+            },
+            other => DuplicateKey {
+                command: slot_key(other),
+                target: None,
+                terastallize: false,
+                mega_evolve: false,
+            },
+        })
+        .collect()
+}
+
+/// Removes the joint actions that repeat the value of an earlier joint action.
+/// The resource flags stay in the key, so this step never drops a Tera or a Mega.
+fn remove_duplicate_actions(
+    actions: Vec<Vec<BattleCommand>>,
+    actives: &[PokemonState],
+) -> Vec<Vec<BattleCommand>> {
+    let mut seen: HashSet<Vec<DuplicateKey>> = HashSet::new();
+    actions
+        .into_iter()
+        .filter(|combo| seen.insert(duplicate_key(combo, actives)))
+        .collect()
+}
+
 /// Reduces a joint-action set to `cap` entries.
-/// First, removes Tera and Mega variants.
-/// Then keeps actions at a regular interval.
-/// This process keeps a mix of switches and attacks.
+///
+/// The reduction runs in three steps.
+///
+/// 1. Group the actions by resource choice.
+/// 2. Give each non-empty group a share of the cap.
+/// 3. Take actions that cover exact slot commands and resource assignments.
+///
+/// Step 2 keeps Tera and Mega actions when the cap has sufficient space.
+/// Step 3 prevents a row-major bias toward one slot, target, or resource user.
+///
+/// The result is a pure function of the input, so each search pass over one
+/// position builds the same list. `RootSeed` needs that property.
 fn reduce_to_cap(actions: Vec<Vec<BattleCommand>>, cap: usize) -> Vec<Vec<BattleCommand>> {
     let cap = cap.max(1);
     if actions.len() <= cap {
         return actions;
     }
 
-    let plain: Vec<Vec<BattleCommand>> = actions
+    let choices: Vec<ResourceChoice> = actions.iter().map(|combo| resource_choice(combo)).collect();
+    let groups: Vec<Vec<usize>> = RESOURCE_CHOICES
         .iter()
-        .filter(|combo| !combo.iter().any(uses_tera_or_mega))
-        .cloned()
+        .map(|choice| {
+            (0..actions.len())
+                .filter(|&index| choices[index] == *choice)
+                .collect::<Vec<usize>>()
+        })
+        .filter(|group| !group.is_empty())
         .collect();
 
-    // Dropping every variant is only useful if something survives; a position
-    // where Terastallizing is mandatory would otherwise reduce to nothing.
-    let reduced = if plain.is_empty() { actions } else { plain };
-    if reduced.len() <= cap {
-        return reduced;
+    let sizes: Vec<usize> = groups.iter().map(|group| group.len()).collect();
+    let shares = allocate_shares(cap, &sizes);
+
+    let mut kept: Vec<usize> = Vec::with_capacity(cap);
+    for (group, share) in groups.iter().zip(&shares) {
+        kept.extend(select_by_coverage(group, &actions, *share));
     }
 
-    let stride = reduced.len().div_ceil(cap);
-    reduced.into_iter().step_by(stride).take(cap).collect()
+    // The original order keeps the action indices readable in a debug log.
+    kept.sort_unstable();
+    kept.into_iter()
+        .map(|index| actions[index].clone())
+        .collect()
 }
 
-fn uses_tera_or_mega(command: &BattleCommand) -> bool {
-    matches!(command, BattleCommand::Attack(a) if a.terastallize || a.mega_evolve)
+/// Splits `cap` over the groups by the largest-remainder method.
+/// Every non-empty group keeps at least one action while the cap permits it.
+fn allocate_shares(cap: usize, sizes: &[usize]) -> Vec<usize> {
+    let total: usize = sizes.iter().sum();
+    if total == 0 {
+        return vec![0; sizes.len()];
+    }
+
+    let mut shares: Vec<usize> = Vec::with_capacity(sizes.len());
+    let mut remainders: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
+    for (index, &size) in sizes.iter().enumerate() {
+        let exact = cap * size;
+        shares.push(exact / total);
+        remainders.push((exact % total, index));
+    }
+
+    // The largest remainder takes the first leftover seat. A tie goes to the
+    // earlier group, so the split stays deterministic.
+    remainders.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut leftover = cap.min(total) - shares.iter().sum::<usize>();
+    while leftover > 0 {
+        let mut moved = false;
+        for &(_, index) in &remainders {
+            if leftover == 0 {
+                break;
+            }
+            if shares[index] < sizes[index] {
+                shares[index] += 1;
+                leftover -= 1;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    // Raise an empty group to one seat. The donor is the earliest largest group
+    // that keeps a seat after the transfer.
+    for index in 0..shares.len() {
+        if shares[index] > 0 {
+            continue;
+        }
+        let mut donor: Option<usize> = None;
+        for other in 0..shares.len() {
+            if shares[other] > 1 && donor.is_none_or(|best| shares[other] > shares[best]) {
+                donor = Some(other);
+            }
+        }
+        match donor {
+            Some(other) => {
+                shares[other] -= 1;
+                shares[index] = 1;
+            }
+            None => break,
+        }
+    }
+
+    shares
+}
+
+/// Takes `want` actions that cover the available choices of each slot.
+///
+/// Resource assignments have first priority. Base slot commands have second
+/// priority. Exact commands have third priority and include targets.
+///
+/// A tie uses the earlier action. This rule makes the result deterministic.
+fn select_by_coverage(group: &[usize], actions: &[Vec<BattleCommand>], want: usize) -> Vec<usize> {
+    if want == 0 {
+        return Vec::new();
+    }
+
+    let slots = group
+        .first()
+        .and_then(|&index| actions.get(index))
+        .map_or(0, Vec::len);
+    let mut covered_base_commands: Vec<HashSet<SlotKey>> = vec![HashSet::new(); slots];
+    let mut covered_commands: Vec<HashSet<ExactSlotKey>> = vec![HashSet::new(); slots];
+    let mut covered_resources: HashSet<ResourceAssignment> = HashSet::new();
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut taken: Vec<usize> = Vec::with_capacity(want.min(group.len()));
+    for _ in 0..want.min(group.len()) {
+        let mut best: Option<((usize, usize, usize), usize)> = None;
+        for &index in group {
+            if used.contains(&index) {
+                continue;
+            }
+            let assignment = resource_assignment(&actions[index]);
+            let resource_gain = usize::from(!covered_resources.contains(&assignment));
+            let base_gain = actions[index]
+                .iter()
+                .enumerate()
+                .filter(|(slot_idx, command)| {
+                    !covered_base_commands[*slot_idx].contains(&slot_key(command))
+                })
+                .count();
+            let exact_gain = actions[index]
+                .iter()
+                .enumerate()
+                .filter(|(slot_idx, command)| {
+                    !covered_commands[*slot_idx].contains(&exact_slot_key(command))
+                })
+                .count();
+            let score = (resource_gain, base_gain, exact_gain);
+            if best.is_none_or(|(top, _)| score > top) {
+                best = Some((score, index));
+            }
+        }
+        let Some((score, mut index)) = best else {
+            break;
+        };
+        if score == (0, 0, 0) {
+            // Start a new sweep after the selected actions cover all choices.
+            for slot in &mut covered_base_commands {
+                slot.clear();
+            }
+            for slot in &mut covered_commands {
+                slot.clear();
+            }
+            covered_resources.clear();
+            index = group
+                .iter()
+                .copied()
+                .find(|candidate| !used.contains(candidate))
+                .unwrap_or(index);
+        }
+        covered_resources.insert(resource_assignment(&actions[index]));
+        for (slot_idx, command) in actions[index].iter().enumerate() {
+            covered_base_commands[slot_idx].insert(slot_key(command));
+            covered_commands[slot_idx].insert(exact_slot_key(command));
+        }
+        used.insert(index);
+        taken.push(index);
+    }
+    taken
 }
 
 /// Every combination taking one element from each list, in row-major order.
@@ -250,6 +597,7 @@ fn cartesian_product(per_slot: &[Vec<BattleCommand>]) -> Vec<Vec<BattleCommand>>
 mod tests {
     use super::*;
     use crate::data::species::Species;
+    use crate::state::battle::AttackCommand;
     use crate::state::pokemon::build_pokemon_state;
     use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
 
@@ -411,14 +759,7 @@ mod tests {
         let phase = phase_of(&MatchState::BattleState(state.clone()));
         assert_eq!(phase, Phase::Replacement);
 
-        let joint = joint_actions(
-            &state,
-            Player::P1,
-            phase,
-            move_dex(),
-            pokemon_dex(),
-            None,
-        );
+        let joint = joint_actions(&state, Player::P1, phase, move_dex(), pokemon_dex(), None);
         assert_eq!(joint.actions, vec![vec![BattleCommand::Pass]]);
     }
 
@@ -447,10 +788,12 @@ mod tests {
             None,
         );
         assert_eq!(joint.actions.len(), 2);
-        assert!(joint.actions.iter().all(|combo| matches!(
-            combo.as_slice(),
-            [BattleCommand::Switch(_)]
-        )));
+        assert!(
+            joint
+                .actions
+                .iter()
+                .all(|combo| matches!(combo.as_slice(), [BattleCommand::Switch(_)]))
+        );
     }
 
     /// The healthy partner of a fainted slot must not get to act again during a
@@ -485,6 +828,448 @@ mod tests {
         assert!(!joint.actions.is_empty());
         for combo in &joint.actions {
             assert!(matches!(combo[1], BattleCommand::Pass));
+        }
+    }
+
+    /// The old reduction removed every Tera and Mega action before it applied
+    /// the cap, so a capped search never studied the Tera resource.
+    #[test]
+    fn a_cap_keeps_a_tera_action() {
+        let state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, four_moves())],
+            vec![mon(Species::Snorlax, four_moves())],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![],
+        );
+        let uncapped = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+        assert!(
+            uncapped.actions.iter().any(|combo| uses_tera(combo)),
+            "the position offers no Tera action"
+        );
+
+        let capped = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            Some(6),
+        );
+        assert!(capped.actions.len() <= 6);
+        assert!(
+            capped.actions.iter().any(|combo| uses_tera(combo)),
+            "the cap removed every Tera action: {:?}",
+            capped.actions
+        );
+        assert!(
+            capped.actions.iter().any(|combo| !uses_tera(combo)),
+            "the cap removed every plain action: {:?}",
+            capped.actions
+        );
+    }
+
+    fn uses_tera(combo: &[BattleCommand]) -> bool {
+        combo
+            .iter()
+            .any(|command| matches!(command, BattleCommand::Attack(a) if a.terastallize))
+    }
+
+    /// The old reduction kept one action per fixed stride over a row-major list.
+    /// Slot 0 changes slowest in that list, so a stride kept one slot 0 command.
+    #[test]
+    fn a_cap_covers_every_slot_command() {
+        let state = battle_state_from_lists(
+            vec![
+                mon(Species::Pikachu, four_moves()),
+                mon(Species::Snorlax, four_moves()),
+            ],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![
+                mon(Species::Gengar, four_moves()),
+                mon(Species::Snorlax, four_moves()),
+            ],
+            vec![mon(Species::Pikachu, four_moves())],
+        );
+        let uncapped = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+
+        // The selection runs inside one resource group. Its first sweep must
+        // cover the commands of both slots.
+        let plain: Vec<usize> = (0..uncapped.actions.len())
+            .filter(|&index| resource_choice(&uncapped.actions[index]) == ResourceChoice::Plain)
+            .collect();
+        let tuples = distinct_tuples(&plain, &uncapped.actions);
+        let ordered = select_by_coverage(&plain, &uncapped.actions, plain.len());
+        assert!(ordered.len() > tuples, "the group holds no second target");
+        let prefix: Vec<Vec<BattleCommand>> = ordered[..tuples]
+            .iter()
+            .map(|&index| uncapped.actions[index].clone())
+            .collect();
+        let whole: Vec<Vec<BattleCommand>> = plain
+            .iter()
+            .map(|&index| uncapped.actions[index].clone())
+            .collect();
+        for slot_idx in 0..2 {
+            assert_eq!(
+                keys_of_slot(&prefix, slot_idx),
+                keys_of_slot(&whole, slot_idx),
+                "the order dropped a slot {} command",
+                slot_idx
+            );
+        }
+
+        // The row-major order of the same length keeps one slot 0 command,
+        // because slot 0 changes slowest in that order.
+        assert!(
+            keys_of_slot(&whole[..tuples], 0).len() < keys_of_slot(&whole, 0).len(),
+            "the row-major order already covered slot 0"
+        );
+
+        // A tight cap must still spread over both slots.
+        let tight = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            Some(9),
+        );
+        for slot_idx in 0..2 {
+            assert!(
+                keys_of_slot(&tight.actions, slot_idx).len() >= 3,
+                "slot {} kept {:?}",
+                slot_idx,
+                keys_of_slot(&tight.actions, slot_idx)
+            );
+        }
+    }
+
+    fn attack(move_slot: usize, target: FieldSlot, terastallize: bool) -> BattleCommand {
+        BattleCommand::Attack(AttackCommand {
+            move_slot,
+            target: Some(target),
+            terastallize,
+            mega_evolve: false,
+        })
+    }
+
+    /// Row-major generation puts the slot 1 Tera variant first for every move
+    /// tuple. The cap must also keep a slot 0 Tera variant.
+    #[test]
+    fn capped_resource_group_covers_each_resource_user() {
+        let target = FieldSlot {
+            player: Player::P2,
+            slot_index: 0,
+        };
+        let actions = vec![
+            vec![attack(0, target, false), attack(0, target, true)],
+            vec![attack(0, target, true), attack(0, target, false)],
+            vec![attack(1, target, false), attack(1, target, true)],
+            vec![attack(1, target, true), attack(1, target, false)],
+        ];
+        let group: Vec<usize> = (0..actions.len()).collect();
+        let selected = select_by_coverage(&group, &actions, 2);
+        let tera_slots: HashSet<usize> = selected
+            .iter()
+            .flat_map(|&index| {
+                actions[index]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot_idx, command)| {
+                        matches!(command, BattleCommand::Attack(attack) if attack.terastallize)
+                            .then_some(slot_idx)
+                    })
+            })
+            .collect();
+
+        assert_eq!(tera_slots, HashSet::from([0, 1]));
+    }
+
+    /// Row-major generation puts the first target first for every command
+    /// tuple. The cap must cover the targets of both slots.
+    #[test]
+    fn capped_resource_group_covers_each_target() {
+        let target_0 = FieldSlot {
+            player: Player::P2,
+            slot_index: 0,
+        };
+        let target_1 = FieldSlot {
+            player: Player::P2,
+            slot_index: 1,
+        };
+        let actions = vec![
+            vec![attack(0, target_0, false), attack(0, target_0, false)],
+            vec![attack(0, target_0, false), attack(0, target_1, false)],
+            vec![attack(0, target_1, false), attack(0, target_0, false)],
+            vec![attack(0, target_1, false), attack(0, target_1, false)],
+        ];
+        let group: Vec<usize> = (0..actions.len()).collect();
+        let selected = select_by_coverage(&group, &actions, 2);
+
+        let targets_of = |slot_idx: usize| -> HashSet<Option<FieldSlot>> {
+            selected
+                .iter()
+                .map(|&index| match &actions[index][slot_idx] {
+                    BattleCommand::Attack(attack) => attack.target,
+                    _ => None,
+                })
+                .collect()
+        };
+        let both = HashSet::from([Some(target_0), Some(target_1)]);
+        assert_eq!(targets_of(0), both);
+        assert_eq!(targets_of(1), both);
+    }
+
+    fn distinct_tuples(group: &[usize], actions: &[Vec<BattleCommand>]) -> usize {
+        group
+            .iter()
+            .map(|&index| {
+                actions[index]
+                    .iter()
+                    .map(slot_key)
+                    .collect::<Vec<SlotKey>>()
+            })
+            .collect::<HashSet<Vec<SlotKey>>>()
+            .len()
+    }
+
+    fn keys_of_slot(actions: &[Vec<BattleCommand>], slot_idx: usize) -> Vec<SlotKey> {
+        let mut keys: Vec<SlotKey> = actions
+            .iter()
+            .map(|combo| slot_key(&combo[slot_idx]))
+            .collect::<HashSet<SlotKey>>()
+            .into_iter()
+            .collect();
+        keys.sort_by_key(|key| format!("{:?}", key));
+        keys
+    }
+
+    /// `RootSeed` carries action indices from one deepening pass to the next, so
+    /// one position must always build the same list.
+    #[test]
+    fn a_cap_is_deterministic() {
+        let state = battle_state_from_lists(
+            vec![
+                mon(Species::Pikachu, four_moves()),
+                mon(Species::Snorlax, four_moves()),
+            ],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![
+                mon(Species::Gengar, four_moves()),
+                mon(Species::Snorlax, four_moves()),
+            ],
+            vec![mon(Species::Pikachu, four_moves())],
+        );
+        let first = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            Some(7),
+        );
+        for _ in 0..5 {
+            let again = joint_actions(
+                &state,
+                Player::P1,
+                Phase::Normal,
+                move_dex(),
+                pokemon_dex(),
+                Some(7),
+            );
+            assert_eq!(
+                format!("{:?}", first.actions),
+                format!("{:?}", again.actions)
+            );
+        }
+    }
+
+    /// Two slots that hold the same move with the same PP queue the same move.
+    /// The name-based PP update gives both commands one value.
+    #[test]
+    fn duplicate_move_slots_collapse() {
+        let repeated = [
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ];
+        let state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, repeated)],
+            vec![],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![],
+        );
+        let joint = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+        assert!(
+            joint
+                .actions
+                .iter()
+                .any(|combo| matches!(&combo[0], BattleCommand::Attack(a) if a.move_slot == 0)),
+            "the first Tackle slot disappeared"
+        );
+        assert!(
+            !joint
+                .actions
+                .iter()
+                .any(|combo| matches!(&combo[0], BattleCommand::Attack(a) if a.move_slot == 1)),
+            "the repeated Tackle slot survived: {:?}",
+            joint.actions
+        );
+    }
+
+    /// Two slots that hold the same move are not the same choice when one slot
+    /// Terastallizes. The duplicate key holds the resource flags of each slot.
+    #[test]
+    fn a_tera_on_each_slot_stays_distinct() {
+        let state = battle_state_from_lists(
+            vec![
+                mon(Species::Pikachu, four_moves()),
+                mon(Species::Pikachu, four_moves()),
+            ],
+            vec![],
+            vec![
+                mon(Species::Gengar, four_moves()),
+                mon(Species::Snorlax, four_moves()),
+            ],
+            vec![],
+        );
+        let joint = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+        for tera_slot in 0..2 {
+            assert!(
+                joint.actions.iter().any(|combo| {
+                    combo.iter().enumerate().all(|(slot_idx, command)| {
+                        matches!(command, BattleCommand::Attack(a)
+                            if a.terastallize == (slot_idx == tera_slot))
+                    })
+                }),
+                "no action Terastallizes slot {} alone",
+                tera_slot
+            );
+        }
+    }
+
+    /// A different move in each slot is a real choice, so nothing collapses.
+    #[test]
+    fn distinct_move_slots_all_survive() {
+        let state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, four_moves())],
+            vec![],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![],
+        );
+        let joint = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+        for move_slot in 0..4 {
+            assert!(
+                joint.actions.iter().any(
+                    |combo| matches!(&combo[0], BattleCommand::Attack(a) if a.move_slot == move_slot)
+                ),
+                "move slot {} disappeared",
+                move_slot
+            );
+        }
+    }
+
+    /// A repeated move with unequal PP is a real choice: the two slots offer a
+    /// different number of later uses.
+    #[test]
+    fn a_repeated_move_with_unequal_pp_survives() {
+        let repeated = [
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ];
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, repeated)],
+            vec![],
+            vec![mon(Species::Gengar, four_moves())],
+            vec![],
+        );
+        state.p1_active_mons[0].move_pp[1] -= 1;
+
+        let joint = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+        );
+        for move_slot in 0..2 {
+            assert!(
+                joint.actions.iter().any(
+                    |combo| matches!(&combo[0], BattleCommand::Attack(a) if a.move_slot == move_slot)
+                ),
+                "move slot {} disappeared",
+                move_slot
+            );
+        }
+    }
+
+    /// The cap never returns more actions than the caller asked for, and it
+    /// never returns fewer while the position offers more.
+    #[test]
+    fn a_cap_fills_every_seat() {
+        for cap in 1..=12 {
+            let state = battle_state_from_lists(
+                vec![
+                    mon(Species::Pikachu, four_moves()),
+                    mon(Species::Snorlax, four_moves()),
+                ],
+                vec![mon(Species::Gengar, four_moves())],
+                vec![
+                    mon(Species::Gengar, four_moves()),
+                    mon(Species::Snorlax, four_moves()),
+                ],
+                vec![mon(Species::Pikachu, four_moves())],
+            );
+            let capped = joint_actions(
+                &state,
+                Player::P1,
+                Phase::Normal,
+                move_dex(),
+                pokemon_dex(),
+                Some(cap),
+            );
+            assert_eq!(capped.actions.len(), cap.min(capped.total), "cap {}", cap);
+            for combo in &capped.actions {
+                assert!(validate_battle_command_combination(combo));
+            }
         }
     }
 
