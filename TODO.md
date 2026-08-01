@@ -128,7 +128,7 @@ Use it only as a labeled perfect-information Monte Carlo baseline.
 
 - [ ] Add an optional P2 solver profile to battle creation.
   - [ ] Support exact and approximate algorithms.
-  - [ ] Support time, node, depth, worker, sampling, seed, and action limits.
+  - [ ] Support time, node, depth, worker, sampling, seed, and action limits (with presets).
   - [ ] Show every approximation and fallback in the interface.
 
 Start P2 analysis after each turn resolves.
