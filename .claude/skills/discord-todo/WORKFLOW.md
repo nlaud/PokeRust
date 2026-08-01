@@ -459,4 +459,3 @@ conversation history. Record every fact that the next run needs.
 - `react` gives the cheapest progress signal. Use it to acknowledge the start.
 - `/codex:rescue --fresh` starts a new Codex task without an old Codex thread.
 - `/codex:rescue --resume` continues only the current task's Codex thread.
-- Never start another subagent. Do all work yourself.
