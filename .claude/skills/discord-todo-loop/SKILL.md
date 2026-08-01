@@ -1,8 +1,8 @@
 ---
 name: discord-todo-loop
-description: Schedule the Discord TODO skill every six hours for the maximum supported time. Accept true or false to control the first run. Use this skill when the user types "/discord-todo-loop" or asks to loop the Discord TODO skill.
+description: Schedule the Discord TODO skill every six hours for the maximum supported time. Accept true or false to control the first run. Only use this skill when requested by name from the user.
 argument-hint: <true|false>
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   - CronCreate
   - Skill
