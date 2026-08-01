@@ -7,18 +7,23 @@
 //! Debug builds make `simulate_turn` about ten times slower.
 //! Tests therefore use few moves, short benches, and one damage roll.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use crate::data::ability::Ability;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::solver::chance::ChanceMode;
+use crate::solver::matrix::solve_matrix_game;
+use crate::solver::preview::{
+    PreviewCellCache, PreviewConfig, precompute_preview_cells, preview_cell_value, preview_choices,
+    solve_team_preview, solve_team_preview_cached,
+};
 use crate::solver::{
     SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval, solve, solve_seeded,
 };
-use crate::state::battle::{BattleCommand, MatchState, Player};
-use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus};
+use crate::state::battle::{BattleCommand, BattleMechanics, MatchState, Player, TeamPreviewState};
+use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus, parse_move_dex};
 use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
 use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
 
@@ -1193,4 +1198,375 @@ fn a_finished_battle_cannot_be_solved() {
             winner: Player::P1
         })
     ));
+}
+
+// ── Team preview ────────────────────────────────────────────────────────────
+
+/// A preview state whose mon ids are unique across both teams, as the engine
+/// requires for trapping-volatile source tracking.
+fn preview_state(
+    mut p1_mons: Vec<PokemonState>,
+    mut p2_mons: Vec<PokemonState>,
+    active_per_side: u8,
+    brought_per_side: u8,
+) -> TeamPreviewState {
+    let p1_count = p1_mons.len() as u8;
+    for (index, mon) in p1_mons.iter_mut().enumerate() {
+        mon.mon_id = index as u8;
+    }
+    for (index, mon) in p2_mons.iter_mut().enumerate() {
+        mon.mon_id = p1_count + index as u8;
+    }
+    TeamPreviewState {
+        active_per_side,
+        brought_per_side,
+        mechanics: BattleMechanics {
+            tera_enabled: false,
+            mega_enabled: false,
+        },
+        p1_mons,
+        p2_mons,
+    }
+}
+
+/// Two Pokemon a side, bring one, lead one: two choices a side and four cells.
+/// Small enough to solve every cell by hand in a debug build.
+fn small_preview() -> TeamPreviewState {
+    preview_state(
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+        vec![
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+        ],
+        1,
+        1,
+    )
+}
+
+/// One damage roll, no crit branching, one ply, and no deadline.
+fn preview_config() -> PreviewConfig {
+    PreviewConfig {
+        battle: base_config(),
+        deadline: None,
+    }
+}
+
+/// The official format: six Pokemon, bring four, lead two. 15 bring sets times
+/// 12 ordered lead pairs is 180 choices, and no two of them may be the same.
+#[test]
+fn preview_choices_count_official_doubles() {
+    let team = || {
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Machamp, &[PokemonMove::CrossChop]),
+            mon(Species::Abra, &[PokemonMove::Psychic]),
+        ]
+    };
+    let state = preview_state(team(), team(), 2, 4);
+
+    for player in [Player::P1, Player::P2] {
+        let choices = preview_choices(&state, player);
+        assert_eq!(choices.len(), 180, "{player:?} choice count");
+
+        let distinct: HashSet<(Vec<usize>, Vec<usize>)> = choices
+            .iter()
+            .map(|choice| (choice.active_indices.clone(), choice.back_indices.clone()))
+            .collect();
+        assert_eq!(distinct.len(), 180, "{player:?} repeated a choice");
+
+        for choice in &choices {
+            assert_eq!(choice.active_indices.len(), 2);
+            assert_eq!(choice.back_indices.len(), 2);
+            let mut brought = choice.active_indices.clone();
+            brought.extend(&choice.back_indices);
+            brought.sort_unstable();
+            brought.dedup();
+            assert_eq!(brought.len(), 4, "a choice brought the same Pokemon twice");
+            assert!(choice.back_indices.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+}
+
+/// The small case, where the count is easy to check by hand: three bring sets
+/// times two lead orders.
+#[test]
+fn preview_choices_count_small_singles() {
+    let team = || {
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+        ]
+    };
+    let state = preview_state(team(), team(), 1, 2);
+    let choices = preview_choices(&state, Player::P1);
+
+    assert_eq!(choices.len(), 6);
+    for choice in &choices {
+        assert_eq!(choice.active_indices.len(), 1);
+        assert_eq!(choice.back_indices.len(), 1);
+    }
+}
+
+/// The soundness test for the preview solve. Double oracle reads only some of
+/// the cells. Building every cell by hand and solving that matrix must give the
+/// same value.
+#[test]
+fn preview_double_oracle_matches_full_matrix() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = preview_config();
+
+    let p1_choices = preview_choices(&state, Player::P1);
+    let p2_choices = preview_choices(&state, Player::P2);
+    let payoffs: Vec<Vec<f64>> = p1_choices
+        .iter()
+        .map(|p1_choice| {
+            p2_choices
+                .iter()
+                .map(|p2_choice| {
+                    preview_cell_value(
+                        &state, pokemon_dex, move_dex, &config, p1_choice, p2_choice,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let reference = solve_matrix_game(&payoffs);
+
+    let result = solve_team_preview(&state, pokemon_dex, move_dex, &config)
+        .expect("the preview state is well formed");
+
+    assert!(
+        (result.value - reference.value).abs() < 1e-6,
+        "double oracle returned {}, the full matrix returned {}",
+        result.value,
+        reference.value
+    );
+    assert_eq!(result.stats.cells_total, 4);
+    assert!(result.stats.cells_evaluated > 0);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+    for (label, strategy) in [
+        ("P1", &result.p1_strategy),
+        ("P2", &result.p2_strategy),
+    ] {
+        let total: f64 = strategy.iter().map(|choice| choice.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(!strategy.is_empty(), "{label} strategy is empty");
+    }
+    assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
+}
+
+/// A shared cache must remove the cell work of a repeated solve. Double oracle
+/// is deterministic, so the second solve asks for exactly the cells the first
+/// solve stored.
+#[test]
+fn preview_cache_removes_repeat_cell_work() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = preview_config();
+    let mut cache = PreviewCellCache::new();
+
+    let first = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+    assert!(first.stats.cells_evaluated > 0);
+    assert_eq!(first.stats.cell_cache_hits, 0);
+    assert_eq!(cache.len() as u64, first.stats.cells_evaluated);
+
+    let second = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+    assert_eq!(
+        second.stats.cells_evaluated, 0,
+        "the second solve computed a cell that the cache already held"
+    );
+    assert!(second.stats.cell_cache_hits > 0);
+    assert!((second.value - first.value).abs() < 1e-9);
+}
+
+/// A cache entry must not answer a solve that uses different move data.
+#[test]
+fn preview_cache_separates_move_dex_contents() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = preview_state(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        1,
+        1,
+    );
+    let config = preview_config();
+    let mut cache = PreviewCellCache::new();
+
+    let original = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+
+    let mut changed_move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+    changed_move_dex
+        .get_mut(&PokemonMove::Thunderbolt)
+        .expect("Thunderbolt exists")
+        .base_power = 0;
+    let changed = solve_team_preview_cached(
+        &state,
+        pokemon_dex,
+        &changed_move_dex,
+        &config,
+        &mut cache,
+    )
+    .expect("the preview state is well formed");
+    let reference = solve_team_preview(&state, pokemon_dex, &changed_move_dex, &config)
+        .expect("the preview state is well formed");
+
+    assert!((original.value - reference.value).abs() > 1e-6);
+    assert!((changed.value - reference.value).abs() < 1e-9);
+    assert_eq!(changed.stats.cell_cache_hits, 0);
+}
+
+/// Random samples and time-limited battle solves must not enter the cache.
+#[test]
+fn preview_cache_rejects_unstable_cells() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+
+    for battle in [
+        SolveConfig {
+            chance: ChanceMode::Sample(1),
+            ..base_config()
+        },
+        SolveConfig {
+            deadline: Some(Duration::ZERO),
+            ..base_config()
+        },
+    ] {
+        let config = PreviewConfig {
+            battle,
+            deadline: None,
+        };
+        let mut cache = PreviewCellCache::new();
+        solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+            .expect("the preview state is well formed");
+
+        assert!(cache.is_empty(), "an unstable cell entered the cache");
+    }
+}
+
+/// A cache hit must replay the warnings that belong to the cached value.
+#[test]
+fn preview_cache_preserves_battle_warnings() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = PreviewConfig {
+        battle: SolveConfig {
+            depth: 2,
+            node_budget: Some(0),
+            ..base_config()
+        },
+        deadline: None,
+    };
+    let mut cache = PreviewCellCache::new();
+
+    let first = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+    let second = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+
+    let warning = SolveWarning::BudgetExhausted { budget: 0 };
+    assert!(first.warnings.contains(&warning));
+    assert!(second.warnings.contains(&warning));
+    assert_eq!(second.stats.cells_evaluated, 0);
+    assert!(second.stats.cell_cache_hits > 0);
+}
+
+/// `precompute_preview_cells` must fill exactly the requested cells, and a later
+/// solve must read them.
+#[test]
+fn preview_precompute_fills_requested_cells() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = preview_config();
+    let mut cache = PreviewCellCache::new();
+
+    // The last pair is out of range and must be skipped rather than counted.
+    let requested = [(0, 0), (1, 1), (9, 9)];
+    let stats = precompute_preview_cells(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &requested,
+        &mut cache,
+    )
+    .expect("the preview state is well formed");
+
+    assert_eq!(stats.cells_evaluated, 2);
+    assert_eq!(cache.len(), 2);
+    assert_eq!(stats.cells_total, 4);
+
+    // Double oracle opens on cell (0, 0), so the solve must read at least that
+    // one from the cache.
+    let solved = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+    assert!(solved.stats.cell_cache_hits > 0);
+}
+
+/// A spent deadline must score cells with the leaf evaluator and say so. It must
+/// also leave the cache empty, because an evaluated cell is not an exact cell.
+#[test]
+fn preview_deadline_returns_a_warning() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = PreviewConfig {
+        battle: base_config(),
+        deadline: Some(Duration::ZERO),
+    };
+    let mut cache = PreviewCellCache::new();
+
+    let result = solve_team_preview_cached(&state, pokemon_dex, move_dex, &config, &mut cache)
+        .expect("the preview state is well formed");
+
+    assert!(
+        result.warnings.contains(&SolveWarning::DeadlineExceeded {
+            budget: Duration::ZERO
+        }),
+        "the deadline expired and the result did not say so: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.stats.battles_solved, 0);
+    assert!(cache.is_empty(), "an approximate cell entered the cache");
+    assert!((0.0..=1.0).contains(&result.value));
+}
+
+/// Two identical teams give a symmetric game, whose value is exactly even. A
+/// failure here means the engine favors one side in a mirror.
+#[test]
+fn preview_mirror_position_is_even() {
+    let (pokemon_dex, move_dex) = dexes();
+    let team = || {
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ]
+    };
+    let state = preview_state(team(), team(), 1, 1);
+    let config = PreviewConfig {
+        battle: SolveConfig {
+            eval: eval::even,
+            ..base_config()
+        },
+        deadline: None,
+    };
+
+    let result = solve_team_preview(&state, pokemon_dex, move_dex, &config)
+        .expect("the preview state is well formed");
+
+    assert!(
+        (result.value - 0.5).abs() < 1e-6,
+        "the mirror value is {}",
+        result.value
+    );
 }

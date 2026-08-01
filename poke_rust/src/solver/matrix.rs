@@ -416,6 +416,352 @@ fn scatter(
     }
 }
 
+// ── Double oracle ───────────────────────────────────────────────────────────
+
+/// The counters that one [`double_oracle`] run produced.
+///
+/// The function returns them instead of writing them, because a cell oracle
+/// usually borrows the caller. The caller adds them to its own statistics.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OracleStats {
+    /// Calls to the cell oracle.
+    pub cells_requested: u64,
+    /// Restricted games that reached the simplex.
+    pub lps_solved: u64,
+    /// Best-response rows and columns that a bound test abandoned.
+    pub cutoffs: u64,
+}
+
+/// The value window and the payoff range of one [`double_oracle`] run.
+///
+/// `alpha` and `beta` must contain the true value. A caller without a proven
+/// window passes the payoff range itself.
+#[derive(Debug, Clone, Copy)]
+pub struct OracleLimits {
+    /// A proven lower bound on the true value.
+    pub alpha: f64,
+    /// A proven upper bound on the true value.
+    pub beta: f64,
+    /// The smallest payoff that a cell can hold.
+    pub low: f64,
+    /// The largest payoff that a cell can hold.
+    pub high: f64,
+}
+
+impl Default for OracleLimits {
+    /// The window and the range of a payoff that is a probability.
+    fn default() -> Self {
+        OracleLimits {
+            alpha: 0.0,
+            beta: 1.0,
+            low: 0.0,
+            high: 1.0,
+        }
+    }
+}
+
+/// The rows and columns that a [`double_oracle`] run opens its restricted game
+/// with.
+///
+/// An empty side starts from action 0. An index at or past the action count is
+/// dropped, because a stale index names a different action or none at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OracleSeed<'a> {
+    pub rows: Option<&'a [usize]>,
+    pub cols: Option<&'a [usize]>,
+}
+
+/// Solves a matrix game without building all of it.
+///
+/// `rows` and `cols` give the size of the full game. `cell_value` returns the
+/// payoff of one row and one column. The run calls it only for the cells that it
+/// needs, and never twice for the same cell.
+///
+/// Start from a small restricted game. Solve it, then ask each player for their
+/// best response over the full action set. Neither player can improve on the
+/// restricted equilibrium when both best responses are already in the restricted
+/// game. That equilibrium is then an equilibrium of the whole game, and the
+/// remaining cells never mattered. Otherwise add both best responses and repeat.
+///
+/// The two best-response values bracket the true value from above and below.
+/// This is both the stop test and the source of the bound tightening that makes
+/// the next round's pruning sharper.
+///
+/// This implements Algorithm 3 of Bošanský et al., Artificial Intelligence 237,
+/// 2016.
+pub fn double_oracle<F>(
+    rows: usize,
+    cols: usize,
+    seed: OracleSeed<'_>,
+    limits: OracleLimits,
+    mut cell_value: F,
+) -> (MatrixSolution, OracleStats)
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    let mut stats = OracleStats::default();
+    let mut best = MatrixSolution {
+        value: 0.0,
+        row_strategy: vec![0.0; rows],
+        col_strategy: vec![0.0; cols],
+        used_lp: false,
+    };
+    if rows == 0 || cols == 0 {
+        return (best, stats);
+    }
+    best.value = 0.5 * (limits.low + limits.high);
+
+    let mut alpha = limits.alpha;
+    let mut beta = limits.beta;
+
+    // Lazily filled, and shared across the best-response calls. No cell is ever
+    // computed twice within this run. That sharing is most of the win.
+    let mut cells: Vec<Vec<Option<f64>>> = vec![vec![None; cols]; rows];
+    let mut restricted_rows = seeded_start(seed.rows, rows);
+    let mut restricted_cols = seeded_start(seed.cols, cols);
+
+    // Each round adds at least one action to at least one side or stops. This
+    // limit is therefore only reachable if something is badly wrong.
+    for _ in 0..(rows + cols + 2) {
+        for &i in &restricted_rows {
+            for &j in &restricted_cols {
+                if cells[i][j].is_none() {
+                    stats.cells_requested += 1;
+                    cells[i][j] = Some(cell_value(i, j));
+                }
+            }
+        }
+
+        let sub: Vec<Vec<f64>> = restricted_rows
+            .iter()
+            .map(|&i| {
+                restricted_cols
+                    .iter()
+                    .map(|&j| cells[i][j].expect("restricted cell was just filled"))
+                    .collect()
+            })
+            .collect();
+        let solution = solve_matrix_game(&sub);
+        if solution.used_lp {
+            stats.lps_solved += 1;
+        }
+
+        let row_strategy = lift(&solution.row_strategy, &restricted_rows, rows);
+        let col_strategy = lift(&solution.col_strategy, &restricted_cols, cols);
+        best = MatrixSolution {
+            value: solution.value,
+            row_strategy: row_strategy.clone(),
+            col_strategy: col_strategy.clone(),
+            used_lp: solution.used_lp,
+        };
+
+        let (row_br_value, row_br) = best_response_row(
+            &mut cells,
+            &col_strategy,
+            limits.high,
+            &mut stats,
+            &mut cell_value,
+        );
+        let (col_br_value, col_br) = best_response_col(
+            &mut cells,
+            &row_strategy,
+            limits.low,
+            &mut stats,
+            &mut cell_value,
+        );
+
+        // P2 can hold P1 to `row_br_value` by playing `col_strategy`, and P1 can
+        // guarantee `col_br_value` by playing `row_strategy`. Both are full-game
+        // strategies, so these bracket the true value.
+        beta = beta.min(row_br_value);
+        alpha = alpha.max(col_br_value);
+        if beta - alpha <= EPS {
+            break;
+        }
+
+        let mut grew = false;
+        if !restricted_rows.contains(&row_br) {
+            restricted_rows.push(row_br);
+            grew = true;
+        }
+        if !restricted_cols.contains(&col_br) {
+            restricted_cols.push(col_br);
+            grew = true;
+        }
+        // Both best responses are already in the restricted game. Neither player
+        // has anywhere better to go.
+        if !grew {
+            break;
+        }
+    }
+
+    // `best.value` is the *restricted* game's value, which equals the true value
+    // once the loop has converged. It can differ if the loop instead stopped
+    // because an incoming window closed the bracket first. Both `alpha` and
+    // `beta` are always valid bounds on the true value, so clamping into them is
+    // a no-op in the converged case and caps the error at the bracket width
+    // otherwise.
+    //
+    // Ordered explicitly rather than with `clamp`, which panics on an inverted
+    // range: at convergence the two best-response values are the same quantity
+    // summed in different orders — row-major against the column strategy,
+    // column-major against the row strategy — so they can cross by one ulp.
+    let (low, high) = (alpha.min(beta), alpha.max(beta));
+    best.value = best.value.clamp(low, high);
+    (best, stats)
+}
+
+/// P1's best pure response to `col_strategy`, and its value.
+///
+/// Rows are abandoned as soon as they cannot catch the best row found so far,
+/// judging unevaluated cells at `high`. This is the paper's λ test rearranged:
+/// rather than deriving the payoff a cell would have to deliver and comparing it
+/// against that cell's bound, compare the row's optimistic completion against the
+/// incumbent directly. Both skip exactly the same rows, and the bound tightens
+/// mid-row as cells become known.
+fn best_response_row<F>(
+    cells: &mut [Vec<Option<f64>>],
+    col_strategy: &[f64],
+    high: f64,
+    stats: &mut OracleStats,
+    cell_value: &mut F,
+) -> (f64, usize)
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    let support: Vec<usize> = (0..col_strategy.len())
+        .filter(|&j| col_strategy[j] > EPS)
+        .collect();
+
+    let mut best_value = f64::NEG_INFINITY;
+    let mut best_row = 0;
+
+    for (i, row) in cells.iter_mut().enumerate() {
+        let mut accumulated = 0.0;
+        let mut abandoned = false;
+
+        for (k, &j) in support.iter().enumerate() {
+            let optimistic = accumulated
+                + support[k..]
+                    .iter()
+                    .map(|&jj| col_strategy[jj] * row[jj].unwrap_or(high))
+                    .sum::<f64>();
+            if optimistic < best_value - EPS {
+                stats.cutoffs += 1;
+                abandoned = true;
+                break;
+            }
+
+            let value = match row[j] {
+                Some(value) => value,
+                None => {
+                    stats.cells_requested += 1;
+                    let value = cell_value(i, j);
+                    row[j] = Some(value);
+                    value
+                }
+            };
+            accumulated += col_strategy[j] * value;
+        }
+
+        if !abandoned && accumulated > best_value {
+            best_value = accumulated;
+            best_row = i;
+        }
+    }
+
+    (best_value, best_row)
+}
+
+/// P2's best pure response to `row_strategy`, and its value in P1's terms.
+///
+/// P2 therefore looks for the *smallest* number. This is the mirror of
+/// [`best_response_row`], and it judges unevaluated cells at `low`.
+fn best_response_col<F>(
+    cells: &mut [Vec<Option<f64>>],
+    row_strategy: &[f64],
+    low: f64,
+    stats: &mut OracleStats,
+    cell_value: &mut F,
+) -> (f64, usize)
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    let support: Vec<usize> = (0..row_strategy.len())
+        .filter(|&i| row_strategy[i] > EPS)
+        .collect();
+
+    let cols = cells.first().map_or(0, |row| row.len());
+    let mut best_value = f64::INFINITY;
+    let mut best_col = 0;
+
+    // `j` selects a column of every row, so no single iterator replaces it.
+    #[allow(clippy::needless_range_loop)]
+    for j in 0..cols {
+        let mut accumulated = 0.0;
+        let mut abandoned = false;
+
+        for (k, &i) in support.iter().enumerate() {
+            let pessimistic = accumulated
+                + support[k..]
+                    .iter()
+                    .map(|&ii| row_strategy[ii] * cells[ii][j].unwrap_or(low))
+                    .sum::<f64>();
+            if pessimistic > best_value + EPS {
+                stats.cutoffs += 1;
+                abandoned = true;
+                break;
+            }
+
+            let value = match cells[i][j] {
+                Some(value) => value,
+                None => {
+                    stats.cells_requested += 1;
+                    let value = cell_value(i, j);
+                    cells[i][j] = Some(value);
+                    value
+                }
+            };
+            accumulated += row_strategy[i] * value;
+        }
+
+        if !abandoned && accumulated < best_value {
+            best_value = accumulated;
+            best_col = j;
+        }
+    }
+
+    (best_value, best_col)
+}
+
+/// The action indices that the restricted game opens with.
+///
+/// Falls back to action 0, which is what an unseeded run always uses. An index at
+/// or past `len` is dropped: a capped action set can shrink between calls, and a
+/// stale index would then name a different action or none at all.
+/// The function removes repeated indices.
+fn seeded_start(seed: Option<&[usize]>, len: usize) -> Vec<usize> {
+    let mut start = Vec::new();
+    for &index in seed.unwrap_or(&[]) {
+        if index < len && !start.contains(&index) {
+            start.push(index);
+        }
+    }
+    if start.is_empty() {
+        start.push(0);
+    }
+    start
+}
+
+/// Lift a restricted game's strategy back onto the full action indices.
+fn lift(restricted: &[f64], indices: &[usize], full_len: usize) -> Vec<f64> {
+    let mut full = vec![0.0; full_len];
+    for (slot, &index) in indices.iter().enumerate() {
+        full[index] = restricted[slot];
+    }
+    full
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +968,30 @@ mod tests {
         for (p, q) in base.row_strategy.iter().zip(&moved.row_strategy) {
             assert!((p - q).abs() < 1e-7);
         }
+    }
+
+    /// A repeated seed index must not overwrite its probability during lifting.
+    #[test]
+    fn double_oracle_removes_duplicate_seed_indices() {
+        let payoffs = [vec![0.2, 0.8], vec![0.7, 0.1]];
+        let rows = [0, 0];
+        let cols = [0, 0];
+
+        let reference = solve_matrix_game(&payoffs);
+        let (solution, _) = double_oracle(
+            payoffs.len(),
+            payoffs[0].len(),
+            OracleSeed {
+                rows: Some(&rows),
+                cols: Some(&cols),
+            },
+            OracleLimits::default(),
+            |row, col| payoffs[row][col],
+        );
+
+        assert!((solution.value - reference.value).abs() < 1e-7);
+        assert!((solution.row_strategy.iter().sum::<f64>() - 1.0).abs() < EPS);
+        assert!((solution.col_strategy.iter().sum::<f64>() - 1.0).abs() < EPS);
+        assert_equilibrium(&payoffs, &solution, 1e-7);
     }
 }

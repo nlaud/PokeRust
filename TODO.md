@@ -51,9 +51,13 @@ The solver must support these game properties:
 
 ### Team preview
 
-- [ ] Solve perfect-information and open-list team preview.
-  - [ ] Use double oracle over the 180 preview choices.
-  - [ ] Cache or precompute requested preview cells.
+`solver::preview` solves the perfect-information case.
+It runs double oracle over the 180 choices, and it caches or precomputes cells.
+
+- [ ] Solve open-list team preview.
+  - [ ] Draw hidden numeric stats with the determinizer.
+  - [ ] Return one preview strategy across the drawn worlds.
+  - [ ] Report the sampling error of the preview value.
 
 ### Action selection
 

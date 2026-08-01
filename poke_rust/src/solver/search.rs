@@ -431,16 +431,9 @@ impl<'a> SearchContext<'a> {
         }
 
         let solution = match self.cfg.algorithm {
-            SolverAlgorithm::DoubleOracle => self.double_oracle(
-                state,
-                depth,
-                chain,
-                alpha,
-                beta,
-                &p1.actions,
-                &p2.actions,
-                seed,
-            ),
+            SolverAlgorithm::DoubleOracle => {
+                self.double_oracle(state, depth, chain, alpha, beta, &p1, &p2, seed)
+            }
             SolverAlgorithm::BackwardInduction | SolverAlgorithm::SerializedBounds => {
                 self.full_matrix(state, depth, chain, &p1.actions, &p2.actions)
             }
@@ -511,15 +504,8 @@ impl<'a> SearchContext<'a> {
 
     /// Algorithm 3: solve the matrix without building all of it.
     ///
-    /// Start from a one-by-one restricted game. Solve it, then ask each player
-    /// for their best response *over the full action set* — if neither can
-    /// improve on the restricted equilibrium, it is an equilibrium of the whole
-    /// game and the remaining cells never mattered. Otherwise add the two best
-    /// responses as a new row and column and repeat.
-    ///
-    /// The two best-response values bracket the true value from above and below,
-    /// which is both the termination test and the source of the bound tightening
-    /// that makes the next round's pruning sharper.
+    /// [`matrix::double_oracle`] holds the algorithm. This method supplies the
+    /// cell oracle and folds the returned counters into the search statistics.
     ///
     /// `seed`, when present, replaces the one-by-one start with the previous
     /// deepening pass's root support. See [`RootSeed`] for why that cannot move
@@ -530,228 +516,34 @@ impl<'a> SearchContext<'a> {
         state: &MatchState,
         depth: u8,
         chain: u8,
-        mut alpha: f64,
-        mut beta: f64,
-        rows: &[Vec<BattleCommand>],
-        cols: &[Vec<BattleCommand>],
+        alpha: f64,
+        beta: f64,
+        p1: &JointActions,
+        p2: &JointActions,
         seed: Option<&RootSeed>,
     ) -> MatrixSolution {
-        let m = rows.len();
-        let n = cols.len();
-
-        // Lazily filled; shared across best-response calls so no cell is ever
-        // computed twice within this node. That sharing is most of the win.
-        let mut cells: Vec<Vec<Option<f64>>> = vec![vec![None; n]; m];
-        let mut restricted_rows = seeded_start(seed.map(|seed| seed.rows.as_slice()), m);
-        let mut restricted_cols = seeded_start(seed.map(|seed| seed.cols.as_slice()), n);
-
-        let mut best = MatrixSolution {
-            value: 0.5,
-            row_strategy: vec![0.0; m],
-            col_strategy: vec![0.0; n],
-            used_lp: false,
+        let limits = matrix::OracleLimits {
+            alpha,
+            beta,
+            low: LOSS,
+            high: WIN,
         };
-
-        // Each round adds at least one action to at least one side or stops, so
-        // this can only be reached if something is badly wrong.
-        for _ in 0..(m + n + 2) {
-            for &i in &restricted_rows {
-                for &j in &restricted_cols {
-                    if cells[i][j].is_none() {
-                        cells[i][j] =
-                            Some(self.cell_value(state, &rows[i], &cols[j], depth, chain));
-                    }
-                }
-            }
-
-            let sub: Vec<Vec<f64>> = restricted_rows
-                .iter()
-                .map(|&i| {
-                    restricted_cols
-                        .iter()
-                        .map(|&j| cells[i][j].expect("restricted cell was just filled"))
-                        .collect()
-                })
-                .collect();
-            let solution = matrix::solve_matrix_game(&sub);
-            if solution.used_lp {
-                self.stats.lps_solved += 1;
-            }
-
-            let row_strategy = scatter(&solution.row_strategy, &restricted_rows, m);
-            let col_strategy = scatter(&solution.col_strategy, &restricted_cols, n);
-            best = MatrixSolution {
-                value: solution.value,
-                row_strategy: row_strategy.clone(),
-                col_strategy: col_strategy.clone(),
-                used_lp: solution.used_lp,
-            };
-
-            let (row_br_value, row_br) =
-                self.best_response_row(state, depth, chain, &mut cells, rows, cols, &col_strategy);
-            let (col_br_value, col_br) =
-                self.best_response_col(state, depth, chain, &mut cells, rows, cols, &row_strategy);
-
-            // P2 can hold P1 to `row_br_value` by playing `col_strategy`, and P1
-            // can guarantee `col_br_value` by playing `row_strategy` — both are
-            // full-game strategies, so these bracket the true value.
-            beta = beta.min(row_br_value);
-            alpha = alpha.max(col_br_value);
-            if beta - alpha <= EPS {
-                break;
-            }
-
-            let mut grew = false;
-            if !restricted_rows.contains(&row_br) {
-                restricted_rows.push(row_br);
-                grew = true;
-            }
-            if !restricted_cols.contains(&col_br) {
-                restricted_cols.push(col_br);
-                grew = true;
-            }
-            // Both best responses are already in the restricted game: neither
-            // player has anywhere better to go.
-            if !grew {
-                break;
-            }
-        }
-
-        // `best.value` is the *restricted* game's value, which equals the true
-        // value once the loop has converged. It can differ if the loop instead
-        // stopped because an incoming serialized-bounds window closed the
-        // bracket first. Both `alpha` and `beta` are always valid bounds on the
-        // true value, so clamping into them is a no-op in the converged case and
-        // caps the error at the bracket width otherwise.
-        //
-        // Ordered explicitly rather than with `clamp`, which panics on an
-        // inverted range: at convergence the two best-response values are the
-        // same quantity summed in different orders — row-major against the
-        // column strategy, column-major against the row strategy — so they can
-        // cross by one ulp.
-        let (low, high) = (alpha.min(beta), alpha.max(beta));
-        best.value = best.value.clamp(low, high);
-        best
-    }
-
-    /// P1's best pure response to `col_strategy`, and its value.
-    ///
-    /// Rows are abandoned as soon as they cannot catch the best row found so
-    /// far, judging unevaluated cells at their upper bound. This is the paper's
-    /// λ test rearranged: rather than deriving the payoff a cell would have to
-    /// deliver and comparing it against that cell's bound, compare the row's
-    /// optimistic completion against the incumbent directly. Both skip exactly
-    /// the same rows, and the bound tightens mid-row as cells become known.
-    #[allow(clippy::too_many_arguments)]
-    fn best_response_row(
-        &mut self,
-        state: &MatchState,
-        depth: u8,
-        chain: u8,
-        cells: &mut [Vec<Option<f64>>],
-        rows: &[Vec<BattleCommand>],
-        cols: &[Vec<BattleCommand>],
-        col_strategy: &[f64],
-    ) -> (f64, usize) {
-        let support: Vec<usize> = (0..col_strategy.len())
-            .filter(|&j| col_strategy[j] > EPS)
-            .collect();
-
-        let mut best_value = f64::NEG_INFINITY;
-        let mut best_row = 0;
-
-        for i in 0..rows.len() {
-            let mut accumulated = 0.0;
-            let mut abandoned = false;
-
-            for (k, &j) in support.iter().enumerate() {
-                let optimistic = accumulated
-                    + support[k..]
-                        .iter()
-                        .map(|&jj| col_strategy[jj] * cells[i][jj].unwrap_or(WIN))
-                        .sum::<f64>();
-                if optimistic < best_value - EPS {
-                    self.stats.ab_cutoffs += 1;
-                    abandoned = true;
-                    break;
-                }
-
-                let value = match cells[i][j] {
-                    Some(value) => value,
-                    None => {
-                        let value = self.cell_value(state, &rows[i], &cols[j], depth, chain);
-                        cells[i][j] = Some(value);
-                        value
-                    }
-                };
-                accumulated += col_strategy[j] * value;
-            }
-
-            if !abandoned && accumulated > best_value {
-                best_value = accumulated;
-                best_row = i;
-            }
-        }
-
-        (best_value, best_row)
-    }
-
-    /// P2's best pure response to `row_strategy`, and its value in P1's terms —
-    /// so P2 is looking for the *smallest* number. The mirror of
-    /// [`Self::best_response_row`], judging unevaluated cells at their lower
-    /// bound.
-    #[allow(clippy::too_many_arguments)]
-    fn best_response_col(
-        &mut self,
-        state: &MatchState,
-        depth: u8,
-        chain: u8,
-        cells: &mut [Vec<Option<f64>>],
-        rows: &[Vec<BattleCommand>],
-        cols: &[Vec<BattleCommand>],
-        row_strategy: &[f64],
-    ) -> (f64, usize) {
-        let support: Vec<usize> = (0..row_strategy.len())
-            .filter(|&i| row_strategy[i] > EPS)
-            .collect();
-
-        let mut best_value = f64::INFINITY;
-        let mut best_col = 0;
-
-        for j in 0..cols.len() {
-            let mut accumulated = 0.0;
-            let mut abandoned = false;
-
-            for (k, &i) in support.iter().enumerate() {
-                let pessimistic = accumulated
-                    + support[k..]
-                        .iter()
-                        .map(|&ii| row_strategy[ii] * cells[ii][j].unwrap_or(LOSS))
-                        .sum::<f64>();
-                if pessimistic > best_value + EPS {
-                    self.stats.ab_cutoffs += 1;
-                    abandoned = true;
-                    break;
-                }
-
-                let value = match cells[i][j] {
-                    Some(value) => value,
-                    None => {
-                        let value = self.cell_value(state, &rows[i], &cols[j], depth, chain);
-                        cells[i][j] = Some(value);
-                        value
-                    }
-                };
-                accumulated += row_strategy[i] * value;
-            }
-
-            if !abandoned && accumulated < best_value {
-                best_value = accumulated;
-                best_col = j;
-            }
-        }
-
-        (best_value, best_col)
+        let seed = matrix::OracleSeed {
+            rows: seed.map(|seed| seed.rows.as_slice()),
+            cols: seed.map(|seed| seed.cols.as_slice()),
+        };
+        let (solution, oracle) = matrix::double_oracle(
+            p1.actions.len(),
+            p2.actions.len(),
+            seed,
+            limits,
+            |i, j| self.cell_value(state, &p1.actions[i], &p2.actions[j], depth, chain),
+        );
+        // `cell_value` counts the evaluated cells itself, so `cells_requested`
+        // would double count them.
+        self.stats.lps_solved += oracle.lps_solved;
+        self.stats.ab_cutoffs += oracle.cutoffs;
+        solution
     }
 
     /// One matrix cell: the expected value over everything the engine might do
@@ -1056,33 +848,6 @@ fn as_battle(state: &MatchState) -> Option<&BattleState> {
         MatchState::BattleState(battle) => Some(battle),
         _ => None,
     }
-}
-
-/// The action indices double oracle opens its restricted game with.
-///
-/// Falls back to action 0, which is what an unseeded search always uses. An
-/// index at or past `len` is dropped: a capped action set can shrink between
-/// passes, and a stale index would then name a different action or none at all.
-fn seeded_start(seed: Option<&[usize]>, len: usize) -> Vec<usize> {
-    let mut start: Vec<usize> = seed
-        .unwrap_or(&[])
-        .iter()
-        .copied()
-        .filter(|&index| index < len)
-        .collect();
-    if start.is_empty() {
-        start.push(0);
-    }
-    start
-}
-
-/// Lift a restricted game's strategy back onto the full action indices.
-fn scatter(restricted: &[f64], indices: &[usize], full_len: usize) -> Vec<f64> {
-    let mut full = vec![0.0; full_len];
-    for (slot, &index) in indices.iter().enumerate() {
-        full[index] = restricted[slot];
-    }
-    full
 }
 
 /// `MatchState` implements `Hash` by hand, deliberately excluding the ephemeral

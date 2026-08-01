@@ -13,6 +13,13 @@
 //! [`SolveResult::depth_reached`].
 //! A partial pass is returned only when no pass finished.
 //!
+//! # Team preview
+//!
+//! [`solve`] refuses a preview state.
+//! [`preview::solve_team_preview`] solves that state instead.
+//! It runs double oracle over the bring-and-lead choices, and it uses [`solve`]
+//! for each battle below a preview cell.
+//!
 //! # Why not minimax
 //!
 //! Both players select commands without seeing the other commands.
@@ -69,6 +76,7 @@ pub mod actions;
 pub mod chance;
 pub mod eval;
 pub mod matrix;
+pub mod preview;
 pub mod search;
 
 use std::collections::HashMap;
