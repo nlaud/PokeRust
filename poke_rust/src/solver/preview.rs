@@ -28,12 +28,14 @@
 //! [`SolveConfig`].
 //! A game-over branch uses the terminal value.
 //!
-//! # Scope
+//! # Open-list preview
 //!
-//! Both teams are known here, so the game is perfect information.
-//! Open-list preview needs a belief over hidden numeric stats, a determinizer,
-//! and a particle model.
-//! That work is a separate task.
+//! [`solve_team_preview`] needs both teams.
+//! An open-list tournament hides the numeric stats, so the caller holds a belief
+//! instead of a state.
+//! [`solve_open_list_preview`] reads that belief.
+//! It draws concrete worlds with the determinizer, and it returns one strategy
+//! pair plus the sampling error of the value.
 //!
 //! ```no_run
 //! # use poke_rust::data::pokemon_move::PokemonMove;
@@ -65,6 +67,12 @@ use std::time::{Duration, Instant};
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::information::determinize::{
+    DeterminizeConfig, DeterminizeError, DeterminizeWarning, DeterminizedPreview,
+    determinize_team_preview_seeded,
+};
+use crate::information::unknowns::UnknownTeamPreviewState;
+use crate::meta::MetaDex;
 use crate::simulator::simulate_turn;
 use crate::state::battle::{
     MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
@@ -534,6 +542,344 @@ fn strategy_of(choices: &[TeamPreviewCommand], probabilities: &[f64]) -> Vec<Pre
         .collect();
     strategy.sort_by(|a, b| b.probability.total_cmp(&a.probability));
     strategy
+}
+
+// ── Open-list preview ───────────────────────────────────────────────────────
+
+/// Everything an open-list solve needs beyond the belief itself.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenListConfig {
+    /// The configuration of the preview solve inside each world.
+    /// Its `deadline` covers the whole open-list run, not one world.
+    pub preview: PreviewConfig,
+    /// How many concrete worlds the solver draws.
+    /// The cell work grows with this count.
+    pub worlds: usize,
+    /// The seed of the first draw. World `w` uses `seed + w`.
+    pub seed: u64,
+}
+
+impl Default for OpenListConfig {
+    fn default() -> Self {
+        OpenListConfig {
+            preview: PreviewConfig::default(),
+            worlds: 16,
+            seed: 0,
+        }
+    }
+}
+
+/// How much the drawn worlds disagree about the value.
+///
+/// The value of a strategy pair differs from world to world, because each world
+/// gives the hidden Pokemon different stats. The spread of those values measures
+/// how much the world count limits the answer.
+#[derive(Debug, Clone)]
+pub struct PreviewSamplingError {
+    /// The number of drawn worlds.
+    pub worlds: usize,
+    /// The value of the returned strategy pair in each world, in draw order.
+    pub per_world_values: Vec<f64>,
+    /// The mean of `per_world_values`.
+    /// This equals [`OpenListResult::value`] up to rounding.
+    pub mean: f64,
+    /// The standard error of `mean`.
+    /// This is the sample standard deviation divided by the square root of
+    /// `worlds`. One world gives `None`.
+    pub standard_error: Option<f64>,
+}
+
+/// An equilibrium over preview choices, across the drawn worlds.
+#[derive(Debug, Clone)]
+pub struct OpenListResult {
+    /// The value of the mean payoff matrix, in P1's favour.
+    pub value: f64,
+    /// P1's odds of winning, in `[0, 1]`.
+    pub p1_win_odds: f64,
+    /// P2's odds of winning. The game is zero-sum, so this is `1 - p1_win_odds`.
+    pub p2_win_odds: f64,
+    /// P1's mixed strategy. One strategy covers every world.
+    pub p1_strategy: Vec<PreviewChoiceProb>,
+    /// P2's mixed strategy, likewise.
+    pub p2_strategy: Vec<PreviewChoiceProb>,
+    /// The sampling error of `value`.
+    pub sampling: PreviewSamplingError,
+    /// The summed cost of every world. `cells_total` counts the preview matrix
+    /// once, because each world uses the same choice lists.
+    pub stats: PreviewStats,
+    /// Why the answer is approximate.
+    pub warnings: Vec<SolveWarning>,
+    /// What the determinizer reported while it drew the worlds.
+    /// Each distinct warning appears one time.
+    pub draw_warnings: Vec<DeterminizeWarning>,
+}
+
+/// Why an open-list position has no equilibrium.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OpenListError {
+    /// The configuration asked for zero worlds.
+    NoWorlds,
+    /// The determinizer could not draw a world.
+    Draw {
+        world: usize,
+        error: DeterminizeError,
+    },
+    /// A drawn world holds no legal bring-and-lead choice.
+    Preview { world: usize, error: PreviewError },
+    /// Two worlds gave different choice counts, so their cells do not line up.
+    ChoiceCountMismatch {
+        world: usize,
+        expected: (usize, usize),
+        found: (usize, usize),
+    },
+}
+
+impl fmt::Display for OpenListError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OpenListError::NoWorlds => write!(f, "an open-list solve needs at least one world"),
+            OpenListError::Draw { world, error } => {
+                write!(f, "world {world}: the determinizer failed: {error}")
+            }
+            OpenListError::Preview { world, error } => write!(f, "world {world}: {error}"),
+            OpenListError::ChoiceCountMismatch {
+                world,
+                expected,
+                found,
+            } => write!(
+                f,
+                "world {world} has {found:?} choices, but world 0 has {expected:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OpenListError {}
+
+/// Draws the concrete preview states that [`solve_open_list_preview`] uses.
+///
+/// World `w` uses seed `config.seed + w`, so a caller can rebuild the same
+/// worlds and score them with [`preview_cell_value`].
+pub fn open_list_worlds(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &OpenListConfig,
+    determinize: &DeterminizeConfig,
+) -> Result<Vec<DeterminizedPreview>, OpenListError> {
+    if config.worlds == 0 {
+        return Err(OpenListError::NoWorlds);
+    }
+    let mut worlds = Vec::with_capacity(config.worlds);
+    for world in 0..config.worlds {
+        let drawn = determinize_team_preview_seeded(
+            config.seed.wrapping_add(world as u64),
+            belief,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            determinize,
+        )
+        .map_err(|error| OpenListError::Draw { world, error })?;
+        worlds.push(drawn);
+    }
+    Ok(worlds)
+}
+
+/// Solves an open-list team preview.
+///
+/// The solver draws `config.worlds` concrete preview states from `belief`, then
+/// runs double oracle one time. The cell oracle returns the mean cell value
+/// across the drawn worlds, so double oracle solves the mean payoff matrix.
+///
+/// # One strategy for every world
+///
+/// The mean matrix gives one strategy pair for all worlds. This is the playable
+/// answer. A per-world solve would let the player pick a different lead in each
+/// hidden world, and the player never sees the hidden stats.
+///
+/// # The opponent
+///
+/// The mean matrix assumes that the opponent also plays one strategy across the
+/// worlds. A real opponent knows its own stats and can condition on them. The
+/// result is therefore an observer-side approximation, not the equilibrium of
+/// the full asymmetric-information game.
+///
+/// # Sampling error
+///
+/// The value of the returned strategy pair differs from world to world.
+/// [`PreviewSamplingError`] reports each world's value, their mean, and the
+/// standard error of that mean. The mean equals the returned value by
+/// construction, because the mean of `x^T A_w y` over `w` is `x^T A y` for the
+/// mean matrix `A`.
+///
+/// # Deadline
+///
+/// One clock covers the whole run. Every world reads the same start time, so
+/// `config.preview.deadline` bounds the complete solve rather than each world.
+///
+/// Set `VERBOSITY` to zero before a large search.
+pub fn solve_open_list_preview(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &OpenListConfig,
+    determinize: &DeterminizeConfig,
+) -> Result<OpenListResult, OpenListError> {
+    let started = Instant::now();
+    let drawn = open_list_worlds(belief, meta_dex, pokemon_dex, move_dex, config, determinize)?;
+
+    let mut draw_warnings: Vec<DeterminizeWarning> = Vec::new();
+    for world in &drawn {
+        for warning in &world.warnings {
+            if !draw_warnings.contains(warning) {
+                draw_warnings.push(warning.clone());
+            }
+        }
+    }
+
+    // Each world keeps its own cache. A cache key holds the preview-state hash,
+    // so one shared map would also be correct, but `PreviewContext` takes the
+    // cache by mutable reference and only one context can hold it.
+    let mut caches: Vec<PreviewCellCache> =
+        (0..drawn.len()).map(|_| PreviewCellCache::new()).collect();
+    let mut contexts: Vec<PreviewContext> = Vec::with_capacity(drawn.len());
+    for (world, (sample, cache)) in drawn.iter().zip(caches.iter_mut()).enumerate() {
+        let mut ctx =
+            PreviewContext::new(&sample.state, pokemon_dex, move_dex, &config.preview, cache)
+                .map_err(|error| OpenListError::Preview { world, error })?;
+        ctx.started = started;
+        contexts.push(ctx);
+    }
+
+    // `preview_choices` reads only the team sizes and the format counts, and
+    // every world comes from one belief. Index `i` therefore names the same
+    // choice in every world. The check guards that invariant rather than
+    // assuming it.
+    let rows = contexts[0].p1.len();
+    let cols = contexts[0].p2.len();
+    for (world, ctx) in contexts.iter().enumerate().skip(1) {
+        if ctx.p1.len() != rows || ctx.p2.len() != cols {
+            return Err(OpenListError::ChoiceCountMismatch {
+                world,
+                expected: (rows, cols),
+                found: (ctx.p1.len(), ctx.p2.len()),
+            });
+        }
+    }
+
+    let mut cell_worlds: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+    let (solution, oracle) = matrix::double_oracle(
+        rows,
+        cols,
+        OracleSeed::default(),
+        OracleLimits {
+            alpha: LOSS,
+            beta: WIN,
+            low: LOSS,
+            high: WIN,
+        },
+        |row, col| {
+            let values: Vec<f64> = contexts
+                .iter_mut()
+                .map(|ctx| ctx.cell_value(row, col))
+                .collect();
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            cell_worlds.insert((row, col), values);
+            mean
+        },
+    );
+
+    // The per-world value of the answer, `x^T A_w y`. Double oracle builds the
+    // complete restricted sub-matrix each round, so every support cell is
+    // already in `cell_worlds`. The miss arm computes one anyway, so a later
+    // change to the oracle cannot make this silently wrong.
+    let mut per_world_values = vec![0.0; contexts.len()];
+    for (row, &row_probability) in solution.row_strategy.iter().enumerate() {
+        if row_probability <= 0.0 {
+            continue;
+        }
+        for (col, &col_probability) in solution.col_strategy.iter().enumerate() {
+            if col_probability <= 0.0 {
+                continue;
+            }
+            let values = match cell_worlds.get(&(row, col)) {
+                Some(values) => values.clone(),
+                None => {
+                    let values: Vec<f64> = contexts
+                        .iter_mut()
+                        .map(|ctx| ctx.cell_value(row, col))
+                        .collect();
+                    cell_worlds.insert((row, col), values.clone());
+                    values
+                }
+            };
+            let weight = row_probability * col_probability;
+            for (total, value) in per_world_values.iter_mut().zip(&values) {
+                *total += weight * value;
+            }
+        }
+    }
+
+    let mut stats = PreviewStats {
+        cells_total: (rows * cols) as u64,
+        ..PreviewStats::default()
+    };
+    let mut warnings: Vec<SolveWarning> = Vec::new();
+    let mut deadline_hit = false;
+    for ctx in &contexts {
+        stats.cells_evaluated += ctx.stats.cells_evaluated;
+        stats.cell_cache_hits += ctx.stats.cell_cache_hits;
+        stats.battles_solved += ctx.stats.battles_solved;
+        stats.turns_simulated += ctx.stats.turns_simulated;
+        stats.lps_solved += ctx.stats.lps_solved;
+        deadline_hit |= ctx.deadline_hit;
+        for warning in &ctx.warnings {
+            merge_warning(&mut warnings, warning.clone());
+        }
+    }
+    stats.lps_solved += oracle.lps_solved;
+    stats.elapsed = started.elapsed();
+    if let (true, Some(budget)) = (deadline_hit, config.preview.deadline) {
+        warnings.insert(0, SolveWarning::DeadlineExceeded { budget });
+    }
+
+    let value = solution.value.clamp(LOSS, WIN);
+    Ok(OpenListResult {
+        value,
+        p1_win_odds: value,
+        p2_win_odds: WIN - value,
+        p1_strategy: strategy_of(&contexts[0].p1, &solution.row_strategy),
+        p2_strategy: strategy_of(&contexts[0].p2, &solution.col_strategy),
+        sampling: sampling_error(per_world_values),
+        stats,
+        warnings,
+        draw_warnings,
+    })
+}
+
+/// Summarize the per-world values of one strategy pair.
+fn sampling_error(per_world_values: Vec<f64>) -> PreviewSamplingError {
+    let worlds = per_world_values.len();
+    let mean = per_world_values.iter().sum::<f64>() / worlds as f64;
+    // One world gives no spread to measure. The sample variance also divides by
+    // `worlds - 1`, which is zero there.
+    let standard_error = (worlds > 1).then(|| {
+        let variance = per_world_values
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / (worlds - 1) as f64;
+        (variance / worlds as f64).sqrt()
+    });
+    PreviewSamplingError {
+        worlds,
+        per_world_values,
+        mean,
+        standard_error,
+    }
 }
 
 // ── The cell oracle ─────────────────────────────────────────────────────────

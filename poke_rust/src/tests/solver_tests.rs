@@ -8,15 +8,24 @@
 //! Tests therefore use few moves, short benches, and one damage roll.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::data::ability::Ability;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::information::determinize::DeterminizeConfig;
+use crate::information::inference::InferenceConfig;
+use crate::information::unknowns::{
+    InformationMode, UnknownMatchState, UnknownTeamPreviewState,
+};
+use crate::meta::{MetaDex, MetaFormat};
 use crate::solver::chance::ChanceMode;
 use crate::solver::matrix::solve_matrix_game;
 use crate::solver::preview::{
-    PreviewCellCache, PreviewConfig, precompute_preview_cells, preview_cell_value, preview_choices,
+    OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
+    precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
     solve_team_preview, solve_team_preview_cached,
 };
 use crate::solver::{
@@ -1569,4 +1578,340 @@ fn preview_mirror_position_is_even() {
         "the mirror value is {}",
         result.value
     );
+}
+
+// ── Open-list team preview ──────────────────────────────────────────────────
+
+/// The usage cache is gitignored and regenerable, so it may not exist. Tests
+/// that need it skip rather than fail. Mirrors `determinize_tests::meta_root`.
+fn meta_root() -> Option<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../meta_scraper/data");
+    root.is_dir().then_some(root)
+}
+
+static DOUBLES: OnceLock<Option<MetaDex>> = OnceLock::new();
+static LEARNSETS: OnceLock<HashMap<Species, HashSet<PokemonMove>>> = OnceLock::new();
+
+fn doubles_meta() -> Option<&'static MetaDex> {
+    DOUBLES
+        .get_or_init(|| meta_root().and_then(|r| MetaDex::load(&r, None, MetaFormat::Doubles).ok()))
+        .as_ref()
+}
+
+fn learnset_dex() -> &'static HashMap<Species, HashSet<PokemonMove>> {
+    LEARNSETS
+        .get_or_init(|| crate::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt"))
+}
+
+/// Skip the body unless the cache is present.
+macro_rules! with_meta {
+    ($meta:ident) => {
+        let Some($meta) = doubles_meta() else { return };
+    };
+}
+
+/// P1 observes, so P1's own team is copied and P2's stats are drawn.
+fn open_list_determinize_config() -> DeterminizeConfig {
+    DeterminizeConfig {
+        inference: InferenceConfig {
+            learnset_dex: learnset_dex().clone(),
+            ..InferenceConfig::default()
+        },
+        observer: Player::P1,
+        ..Default::default()
+    }
+}
+
+/// An open-list belief over `p1` and `p2`.
+///
+/// `OpenTeamSheetNatures` is the tournament mode: the sheet shows every field
+/// except the numeric stats. Each opponent Pokemon therefore needs all four move
+/// slots filled, or the determinizer treats an empty slot as unrevealed and
+/// draws a move into it.
+fn open_list_belief(p1: Vec<PokemonState>, p2: Vec<PokemonState>) -> UnknownTeamPreviewState {
+    // Bring one and lead one, so the choice count stays at the team size.
+    let belief = UnknownMatchState::team_preview_open_sheet_from_perspective(
+        Player::P1,
+        &p1,
+        &p2,
+        pokemon_dex(),
+        1,
+        1,
+        50,
+        InformationMode::OpenTeamSheetNatures,
+        true,
+    );
+    match belief {
+        UnknownMatchState::TeamPreview(preview) => preview,
+        _ => panic!("the constructor returns a team-preview belief"),
+    }
+}
+
+/// One Pokemon a side. P1 brings one move so its own action set stays at one,
+/// and P2 fills every move slot so the sheet reveals a complete move set.
+fn open_list_belief_1v1() -> UnknownTeamPreviewState {
+    open_list_belief(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![mon(
+            Species::Snorlax,
+            &[
+                PokemonMove::BodySlam,
+                PokemonMove::Crunch,
+                PokemonMove::Rest,
+                PokemonMove::Yawn,
+            ],
+        )],
+    )
+}
+
+fn open_list_config(worlds: usize) -> OpenListConfig {
+    OpenListConfig {
+        preview: preview_config(),
+        worlds,
+        seed: 20_260_801,
+    }
+}
+
+/// The determinizer must supply what the sheet hides and nothing else. Different
+/// seeds must give the opponent different stats, and the observer's own team must
+/// be identical in every world.
+#[test]
+fn open_list_preview_draws_distinct_worlds() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+    let determinize = open_list_determinize_config();
+
+    let worlds = open_list_worlds(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(8),
+        &determinize,
+    )
+    .expect("the belief is well formed");
+    assert_eq!(worlds.len(), 8);
+
+    let own_stats = worlds[0].state.p1_mons[0].stats;
+    for (index, world) in worlds.iter().enumerate() {
+        assert_eq!(
+            world.state.p1_mons[0].stats, own_stats,
+            "world {index} changed the observer's own team"
+        );
+        assert_eq!(world.state.p2_mons[0].species, Species::Snorlax);
+        assert!(world.probability > 0.0, "world {index} has zero probability");
+    }
+
+    let opponent_stats: HashSet<[u16; 6]> =
+        worlds.iter().map(|w| w.state.p2_mons[0].stats).collect();
+    assert!(
+        opponent_stats.len() > 1,
+        "every world drew the same opponent stats: {opponent_stats:?}"
+    );
+}
+
+/// The soundness test. Build every cell of every world by hand, average them,
+/// and solve that matrix. The open-list solve must return the same value.
+#[test]
+fn open_list_preview_matches_mean_matrix() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief(
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+        ],
+    );
+    let determinize = open_list_determinize_config();
+    let config = open_list_config(2);
+
+    let worlds = open_list_worlds(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &determinize,
+    )
+    .expect("the belief is well formed");
+
+    let p1_choices = preview_choices(&worlds[0].state, Player::P1);
+    let p2_choices = preview_choices(&worlds[0].state, Player::P2);
+    let mut mean_matrix = vec![vec![0.0; p2_choices.len()]; p1_choices.len()];
+    for world in &worlds {
+        for (row, p1_choice) in p1_choices.iter().enumerate() {
+            for (col, p2_choice) in p2_choices.iter().enumerate() {
+                mean_matrix[row][col] += preview_cell_value(
+                    &world.state,
+                    pokemon_dex,
+                    move_dex,
+                    &config.preview,
+                    p1_choice,
+                    p2_choice,
+                ) / worlds.len() as f64;
+            }
+        }
+    }
+    let reference = solve_matrix_game(&mean_matrix);
+
+    let result = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &determinize,
+    )
+    .expect("the belief is well formed");
+
+    assert!(
+        (result.value - reference.value).abs() < 1e-6,
+        "the open-list solve returned {}, the mean matrix returned {}",
+        result.value,
+        reference.value
+    );
+    assert_eq!(result.stats.cells_total, (p1_choices.len() * p2_choices.len()) as u64);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// One world has no spread to measure, so the standard error must be absent
+/// rather than zero.
+#[test]
+fn open_list_preview_one_world_has_no_sampling_error() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+
+    let result = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(1),
+        &open_list_determinize_config(),
+    )
+    .expect("the belief is well formed");
+
+    assert_eq!(result.sampling.worlds, 1);
+    assert_eq!(result.sampling.per_world_values.len(), 1);
+    assert!(result.sampling.standard_error.is_none());
+    assert!((result.sampling.mean - result.value).abs() < 1e-9);
+}
+
+/// Several worlds must report a finite, non-negative standard error. The mean of
+/// the per-world values must also equal the returned value, because the solver
+/// solves the mean of those same cells.
+#[test]
+fn open_list_preview_reports_sampling_error() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+
+    let result = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(4),
+        &open_list_determinize_config(),
+    )
+    .expect("the belief is well formed");
+
+    assert_eq!(result.sampling.worlds, 4);
+    assert_eq!(result.sampling.per_world_values.len(), 4);
+    for value in &result.sampling.per_world_values {
+        assert!((0.0..=1.0).contains(value), "a world value is {value}");
+    }
+    let error = result
+        .sampling
+        .standard_error
+        .expect("four worlds report a standard error");
+    assert!(error.is_finite() && error >= 0.0, "the error is {error}");
+    assert!(
+        (result.sampling.mean - result.value).abs() < 1e-6,
+        "the mean is {}, the value is {}",
+        result.sampling.mean,
+        result.value
+    );
+    assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
+}
+
+/// The answer must hold one strategy pair, not one pair per world. Each strategy
+/// must also be a distribution over the choices of a single world.
+#[test]
+fn open_list_preview_returns_one_strategy() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief(
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+        ],
+    );
+    let config = open_list_config(3);
+
+    let result = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &open_list_determinize_config(),
+    )
+    .expect("the belief is well formed");
+
+    let choice_count = preview_choices(
+        &open_list_worlds(
+            &belief,
+            meta,
+            pokemon_dex,
+            move_dex,
+            &config,
+            &open_list_determinize_config(),
+        )
+        .expect("the belief is well formed")[0]
+            .state,
+        Player::P1,
+    )
+    .len();
+
+    for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
+        let total: f64 = strategy.iter().map(|choice| choice.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(!strategy.is_empty(), "{label} strategy is empty");
+        assert!(
+            strategy.len() <= choice_count,
+            "{label} returned {} entries for {choice_count} choices",
+            strategy.len()
+        );
+    }
+    assert_eq!(result.sampling.worlds, 3);
+}
+
+/// Zero worlds is a configuration error, not an empty answer.
+#[test]
+fn open_list_preview_rejects_zero_worlds() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+
+    let result = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(0),
+        &open_list_determinize_config(),
+    );
+
+    assert_eq!(result.unwrap_err(), OpenListError::NoWorlds);
 }

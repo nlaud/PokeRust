@@ -20,6 +20,14 @@
 //! It runs double oracle over the bring-and-lead choices, and it uses [`solve`]
 //! for each battle below a preview cell.
 //!
+//! # Open-list team preview
+//!
+//! An open-list tournament hides the numeric stats of both teams.
+//! [`preview::solve_open_list_preview`] takes that belief instead of a state.
+//! It draws concrete worlds with the determinizer, and it solves the mean payoff
+//! matrix of those worlds.
+//! The result holds one strategy pair and the sampling error of the value.
+//!
 //! # Why not minimax
 //!
 //! Both players select commands without seeing the other commands.

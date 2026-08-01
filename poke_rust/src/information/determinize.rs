@@ -46,13 +46,13 @@ use crate::information::inference::{
 use crate::information::subset_check::collect_true_state_subset_violations;
 use crate::information::unknowns::{
     PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
-    is_illusion_capable_species,
+    UnknownTeamPreviewState, is_illusion_capable_species,
 };
 use crate::meta::dex::{MetaDex, SpeciesMeta, StatPoints};
 use crate::meta::names::ALL_NATURES;
 use crate::simulator::helpers::{sample_one_weighted, transform_into};
 use crate::simulator::scoped_sample_rng;
-use crate::state::battle::{BattleState, Player};
+use crate::state::battle::{BattleState, Player, TeamPreviewState};
 use crate::state::dex_data::{MoveData, PokemonData, PokemonType};
 use crate::state::pokemon::{
     Nature, PokemonGender, PokemonState, PokemonStatsTable, build_pokemon_state, calc_hp, calc_stat,
@@ -2279,6 +2279,139 @@ fn invent_bench(
             Err(_) => continue,
         }
     }
+}
+
+// ── Team-preview assembly ────────────────────────────────────────────────────
+
+/// One determinized team preview.
+#[derive(Debug, Clone)]
+pub struct DeterminizedPreview {
+    pub state: TeamPreviewState,
+    /// Joint probability of the sampled draw sequence.
+    ///
+    /// This carries the same contract as [`Determinized::probability`]. It is a
+    /// lower bound, and it is comparable only between draws from one belief.
+    pub probability: f64,
+    pub warnings: Vec<DeterminizeWarning>,
+}
+
+/// Sample one concrete [`TeamPreviewState`] from a team-preview belief.
+///
+/// An open-list tournament shows every team field except the numeric stats, so
+/// the belief pins species, ability, item, moves, Tera type, and nature. The
+/// draw supplies the EVs, IVs, and stats that the sheet leaves hidden.
+///
+/// Deterministic in `seed`. The same inputs always give the same state.
+pub fn determinize_team_preview_seeded(
+    seed: u64,
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    cfg: &DeterminizeConfig,
+) -> Result<DeterminizedPreview, DeterminizeError> {
+    let _guard = scoped_sample_rng(seed);
+    determinize_team_preview(belief, meta_dex, pokemon_dex, move_dex, cfg)
+}
+
+/// As [`determinize_team_preview_seeded`], but with the ambient RNG.
+///
+/// This has no repair loop, unlike [`determinize`]. A preview belief holds no
+/// action history, so it carries no cross-turn constraint, and
+/// `subset_check::collect_true_state_subset_violations` reads a `BattleState`
+/// rather than a `TeamPreviewState`. The one cross-Pokemon rule that applies
+/// here is the item clause, and `sample_item` enforces that exactly.
+pub fn determinize_team_preview(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    cfg: &DeterminizeConfig,
+) -> Result<DeterminizedPreview, DeterminizeError> {
+    let mut log = DrawLog::new();
+
+    let (mut p1_mons, p1_ids) = build_preview_side(
+        &belief.p1_mons,
+        Player::P1,
+        0,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        cfg,
+        &mut log,
+    )?;
+    let (mut p2_mons, p2_ids) = build_preview_side(
+        &belief.p2_mons,
+        Player::P2,
+        belief.p1_mons.len(),
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        cfg,
+        &mut log,
+    )?;
+
+    // One pass over both teams, not one pass per team. The engine needs a
+    // `mon_id` that is unique across the whole preview, because trapping
+    // volatiles record their source by that id. Only the observer's side
+    // carries known ids at preview time, so a per-team pass would give the
+    // opponent the same low ids the observer already holds.
+    let mut known = p1_ids;
+    known.extend(p2_ids);
+    let mut all: Vec<&mut PokemonState> =
+        p1_mons.iter_mut().chain(p2_mons.iter_mut()).collect();
+    assign_mon_ids(&mut all, &known);
+    drop(all);
+
+    Ok(DeterminizedPreview {
+        state: TeamPreviewState {
+            active_per_side: belief.active_per_side,
+            brought_per_side: belief.brought_per_side,
+            mechanics: belief.mechanics,
+            p1_mons,
+            p2_mons,
+        },
+        probability: log.probability,
+        warnings: log.warnings,
+    })
+}
+
+/// Build one side of a preview, and report the ids the belief already knew.
+///
+/// The observer's own team is copied. The opponent's team is sampled. This is
+/// the same split that `build_side` applies during a battle.
+#[allow(clippy::too_many_arguments)]
+fn build_preview_side(
+    mons: &[UnknownPokemonState],
+    player: Player,
+    mon_idx_start: usize,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    cfg: &DeterminizeConfig,
+    log: &mut DrawLog,
+) -> Result<(Vec<PokemonState>, Vec<Option<u8>>), DeterminizeError> {
+    let hidden = player != cfg.observer;
+    // The item clause, enforced exactly rather than by rejection. Each drawn
+    // item leaves the pool of every later teammate on this side.
+    let mut used_items: HashSet<Item> = HashSet::new();
+    let mut built = Vec::with_capacity(mons.len());
+    let mut ids = Vec::with_capacity(mons.len());
+    for (i, unk) in mons.iter().enumerate() {
+        built.push(build_one(
+            hidden,
+            mon_idx_start + i,
+            unk,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            &mut used_items,
+            cfg,
+            log,
+        )?);
+        ids.push(known_mon_id(unk));
+    }
+    Ok((built, ids))
 }
 
 // ── Self-check ───────────────────────────────────────────────────────────────
