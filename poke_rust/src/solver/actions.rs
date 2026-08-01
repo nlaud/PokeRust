@@ -15,13 +15,20 @@ use std::collections::{HashMap, HashSet};
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::simulator::helpers::{
+    accuracy_hit_probability, calculate_damage_outcomes_for_target, effective_move_priority,
+    get_pokemon_at_slot, move_has_flag,
+};
 use crate::simulator::{
-    get_possible_commands_for_active_slot, validate_battle_command_combination,
+    DamageConfig, get_possible_commands_for_active_slot, validate_battle_command_combination,
 };
 use crate::state::battle::{
     BattleCommand, BattleState, FieldSlot, MatchState, Player, SwitchCommand,
 };
-use crate::state::dex_data::{MoveData, PokemonData};
+use crate::state::dex_data::{
+    DamageOverride, MoveCategory, MoveData, MoveFlag, MoveTarget, PokemonData, SelfDestructType,
+    SelfSwitchType, Status,
+};
 use crate::state::pokemon::PokemonState;
 use crate::user::replacement_commands_are_valid;
 
@@ -165,6 +172,7 @@ pub fn per_slot_commands(
 /// Returns every legal joint action for one player.
 /// Applies cross-slot validation after the Cartesian product.
 /// `cap` can reduce the result and make the solution approximate.
+/// `prune_dominated` can also reduce the result. See [`remove_dominated_actions`].
 pub fn joint_actions(
     state: &BattleState,
     player: Player,
@@ -172,6 +180,7 @@ pub fn joint_actions(
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
     cap: Option<usize>,
+    prune_dominated: bool,
 ) -> JointActions {
     if matches!(phase, Phase::TeamPreview | Phase::GameOver) {
         return JointActions {
@@ -200,11 +209,344 @@ pub fn joint_actions(
     // then reports only the actions that the cap really dropped.
     actions = remove_duplicate_actions(actions, actives);
 
+    // The dominance filter is lossy, so `total` counts the actions before it.
+    // `was_capped` then reports the reduction as a truncation.
     let total = actions.len();
+    if prune_dominated && matches!(phase, Phase::Normal) {
+        actions = remove_dominated_actions(state, player, actions, move_dex);
+    }
     if let Some(cap) = cap {
         actions = reduce_to_cap(actions, cap);
     }
     JointActions { actions, total }
+}
+
+/// The damage settings of the dominance pre-filter.
+///
+/// One roll keeps the pre-filter cheap. The roll multiplier scales both moves
+/// of a comparison equally, so the median roll orders them as every roll does.
+///
+/// The estimate keeps the critical-hit branch. A critical hit ignores the
+/// defensive boosts of the target, and a physical move and a special move meet
+/// a different boost, so the branch can reverse the order of two moves. The
+/// comparison spans the branch by reading the lowest and the highest returned
+/// damage.
+const PRUNE_DAMAGE_CONFIG: DamageConfig = DamageConfig {
+    consider_crit: true,
+    damage_rolls: 1,
+    sample: false,
+};
+
+/// The damage outcomes and hit probability of one attack command.
+#[derive(Debug, Clone)]
+struct AttackEstimate {
+    move_slot: usize,
+    /// Every returned damage branch, as `(damage, is_critical, probability)`.
+    /// Two commands with the same branches are the same choice.
+    outcomes: Vec<(u16, bool, f64)>,
+    lowest_damage: u16,
+    highest_damage: u16,
+    hit_probability: f64,
+}
+
+/// Whether `move_data` only deals damage to the one target that the user chose.
+///
+/// The pre-filter compares two moves by damage and accuracy alone, so every
+/// other effect must be absent. The search cannot price an effect that the
+/// comparison does not read.
+///
+/// The target rule keeps every spread move. A spread move also hits the ally
+/// slot, so its value depends on the partner command.
+fn is_plain_single_target_attack(move_data: &MoveData) -> bool {
+    matches!(
+        move_data.category,
+        MoveCategory::Physical | MoveCategory::Special
+    ) && matches!(
+        move_data.target,
+        MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe
+    ) && move_data.secondaries.is_empty()
+        && move_data.self_secondaries.is_empty()
+        && move_data.self_boost == [0i8; 7]
+        && move_data.heal_fraction == [0, 0]
+        && move_data.recoil_fraction == [0, 0]
+        && move_data.drain_fraction == [0, 0]
+        && move_data.multihit_range == [0, 0]
+        && !move_data.ohko
+        && !move_data.thaws_target
+        && !move_data.force_switch
+        && !move_data.mind_blown_recoil
+        && !move_data.struggle_recoil
+        && !move_data.has_crash_damage
+        && !move_data.breaks_protect
+        && !move_data.sleep_usable
+        && matches!(move_data.self_switch, SelfSwitchType::None)
+        && matches!(move_data.self_destruct, SelfDestructType::None)
+        && matches!(move_data.damage_override, DamageOverride::None)
+        && !move_has_flag(move_data, &MoveFlag::Charge)
+        && !move_has_flag(move_data, &MoveFlag::Recharge)
+        && !move_has_flag(move_data, &MoveFlag::FutureMove)
+        && !has_name_based_effect(&move_data.name)
+}
+
+/// Return true when the simulator applies behavior that the move data does not describe.
+/// The damage estimate does not include these effects or failure rules.
+fn has_name_based_effect(move_name: &PokemonMove) -> bool {
+    matches!(
+        move_name,
+        PokemonMove::AlluringVoice
+            | PokemonMove::BeakBlast
+            | PokemonMove::Belch
+            | PokemonMove::BrickBreak
+            | PokemonMove::BugBite
+            | PokemonMove::BurnUp
+            | PokemonMove::BurningJealousy
+            | PokemonMove::ClearSmog
+            | PokemonMove::Covet
+            | PokemonMove::EerieSpell
+            | PokemonMove::FakeOut
+            | PokemonMove::FellStinger
+            | PokemonMove::FirstImpression
+            | PokemonMove::Fling
+            | PokemonMove::FocusPunch
+            | PokemonMove::IceBall
+            | PokemonMove::IceSpinner
+            | PokemonMove::KnockOff
+            | PokemonMove::LastResort
+            | PokemonMove::MortalSpin
+            | PokemonMove::Outrage
+            | PokemonMove::PetalDance
+            | PokemonMove::Pluck
+            | PokemonMove::PollenPuff
+            | PokemonMove::Poltergeist
+            | PokemonMove::PsychicFangs
+            | PokemonMove::RagingBull
+            | PokemonMove::RagingFury
+            | PokemonMove::RapidSpin
+            | PokemonMove::Rollout
+            | PokemonMove::Round
+            | PokemonMove::SaltCure
+            | PokemonMove::SmackDown
+            | PokemonMove::Snore
+            | PokemonMove::SparklingAria
+            | PokemonMove::SpiritShackle
+            | PokemonMove::SpitUp
+            | PokemonMove::SteelRoller
+            | PokemonMove::SuckerPunch
+            | PokemonMove::Thief
+            | PokemonMove::ThroatChop
+            | PokemonMove::Thrash
+            | PokemonMove::UpperHand
+            | PokemonMove::Uproar
+    )
+}
+
+/// Groups the attack commands of one slot that the pre-filter may compare.
+///
+/// Two commands of one group share a target, a priority, and both resource
+/// flags. A partner command applies the same multiplier to both of them, so the
+/// comparison order holds under every partner command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ComparisonGroup {
+    slot_index: usize,
+    target: FieldSlot,
+    priority: i8,
+    terastallize: bool,
+}
+
+/// Whether `better` dominates `worse`.
+///
+/// A dominating command must hit at least as often. It then wins in one of two
+/// ways.
+///
+/// Two commands with the same damage branches and the same hit probability are
+/// one choice. The lower move slot wins that pair, so the pair loses exactly one
+/// command instead of both.
+///
+/// Otherwise the lowest damage of the dominating command must reach the highest
+/// damage of the other command, and one of the two measures must be a strict
+/// win. The strict win keeps the relation acyclic, so every group keeps at least
+/// one command.
+fn dominates(better: &AttackEstimate, worse: &AttackEstimate) -> bool {
+    if better.hit_probability < worse.hit_probability {
+        return false;
+    }
+    if better.outcomes == worse.outcomes && better.hit_probability == worse.hit_probability {
+        return better.move_slot < worse.move_slot;
+    }
+    better.lowest_damage >= worse.highest_damage
+        && (better.lowest_damage > worse.highest_damage
+            || better.hit_probability > worse.hit_probability)
+}
+
+/// The exact slot commands that another command of the same slot dominates.
+fn dominated_slot_commands(
+    state: &BattleState,
+    player: Player,
+    actions: &[Vec<BattleCommand>],
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> HashSet<(usize, ExactSlotKey)> {
+    let mut groups: HashMap<ComparisonGroup, Vec<AttackEstimate>> = HashMap::new();
+    let mut seen: HashSet<(usize, ExactSlotKey)> = HashSet::new();
+
+    for combo in actions {
+        for (slot_index, command) in combo.iter().enumerate() {
+            if !seen.insert((slot_index, exact_slot_key(command))) {
+                continue;
+            }
+            let Some((group, estimate)) =
+                attack_estimate(state, player, slot_index, command, move_dex)
+            else {
+                continue;
+            };
+            groups.entry(group).or_default().push(estimate);
+        }
+    }
+
+    let mut dominated: HashSet<(usize, ExactSlotKey)> = HashSet::new();
+    for (group, estimates) in &groups {
+        for worse in estimates {
+            if !estimates.iter().any(|better| dominates(better, worse)) {
+                continue;
+            }
+            dominated.insert((
+                group.slot_index,
+                ExactSlotKey::Attack {
+                    move_slot: worse.move_slot,
+                    target: Some(group.target),
+                    terastallize: group.terastallize,
+                    mega_evolve: false,
+                },
+            ));
+        }
+    }
+    dominated
+}
+
+/// The comparison group and estimate of one attack command, when the pre-filter
+/// may compare that command.
+///
+/// A Mega Evolution returns `None`. It changes the species, the stats, and the
+/// ability of the user, and this estimate reads the current form.
+fn attack_estimate(
+    state: &BattleState,
+    player: Player,
+    slot_index: usize,
+    command: &BattleCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> Option<(ComparisonGroup, AttackEstimate)> {
+    let BattleCommand::Attack(attack) = command else {
+        return None;
+    };
+    if attack.mega_evolve {
+        return None;
+    }
+    let target_slot = attack.target?;
+    let attacker = active_mons(state, player).get(slot_index)?;
+
+    // A sleeping or frozen user runs a different move set, and the damage
+    // estimate does not read the status. Leave both cases to the search.
+    if matches!(attacker.status, Some(Status::Sleep(_)) | Some(Status::Frozen(_))) {
+        return None;
+    }
+
+    let move_name = attacker.moves.get(attack.move_slot)?.as_ref()?;
+    let move_data = move_dex.get(move_name)?;
+    if !is_plain_single_target_attack(move_data) {
+        return None;
+    }
+
+    let target = get_pokemon_at_slot(state, target_slot)?;
+    if target.fainted {
+        return None;
+    }
+
+    // Terastallization only sets `is_tera`, so a copy models it exactly. The
+    // copy grants the Tera type its STAB and leaves every other field alone.
+    let user_slot = FieldSlot {
+        player,
+        slot_index: slot_index as u8,
+    };
+    let mut attacker_copy;
+    let attacker = if attack.terastallize {
+        attacker_copy = attacker.clone();
+        attacker_copy.is_tera = true;
+        &attacker_copy
+    } else {
+        attacker
+    };
+
+    let outcomes = calculate_damage_outcomes_for_target(
+        state,
+        attacker,
+        target,
+        user_slot,
+        target_slot,
+        move_data,
+        PRUNE_DAMAGE_CONFIG,
+        1.0,
+        1.0,
+    );
+    let lowest_damage = outcomes.iter().map(|(damage, _, _)| *damage).min()?;
+    let highest_damage = outcomes.iter().map(|(damage, _, _)| *damage).max()?;
+    let hit_probability = accuracy_hit_probability(
+        state,
+        attacker,
+        target,
+        user_slot,
+        target_slot,
+        move_data,
+    );
+
+    Some((
+        ComparisonGroup {
+            slot_index,
+            target: target_slot,
+            priority: effective_move_priority(state, attacker, move_data),
+            terastallize: attack.terastallize,
+        },
+        AttackEstimate {
+            move_slot: attack.move_slot,
+            outcomes,
+            lowest_damage,
+            highest_damage,
+            hit_probability,
+        },
+    ))
+}
+
+/// Removes each joint action that holds a dominated slot command.
+///
+/// The filter is approximate, so a caller opts in with
+/// `SolveConfig::prune_dominated_actions`.
+///
+/// A dominating command shares the target and both resource flags with the
+/// command that it replaces, so the swap keeps the joint action legal and the
+/// set never becomes empty. The empty check below covers that claim at runtime.
+fn remove_dominated_actions(
+    state: &BattleState,
+    player: Player,
+    actions: Vec<Vec<BattleCommand>>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> Vec<Vec<BattleCommand>> {
+    let dominated = dominated_slot_commands(state, player, &actions, move_dex);
+    if dominated.is_empty() {
+        return actions;
+    }
+
+    let kept: Vec<Vec<BattleCommand>> = actions
+        .iter()
+        .filter(|combo| {
+            !combo
+                .iter()
+                .enumerate()
+                .any(|(slot_index, command)| {
+                    dominated.contains(&(slot_index, exact_slot_key(command)))
+                })
+        })
+        .cloned()
+        .collect();
+
+    if kept.is_empty() { actions } else { kept }
 }
 
 /// The battle resources that one joint action spends.
@@ -643,6 +985,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert!(joint.actions.iter().all(|combo| combo.len() == 1));
         // Four moves plus one bench switch, at minimum.
@@ -672,6 +1015,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert!(joint.actions.iter().all(|combo| combo.len() == 2));
         // With exactly one bench Pokemon, no joint action may switch both slots.
@@ -705,6 +1049,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         let capped = joint_actions(
             &state,
@@ -713,6 +1058,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             Some(6),
+            false,
         );
         assert!(capped.actions.len() <= 6);
         assert_eq!(capped.total, uncapped.actions.len());
@@ -739,6 +1085,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             Some(0),
+            false,
         );
         assert!(!capped.actions.is_empty());
     }
@@ -759,7 +1106,7 @@ mod tests {
         let phase = phase_of(&MatchState::BattleState(state.clone()));
         assert_eq!(phase, Phase::Replacement);
 
-        let joint = joint_actions(&state, Player::P1, phase, move_dex(), pokemon_dex(), None);
+        let joint = joint_actions(&state, Player::P1, phase, move_dex(), pokemon_dex(), None, false);
         assert_eq!(joint.actions, vec![vec![BattleCommand::Pass]]);
     }
 
@@ -786,6 +1133,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert_eq!(joint.actions.len(), 2);
         assert!(
@@ -824,6 +1172,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert!(!joint.actions.is_empty());
         for combo in &joint.actions {
@@ -848,6 +1197,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert!(
             uncapped.actions.iter().any(|combo| uses_tera(combo)),
@@ -861,6 +1211,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             Some(6),
+            false,
         );
         assert!(capped.actions.len() <= 6);
         assert!(
@@ -904,6 +1255,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
 
         // The selection runs inside one resource group. Its first sweep must
@@ -946,6 +1298,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             Some(9),
+            false,
         );
         for slot_idx in 0..2 {
             assert!(
@@ -1080,6 +1433,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             Some(7),
+            false,
         );
         for _ in 0..5 {
             let again = joint_actions(
@@ -1089,6 +1443,7 @@ mod tests {
                 move_dex(),
                 pokemon_dex(),
                 Some(7),
+                false,
             );
             assert_eq!(
                 format!("{:?}", first.actions),
@@ -1120,6 +1475,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         assert!(
             joint
@@ -1161,6 +1517,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         for tera_slot in 0..2 {
             assert!(
@@ -1192,6 +1549,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         for move_slot in 0..4 {
             assert!(
@@ -1229,6 +1587,7 @@ mod tests {
             move_dex(),
             pokemon_dex(),
             None,
+            false,
         );
         for move_slot in 0..2 {
             assert!(
@@ -1265,6 +1624,7 @@ mod tests {
                 move_dex(),
                 pokemon_dex(),
                 Some(cap),
+                false,
             );
             assert_eq!(capped.actions.len(), cap.min(capped.total), "cap {}", cap);
             for combo in &capped.actions {
@@ -1293,5 +1653,223 @@ mod tests {
             }),
             Phase::GameOver
         );
+    }
+
+    /// A singles position where P1 chooses between the given moves.
+    fn pruning_position(moves: [Option<PokemonMove>; 4]) -> BattleState {
+        battle_state_from_lists(
+            vec![mon(Species::Pikachu, moves)],
+            vec![],
+            vec![mon(Species::Snorlax, four_moves())],
+            vec![],
+        )
+    }
+
+    /// The move slots that slot 0 still offers.
+    fn slot_0_move_slots(joint: &JointActions) -> HashSet<usize> {
+        joint
+            .actions
+            .iter()
+            .filter_map(|combo| match &combo[0] {
+                BattleCommand::Attack(attack) => Some(attack.move_slot),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pruned(state: &BattleState, prune: bool) -> JointActions {
+        joint_actions(
+            state,
+            Player::P1,
+            Phase::Normal,
+            move_dex(),
+            pokemon_dex(),
+            None,
+            prune,
+        )
+    }
+
+    /// Strength beats Tackle on damage and ties on accuracy, and neither move
+    /// carries another effect. Tackle is therefore a proven waste of the turn.
+    #[test]
+    fn dominated_attack_is_removed_behind_the_flag() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+        let joint = pruned(&state, true);
+        let kept = slot_0_move_slots(&joint);
+        assert!(!kept.contains(&0), "Tackle survived: {:?}", kept);
+        assert!(kept.contains(&1), "Strength disappeared: {:?}", kept);
+        // The removal is an approximation, so the caller must hear about it.
+        assert!(joint.was_capped());
+        for combo in &joint.actions {
+            assert!(validate_battle_command_combination(combo));
+        }
+    }
+
+    /// The flag is off by default, so no current caller loses an action.
+    #[test]
+    fn the_flag_default_keeps_every_action() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+        let joint = pruned(&state, false);
+        assert!(slot_0_move_slots(&joint).contains(&0));
+        assert!(!joint.was_capped());
+    }
+
+    /// Tackle and Pound deal the same damage with the same accuracy. Rule 7
+    /// breaks the tie on the move slot, so exactly one of the pair survives.
+    #[test]
+    fn equal_moves_keep_one_action() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Pound),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(kept.contains(&0), "the lower slot disappeared: {:?}", kept);
+        assert!(!kept.contains(&1), "both equal moves survived: {:?}", kept);
+    }
+
+    /// A spread move hits the ally slot too, so its value depends on the
+    /// partner command. Razor Leaf must survive a stronger single-target move.
+    #[test]
+    fn a_spread_move_survives_the_filter() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::RazorLeaf),
+            Some(PokemonMove::Splash),
+        ]);
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(!kept.contains(&0), "Tackle survived: {:?}", kept);
+        assert!(kept.contains(&2), "Razor Leaf disappeared: {:?}", kept);
+    }
+
+    /// The comparison reads damage and accuracy only. A burn chance is worth
+    /// something that the comparison cannot see, so Ember must survive.
+    #[test]
+    fn a_move_with_a_secondary_effect_survives_the_filter() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::Ember),
+            Some(PokemonMove::Splash),
+        ]);
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(!kept.contains(&0), "Tackle survived: {:?}", kept);
+        assert!(kept.contains(&2), "Ember disappeared: {:?}", kept);
+    }
+
+    /// Salt Cure applies residual damage after its direct hit.
+    /// Power Gem must not remove that separate effect.
+    #[test]
+    fn a_name_based_move_effect_survives_the_filter() {
+        let state = pruning_position([
+            Some(PokemonMove::SaltCure),
+            Some(PokemonMove::PowerGem),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(kept.contains(&0), "Salt Cure disappeared: {:?}", kept);
+        assert!(kept.contains(&1), "Power Gem disappeared: {:?}", kept);
+    }
+
+    /// Gale Wings changes Gust's priority at full HP.
+    /// Strength must not remove an attack in a different priority bracket.
+    #[test]
+    fn an_effective_priority_change_keeps_both_attacks() {
+        let mut state = pruning_position([
+            Some(PokemonMove::Gust),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+        state.p1_active_mons[0].ability = crate::data::ability::Ability::GaleWings;
+
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(kept.contains(&0), "Gust disappeared: {:?}", kept);
+        assert!(kept.contains(&1), "Strength disappeared: {:?}", kept);
+    }
+
+    /// A critical hit ignores the defensive boosts of the target. Against a
+    /// Defense-boosted target the special Power Gem wins the ordinary branch
+    /// while the physical Strength wins the critical branch, so neither move is
+    /// dominated.
+    #[test]
+    fn a_critical_hit_branch_keeps_both_attacks() {
+        let mut state = pruning_position([
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::PowerGem),
+            Some(PokemonMove::Protect),
+            Some(PokemonMove::Splash),
+        ]);
+        // Boost index 1 is Defense.
+        state.p2_active_mons[0].boosts[1] = 6;
+
+        let kept = slot_0_move_slots(&pruned(&state, true));
+        assert!(kept.contains(&0), "Strength disappeared: {:?}", kept);
+        assert!(kept.contains(&1), "Power Gem disappeared: {:?}", kept);
+    }
+
+    /// `RootSeed` carries action indices between deepening passes, so the
+    /// filter must build the same list on every pass over one position.
+    #[test]
+    fn the_filter_is_deterministic() {
+        let state = pruning_position([
+            Some(PokemonMove::Tackle),
+            Some(PokemonMove::Strength),
+            Some(PokemonMove::Ember),
+            Some(PokemonMove::RazorLeaf),
+        ]);
+        let first = pruned(&state, true);
+        for _ in 0..5 {
+            let again = pruned(&state, true);
+            assert_eq!(
+                format!("{:?}", first.actions),
+                format!("{:?}", again.actions)
+            );
+        }
+    }
+
+    /// A replacement offers switches only, and the filter compares attacks.
+    /// It must leave every replacement choice in place.
+    #[test]
+    fn the_filter_leaves_a_replacement_alone() {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, four_moves())],
+            vec![
+                mon(Species::Snorlax, four_moves()),
+                mon(Species::Gengar, four_moves()),
+            ],
+            vec![mon(Species::Pikachu, four_moves())],
+            vec![],
+        );
+        state.p1_active_mons[0].hp = 0;
+        state.p1_active_mons[0].fainted = true;
+        state.turn_started = true;
+        state.turn_ended = true;
+
+        let joint = joint_actions(
+            &state,
+            Player::P1,
+            Phase::Replacement,
+            move_dex(),
+            pokemon_dex(),
+            None,
+            true,
+        );
+        assert_eq!(joint.actions.len(), 2);
+        assert!(!joint.was_capped());
     }
 }

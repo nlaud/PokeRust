@@ -732,6 +732,64 @@ fn capping_the_action_set_is_reported() {
     assert!(result.p1_strategy.len() <= 2);
 }
 
+/// The dominance pre-filter is an approximation too, so it has to be announced.
+/// Strength beats Tackle on damage and ties on accuracy, and neither move
+/// carries another effect.
+#[test]
+fn pruning_a_dominated_action_is_reported() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = MatchState::BattleState(battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::Tackle, PokemonMove::Strength],
+        )],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Splash])],
+        vec![],
+    ));
+
+    let plain = solve(&state, pokemon_dex, move_dex, &base_config()).unwrap();
+    assert!(
+        !plain
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::ActionsTruncated { .. })),
+        "the default flag truncated the set: {:?}",
+        plain.warnings
+    );
+    let result = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            prune_dominated_actions: true,
+            ..base_config()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        result.warnings.iter().any(|warning| matches!(
+            warning,
+            SolveWarning::ActionsTruncated {
+                player: Player::P1,
+                kept,
+                total,
+            } if kept < total
+        )),
+        "pruning went unreported: {:?}",
+        result.warnings
+    );
+    // The equilibrium never plays a dominated action, so the pruned solve must
+    // reach the same value as the exact solve.
+    assert!(
+        (result.value - plain.value).abs() < 1e-9,
+        "pruning moved the value from {} to {}",
+        plain.value,
+        result.value
+    );
+}
+
 /// The root has only one move per player, but its guaranteed KO reaches a
 /// replacement node with two bench choices. Truncation at that child used to be
 /// silently omitted because warning collection inspected only the root sets.

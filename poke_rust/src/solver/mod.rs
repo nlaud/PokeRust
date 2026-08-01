@@ -141,6 +141,12 @@ pub struct SolveConfig {
     /// `None` keeps the complete action set.
     /// A cap makes the result approximate.
     pub max_actions_per_player: Option<usize>,
+    /// Removes an attack that another attack of the same slot beats on both
+    /// damage and accuracy.
+    /// The filter reads the current position, so a partner command that changes
+    /// the weather or the terrain can invert the comparison.
+    /// The filter therefore makes the result approximate.
+    pub prune_dominated_actions: bool,
     /// Maximum expanded nodes.
     /// Static evaluation replaces later search.
     pub node_budget: Option<u64>,
@@ -173,6 +179,7 @@ impl Default for SolveConfig {
             eval: eval::heuristic,
             use_serialized_bounds: false,
             max_actions_per_player: None,
+            prune_dominated_actions: false,
             node_budget: Some(2_000_000),
             deadline: None,
             tt_capacity: 1 << 18,

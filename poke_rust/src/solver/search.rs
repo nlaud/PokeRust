@@ -461,6 +461,7 @@ impl<'a> SearchContext<'a> {
             self.move_dex,
             self.pokemon_dex,
             self.cfg.max_actions_per_player,
+            self.cfg.prune_dominated_actions,
         );
         if joint.was_capped() {
             let slot = match player {

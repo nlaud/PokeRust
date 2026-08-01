@@ -54,13 +54,6 @@ The solver must support these game properties:
 `solver::preview` solves the perfect-information case.
 It runs double oracle over the 180 choices, and it caches or precomputes cells.
 
-### Action selection
-
-- [ ] Remove proven dominated commands from the action set.
-
-Do not assume that both active slots are independent.
-Targets, spread moves, redirection, Protect, switching, Tera, and Mega couple the slots.
-
 ### Approximate search
 
 - [ ] Compare simultaneous-move MCTS with exact shallow search.
