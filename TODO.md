@@ -56,12 +56,13 @@ It runs double oracle over the 180 choices, and it caches or precomputes cells.
 
 ### Approximate search
 
-- [ ] Compare simultaneous-move MCTS with exact shallow search.
-  - [ ] Test regret matching and Exp3 with explicit exploration.
-  - [ ] Test sparse chance sampling.
-  - [ ] Report sampling error and omitted probability mass.
-  - [ ] Keep exact outcome enumeration as the test oracle.
-  - [ ] Test progressive action widening only with full-set exploitability checks.
+`solver::mcts` holds the sampling search.
+It runs decoupled simultaneous-move MCTS with regret matching or Exp3.
+It reports the sampling error and the discarded outcome mass.
+
+- [ ] Add progressive action widening to `solver::mcts`.
+  - [ ] Add a best-response search over the complete action set.
+  - [ ] Test the widened search only with full-set exploitability checks.
 
 `ChanceMode::Sample` currently builds the full outcome distribution before sampling.
 This does not reduce the cost of turn resolution.

@@ -43,6 +43,18 @@
 //!
 //! `simulate_turn` supplies the transition probability for each successor.
 //!
+//! # Exact search and sampling search
+//!
+//! [`solve`] is exact for its depth and its [`ChanceMode`].
+//! Every [`SolverAlgorithm`] variant returns the same value, and the tests
+//! compare them.
+//!
+//! [`mcts::search`] samples instead.
+//! It reaches a greater depth, and it returns an estimate with a sampling error.
+//! A sampled value depends on the seed, so this search is not a
+//! [`SolverAlgorithm`] variant.
+//! The exact search stays the oracle of the sampling tests.
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.
@@ -84,6 +96,7 @@ pub mod actions;
 pub mod chance;
 pub mod eval;
 pub mod matrix;
+pub mod mcts;
 pub mod preview;
 pub mod search;
 

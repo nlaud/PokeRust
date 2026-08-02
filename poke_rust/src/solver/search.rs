@@ -188,8 +188,8 @@ pub(super) fn run(
         value,
         p1_win_odds: value,
         p2_win_odds: WIN - value,
-        p1_strategy: strategy_of(&position.p1, &position.row_strategy),
-        p2_strategy: strategy_of(&position.p2, &position.col_strategy),
+        p1_strategy: strategy_of(&position.p1, &position.row_strategy, EPS),
+        p2_strategy: strategy_of(&position.p2, &position.col_strategy, EPS),
         depth_reached: reached,
         stats,
         warnings,
@@ -213,12 +213,22 @@ fn support_of(strategy: &[f64]) -> Vec<usize> {
 }
 
 /// Pair actions with their probabilities, dropping the ones never played.
-fn strategy_of(joint: &JointActions, probabilities: &[f64]) -> Vec<JointActionProb> {
+///
+/// `floor` is the largest probability that still counts as never played. The
+/// exact search passes [`EPS`], because a linear program leaves numerical dust
+/// on an action that it does not play. The sampling search passes zero, because
+/// explicit exploration gives every action a real probability, and that
+/// probability can fall below [`EPS`] over a large action set.
+pub(super) fn strategy_of(
+    joint: &JointActions,
+    probabilities: &[f64],
+    floor: f64,
+) -> Vec<JointActionProb> {
     let mut strategy: Vec<JointActionProb> = joint
         .actions
         .iter()
         .zip(probabilities)
-        .filter(|&(_, &p)| p > EPS)
+        .filter(|&(_, &p)| p > floor)
         .map(|(commands, &probability)| JointActionProb {
             commands: commands.clone(),
             probability,

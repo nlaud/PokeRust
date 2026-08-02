@@ -23,6 +23,7 @@ use crate::information::unknowns::{
 use crate::meta::{MetaDex, MetaFormat};
 use crate::solver::chance::ChanceMode;
 use crate::solver::matrix::solve_matrix_game;
+use crate::solver::mcts::{self, MctsConfig, SelectionPolicy};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
@@ -1964,6 +1965,266 @@ fn open_list_preview_returns_one_strategy() {
         );
     }
     assert_eq!(result.sampling.worlds, 3);
+}
+
+// ── The sampling search ─────────────────────────────────────────────────────
+
+/// One turn of lookahead, one damage roll, and exact outcome enumeration. The
+/// exact search with [`base_config`] then solves the same game, so it is the
+/// oracle of these tests.
+fn mcts_config() -> MctsConfig {
+    MctsConfig {
+        iterations: 600,
+        depth: 1,
+        damage_rolls: 1,
+        consider_crit: false,
+        chance: ChanceMode::Enumerate,
+        ..MctsConfig::default()
+    }
+}
+
+/// The exact value of `contested_position` at the same depth.
+fn exact_value() -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..base_config()
+    };
+    solve(&contested_position(), pokemon_dex, move_dex, &config)
+        .expect("the position is playable")
+        .value
+}
+
+fn run_mcts(seed: u64, config: &MctsConfig) -> mcts::MctsResult {
+    let (pokemon_dex, move_dex) = dexes();
+    mcts::search(seed, &contested_position(), pokemon_dex, move_dex, config)
+        .expect("the position is playable")
+}
+
+/// A policy error hides behind engine noise, so this test removes the engine.
+/// The matrix has no saddle point, so only a mixed strategy reaches its value.
+#[test]
+fn mcts_matrix_game_finds_the_equilibrium() {
+    let payoffs = vec![vec![0.7, 0.2], vec![0.3, 0.6]];
+    let exact = solve_matrix_game(&payoffs).value;
+
+    for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1);
+        assert!(
+            (learned.value - exact).abs() < 0.05,
+            "{policy:?} learned {}, the exact value is {exact}",
+            learned.value
+        );
+        for (label, strategy) in [
+            ("row", &learned.row_strategy),
+            ("column", &learned.col_strategy),
+        ] {
+            let total: f64 = strategy.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "{policy:?} {label} strategy sums to {total}"
+            );
+        }
+    }
+}
+
+/// The sampling search must agree with the exact search on a small position.
+/// Explicit exploration biases the mean, so the tolerance is wider than the
+/// standard error alone.
+#[test]
+fn mcts_approaches_the_exact_value() {
+    let exact = exact_value();
+    let result = run_mcts(3, &mcts_config());
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// Two learners of the same game must reach the same value.
+#[test]
+fn mcts_policies_both_converge() {
+    let exact = exact_value();
+
+    let mut values = Vec::new();
+    for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
+        let config = MctsConfig {
+            policy,
+            ..mcts_config()
+        };
+        let value = run_mcts(21, &config).value;
+        assert!(
+            (value - exact).abs() < 0.08,
+            "{policy:?} returned {value}, the exact value is {exact}"
+        );
+        values.push(value);
+    }
+
+    assert!(
+        (values[0] - values[1]).abs() < 0.08,
+        "the policies returned {} and {}",
+        values[0],
+        values[1]
+    );
+}
+
+/// One seed must give one answer. The search draws actions, successors, and
+/// engine outcomes, so every draw has to come from the seeded generator.
+#[test]
+fn mcts_is_seed_reproducible() {
+    let config = MctsConfig {
+        iterations: 120,
+        ..mcts_config()
+    };
+
+    let first = run_mcts(77, &config);
+    let second = run_mcts(77, &config);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.p1_strategy.len(), second.p1_strategy.len());
+    for (left, right) in first.p1_strategy.iter().zip(&second.p1_strategy) {
+        assert_eq!(left.probability, right.probability);
+    }
+    assert_eq!(first.stats.turns_simulated, second.stats.turns_simulated);
+}
+
+/// The caller has to see how far to trust the value.
+#[test]
+fn mcts_reports_sampling_error() {
+    let config = MctsConfig {
+        iterations: 60,
+        ..mcts_config()
+    };
+    let result = run_mcts(5, &config);
+
+    assert_eq!(result.sampling.iterations, 60);
+    assert_eq!(result.stats.iterations, 60);
+    assert!((result.sampling.mean - result.value).abs() < 1e-12);
+    let error = result
+        .sampling
+        .standard_error
+        .expect("sixty iterations report a standard error");
+    assert!(error.is_finite() && error >= 0.0, "the error is {error}");
+
+    let single = run_mcts(
+        5,
+        &MctsConfig {
+            iterations: 1,
+            ..mcts_config()
+        },
+    );
+    assert_eq!(single.sampling.iterations, 1);
+    assert_eq!(single.sampling.standard_error, None);
+}
+
+/// The root exists before the first iteration, so every requested iteration
+/// samples a path. An iteration that only created the root would cost a turn of
+/// the budget and learn nothing.
+#[test]
+fn mcts_one_iteration_samples_one_root_path() {
+    let result = run_mcts(
+        5,
+        &MctsConfig {
+            iterations: 1,
+            ..mcts_config()
+        },
+    );
+
+    assert_eq!(result.stats.iterations, 1);
+    assert_eq!(result.stats.turns_simulated, 1);
+}
+
+/// A sparse chance mode drops outcome mass. The result must say so, because the
+/// dropped mass is a second source of error beside the sampling error.
+#[test]
+fn mcts_sparse_chance_reports_discarded_mass() {
+    let config = MctsConfig {
+        iterations: 60,
+        damage_rolls: 4,
+        chance: ChanceMode::TopK(1),
+        ..mcts_config()
+    };
+    let result = run_mcts(13, &config);
+
+    let discarded = result
+        .warnings
+        .iter()
+        .find_map(|warning| match warning {
+            SolveWarning::ChanceMassDiscarded { max_fraction } => Some(*max_fraction),
+            _ => None,
+        })
+        .expect("one kept branch of four discards mass");
+    assert!(
+        discarded > 0.0 && discarded < 1.0,
+        "the search discarded {discarded}"
+    );
+
+    let enumerated = MctsConfig {
+        chance: ChanceMode::Enumerate,
+        ..config
+    };
+    let unreduced = run_mcts(13, &enumerated);
+    assert!(
+        unreduced
+            .warnings
+            .iter()
+            .all(|warning| !matches!(warning, SolveWarning::ChanceMassDiscarded { .. })),
+        "{:?}",
+        unreduced.warnings
+    );
+}
+
+/// The average strategy of each root learner must be a distribution over that
+/// player's actions.
+#[test]
+fn mcts_strategy_is_a_distribution() {
+    let result = run_mcts(31, &mcts_config());
+
+    for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
+        let total: f64 = strategy.iter().map(|action| action.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(!strategy.is_empty(), "{label} strategy is empty");
+        assert!(
+            strategy.iter().all(|action| action.probability > 0.0),
+            "{label} strategy kept a zero-probability action"
+        );
+    }
+    assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
+    assert!((0.0..=1.0).contains(&result.value));
+}
+
+/// The sampling search refuses the same positions that the exact search refuses.
+#[test]
+fn mcts_refuses_a_preview_and_a_finished_battle() {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = mcts_config();
+
+    let preview = MatchState::TeamPreviewState(small_preview());
+    assert_eq!(
+        mcts::search(1, &preview, pokemon_dex, move_dex, &config).unwrap_err(),
+        SolveError::TeamPreviewUnsupported
+    );
+
+    let finished = MatchState::GameOverState {
+        winner: Player::P1,
+        pending_events: Vec::new(),
+        final_state: Box::new(battle_state_from_lists(
+            vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+            vec![],
+            vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+            vec![],
+        )),
+    };
+    assert_eq!(
+        mcts::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
+        SolveError::GameAlreadyOver {
+            winner: Player::P1
+        }
+    );
 }
 
 /// Zero worlds is a configuration error, not an empty answer.
