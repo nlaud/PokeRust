@@ -55,6 +55,17 @@
 //! [`SolverAlgorithm`] variant.
 //! The exact search stays the oracle of the sampling tests.
 //!
+//! # Exploitability
+//!
+//! [`MctsConfig::widening`](mcts::MctsConfig::widening) lets a node play a
+//! prefix of its action list, so its strategy can lose to an action that the
+//! node never played.
+//! [`exploit::exploitability`] measures that loss.
+//! It builds the complete action set of both players, and it answers each
+//! strategy with an exact best response over that set.
+//! A test of an approximate search compares gaps, never the subset that the
+//! search itself played.
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.
@@ -95,6 +106,7 @@
 pub mod actions;
 pub mod chance;
 pub mod eval;
+pub mod exploit;
 pub mod matrix;
 pub mod mcts;
 pub mod preview;
@@ -256,8 +268,7 @@ pub enum SolveWarning {
     /// [`ChanceMode`] discarded outcome probability mass. The figure is the
     /// largest fraction dropped at any single chance node, not a total.
     ChanceMassDiscarded { max_fraction: f64 },
-    /// A player's joint-action set was capped, so the reported equilibrium is
-    /// over a subset of their real options.
+    /// The search used only part of a player's joint-action set.
     ActionsTruncated {
         player: Player,
         kept: usize,
@@ -290,7 +301,7 @@ impl fmt::Display for SolveWarning {
                 player,
                 kept,
                 total,
-            } => write!(f, "{player:?}'s action set was capped at {kept} of {total}"),
+            } => write!(f, "{player:?}'s action set was limited to {kept} of {total}"),
         }
     }
 }

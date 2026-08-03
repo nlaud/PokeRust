@@ -917,6 +917,23 @@ fn select_by_coverage(group: &[usize], actions: &[Vec<BattleCommand>], want: usi
     taken
 }
 
+/// Orders every joint action by coverage.
+///
+/// The result is a permutation of `0..actions.len()`.
+/// Each prefix of that permutation covers as many distinct resource
+/// assignments, slot commands, and targets as its length permits.
+///
+/// [`reduce_to_cap`] applies the same rule inside one resource group.
+/// This function runs one sweep over the whole list, so a caller that grows an
+/// action set can extend a prefix instead of rebuilding the set.
+///
+/// The cost is quadratic in the action count.
+/// Call it once for each action set.
+pub fn coverage_order(actions: &[Vec<BattleCommand>]) -> Vec<usize> {
+    let group: Vec<usize> = (0..actions.len()).collect();
+    select_by_coverage(&group, actions, actions.len())
+}
+
 /// Every combination taking one element from each list, in row-major order.
 fn cartesian_product(per_slot: &[Vec<BattleCommand>]) -> Vec<Vec<BattleCommand>> {
     let mut combos: Vec<Vec<BattleCommand>> = vec![Vec::with_capacity(per_slot.len())];

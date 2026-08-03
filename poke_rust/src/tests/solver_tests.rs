@@ -21,16 +21,19 @@ use crate::information::unknowns::{
     InformationMode, UnknownMatchState, UnknownTeamPreviewState,
 };
 use crate::meta::{MetaDex, MetaFormat};
+use crate::solver::actions as solver_actions;
 use crate::solver::chance::ChanceMode;
+use crate::solver::exploit::exploitability;
 use crate::solver::matrix::solve_matrix_game;
-use crate::solver::mcts::{self, MctsConfig, SelectionPolicy};
+use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, Widening};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
     solve_team_preview, solve_team_preview_cached,
 };
 use crate::solver::{
-    SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval, solve, solve_seeded,
+    JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval,
+    solve, solve_seeded,
 };
 use crate::state::battle::{BattleCommand, BattleMechanics, MatchState, Player, TeamPreviewState};
 use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus, parse_move_dex};
@@ -2245,3 +2248,478 @@ fn open_list_preview_rejects_zero_worlds() {
 
     assert_eq!(result.unwrap_err(), OpenListError::NoWorlds);
 }
+
+
+// ── Progressive widening and exploitability ─────────────────────────────────
+
+/// Four moves and two bench Pokemon a side. Each player then holds ten joint
+/// actions, which is enough room for a prefix to leave real choices out.
+fn wide_position() -> MatchState {
+    MatchState::BattleState(battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[
+                PokemonMove::Thunderbolt,
+                PokemonMove::QuickAttack,
+                PokemonMove::IronTail,
+                PokemonMove::Protect,
+            ],
+        )],
+        vec![
+            mon(Species::Gyarados, &[PokemonMove::Waterfall, PokemonMove::IceFang]),
+            mon(Species::Blastoise, &[PokemonMove::Surf, PokemonMove::IceBeam]),
+        ],
+        vec![mon(
+            Species::Snorlax,
+            &[
+                PokemonMove::BodySlam,
+                PokemonMove::Crunch,
+                PokemonMove::Earthquake,
+                PokemonMove::Rest,
+            ],
+        )],
+        vec![
+            mon(Species::Gengar, &[PokemonMove::ShadowBall, PokemonMove::SludgeBomb]),
+            mon(Species::Alakazam, &[PokemonMove::Psychic, PokemonMove::Recover]),
+        ],
+    ))
+}
+
+/// The complete joint actions of one player, with no cap and no dominance
+/// filter.
+fn complete_actions(state: &MatchState, player: Player) -> Vec<Vec<BattleCommand>> {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = match state {
+        MatchState::BattleState(battle) => battle,
+        _ => panic!("the helper needs a battle position"),
+    };
+    solver_actions::joint_actions(
+        battle,
+        player,
+        solver_actions::phase_of(state),
+        move_dex,
+        pokemon_dex,
+        None,
+        false,
+    )
+    .actions
+}
+
+/// One slot command without its target or its resource flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BaseCommand {
+    Pass,
+    Struggle,
+    Switch(usize),
+    Attack(usize),
+}
+
+fn base_command(command: &BattleCommand) -> BaseCommand {
+    match command {
+        BattleCommand::Pass => BaseCommand::Pass,
+        BattleCommand::Struggle { .. } => BaseCommand::Struggle,
+        BattleCommand::Switch(switch) => BaseCommand::Switch(switch.party_index),
+        BattleCommand::Attack(attack) => BaseCommand::Attack(attack.move_slot),
+    }
+}
+
+/// The distinct base commands that a list of joint actions offers.
+fn base_commands(actions: &[Vec<BattleCommand>]) -> HashSet<Vec<BaseCommand>> {
+    actions
+        .iter()
+        .map(|combo| combo.iter().map(base_command).collect())
+        .collect()
+}
+
+/// A strategy that plays every joint action equally often.
+fn uniform_strategy(actions: &[Vec<BattleCommand>]) -> Vec<JointActionProb> {
+    actions
+        .iter()
+        .map(|commands| JointActionProb {
+            commands: commands.clone(),
+            probability: 1.0 / actions.len() as f64,
+        })
+        .collect()
+}
+
+/// A strategy that always plays one joint action.
+fn pure_strategy(commands: &[BattleCommand]) -> Vec<JointActionProb> {
+    vec![JointActionProb {
+        commands: commands.to_vec(),
+        probability: 1.0,
+    }]
+}
+
+/// The exploitability gap of one strategy pair at `state`.
+fn gap_of(
+    state: &MatchState,
+    p1_strategy: &[JointActionProb],
+    p2_strategy: &[JointActionProb],
+) -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let report = exploitability(
+        state,
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        p1_strategy,
+        p2_strategy,
+    )
+    .expect("the position is playable");
+    assert_eq!(
+        report.unmatched,
+        [0, 0],
+        "the check could not place every strategy entry"
+    );
+    report.gap
+}
+
+/// The order has to be a permutation. A widened node reads a prefix of it, and
+/// a lost index would remove a legal action from the search for good.
+#[test]
+fn coverage_order_is_a_permutation() {
+    let actions = complete_actions(&wide_position(), Player::P1);
+    assert!(actions.len() >= 6, "the position offers {}", actions.len());
+
+    let order = solver_actions::coverage_order(&actions);
+
+    assert_eq!(order.len(), actions.len());
+    let distinct: HashSet<usize> = order.iter().copied().collect();
+    assert_eq!(distinct.len(), actions.len(), "the order repeats an index");
+    assert!(order.iter().all(|&index| index < actions.len()));
+}
+
+/// A prefix of the coverage order must hold more distinct choices than the
+/// generated order of the same length. Row-major generation puts every resource
+/// variant of one move next to it, so its prefix repeats a move slot before it
+/// reaches the next one.
+#[test]
+fn coverage_order_prefix_covers_each_slot_command() {
+    let actions = complete_actions(&wide_position(), Player::P1);
+    let order = solver_actions::coverage_order(&actions);
+    let distinct = base_commands(&actions).len();
+
+    let ordered: Vec<Vec<BattleCommand>> = order[..distinct]
+        .iter()
+        .map(|&index| actions[index].clone())
+        .collect();
+
+    assert_eq!(
+        base_commands(&ordered).len(),
+        distinct,
+        "the coverage prefix missed a choice: {ordered:?}"
+    );
+    assert!(
+        base_commands(&actions[..distinct]).len() < distinct,
+        "the generated order already covered every choice"
+    );
+}
+
+/// The allowed count starts at `initial`, never falls, and reaches the total.
+#[test]
+fn widening_grows_with_the_visit_count() {
+    let widening = Widening {
+        initial: 3,
+        coefficient: 2.0,
+        exponent: 0.5,
+    };
+    let total = 10;
+
+    assert_eq!(widening.allowed(0, total), 3);
+    assert_eq!(widening.allowed(0, 2), 2, "the count never exceeds the total");
+    assert_eq!(widening.allowed(1_000, 0), 0, "an empty set stays empty");
+
+    let mut previous = widening.allowed(0, total);
+    let mut reached = false;
+    for visits in 0..1_000u64 {
+        let allowed = widening.allowed(visits, total);
+        assert!(
+            allowed >= previous,
+            "the count fell from {previous} to {allowed} at {visits} visits"
+        );
+        assert!((1..=total).contains(&allowed));
+        previous = allowed;
+        reached |= allowed == total;
+    }
+    assert!(reached, "the count never reached {total}");
+}
+
+/// The exact equilibrium of a position cannot be exploited, so its gap is zero.
+/// This is the calibration of the check itself.
+#[test]
+fn exploitability_is_zero_for_the_exact_equilibrium() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..base_config()
+    };
+    let solved = solve(&state, pokemon_dex, move_dex, &config).expect("the position is playable");
+
+    let gap = gap_of(&state, &solved.p1_strategy, &solved.p2_strategy);
+
+    assert!(gap > -1e-9, "the gap is negative: {gap}");
+    assert!(gap < 1e-6, "the equilibrium reported a gap of {gap}");
+}
+
+/// A pure strategy on one action is exploitable, and the check has to see it
+/// even though both players stayed inside the legal action set.
+#[test]
+fn exploitability_finds_a_neglected_action() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..base_config()
+    };
+    let solved = solve(&state, pokemon_dex, move_dex, &config).expect("the position is playable");
+    let equilibrium = gap_of(&state, &solved.p1_strategy, &solved.p2_strategy);
+
+    let p1 = complete_actions(&state, Player::P1);
+    let p2 = complete_actions(&state, Player::P2);
+    let pure = gap_of(&state, &pure_strategy(&p1[0]), &pure_strategy(&p2[0]));
+
+    assert!(
+        pure > equilibrium + 0.05,
+        "the pure pair gave {pure}, the equilibrium gave {equilibrium}"
+    );
+}
+
+/// The report must include stop-limit warnings and complete cost statistics.
+#[test]
+fn exploitability_reports_approximation_and_complete_costs() {
+    let state = contested_position();
+    let p1 = complete_actions(&state, Player::P1);
+    let p2 = complete_actions(&state, Player::P2);
+    let (pokemon_dex, move_dex) = dexes();
+    let report = exploitability(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            node_budget: Some(0),
+            ..base_config()
+        },
+        &uniform_strategy(&p1),
+        &uniform_strategy(&p2),
+    )
+    .expect("the position is playable");
+
+    assert!(
+        report
+            .warnings
+            .contains(&SolveWarning::BudgetExhausted { budget: 0 })
+    );
+    assert!(report.stats.elapsed > Duration::ZERO);
+    assert!(report.stats.matrix_cells_evaluated > 0);
+    assert!(report.stats.matrix_cells_total >= (report.actions[0] * report.actions[1]) as u64);
+    assert!(report.stats.matrix_cells_total >= report.stats.matrix_cells_evaluated);
+
+    let reduced = exploitability(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            damage_rolls: 4,
+            chance: ChanceMode::TopK(1),
+            ..base_config()
+        },
+        &uniform_strategy(&p1),
+        &uniform_strategy(&p2),
+    )
+    .expect("the position is playable");
+    assert!(
+        reduced
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, SolveWarning::ChanceMassDiscarded { .. }))
+    );
+}
+
+/// One turn of lookahead over `wide_position`, widened from four actions.
+fn widening_config() -> MctsConfig {
+    MctsConfig {
+        iterations: 3_000,
+        depth: 1,
+        damage_rolls: 1,
+        consider_crit: false,
+        chance: ChanceMode::Enumerate,
+        // The root holds ten actions, so this schedule plays four of them for
+        // the first hundred visits and reaches all ten at four hundred.
+        widening: Some(Widening {
+            initial: 4,
+            coefficient: 0.5,
+            exponent: 0.5,
+        }),
+        ..MctsConfig::default()
+    }
+}
+
+fn run_wide_mcts(seed: u64, config: &MctsConfig) -> mcts::MctsResult {
+    let (pokemon_dex, move_dex) = dexes();
+    mcts::search(seed, &wide_position(), pokemon_dex, move_dex, config)
+        .expect("the position is playable")
+}
+
+/// The exact value of `wide_position` at the same depth.
+fn wide_exact_value() -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..base_config()
+    };
+    solve(&wide_position(), pokemon_dex, move_dex, &config)
+        .expect("the position is playable")
+        .value
+}
+
+/// A widened search must still find the value of the game. Widening changes the
+/// order in which the search meets the actions, not the game.
+#[test]
+fn mcts_widening_approaches_the_exact_value() {
+    let exact = wide_exact_value();
+    let result = run_wide_mcts(3, &widening_config());
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the widened search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+}
+
+/// The point of the whole feature: the widened strategy has to hold up against
+/// the complete action set, not only against the prefix that it played.
+#[test]
+fn mcts_widening_keeps_a_small_exploitability_gap() {
+    let state = wide_position();
+    let result = run_wide_mcts(3, &widening_config());
+
+    let widened = gap_of(&state, &result.p1_strategy, &result.p2_strategy);
+
+    let p1 = complete_actions(&state, Player::P1);
+    let p2 = complete_actions(&state, Player::P2);
+    let pure = gap_of(&state, &pure_strategy(&p1[0]), &pure_strategy(&p2[0]));
+    let uniform = gap_of(&state, &uniform_strategy(&p1), &uniform_strategy(&p2));
+
+    assert!(
+        widened >= 0.0,
+        "the gap of a strategy pair is never negative: {widened}"
+    );
+    assert!(
+        widened < pure,
+        "the widened pair gave {widened}, one pure action gave {pure}"
+    );
+    assert!(
+        widened < uniform,
+        "the widened pair gave {widened}, uniform play gave {uniform}"
+    );
+}
+
+/// One seed must give one answer, as it does without widening. The coverage
+/// order and the allowed count are both pure functions of the position and the
+/// visit count, so nothing here may vary between runs.
+#[test]
+fn mcts_widening_is_seed_reproducible() {
+    let config = MctsConfig {
+        iterations: 200,
+        ..widening_config()
+    };
+
+    let first = run_wide_mcts(41, &config);
+    let second = run_wide_mcts(41, &config);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.stats.turns_simulated, second.stats.turns_simulated);
+    assert_eq!(first.p1_strategy.len(), second.p1_strategy.len());
+    for (left, right) in first.p1_strategy.iter().zip(&second.p1_strategy) {
+        assert_eq!(left.probability, right.probability);
+        assert_eq!(
+            format!("{:?}", left.commands),
+            format!("{:?}", right.commands)
+        );
+    }
+}
+
+/// A root that never widened to its complete set played a subset, so the result
+/// must say so. A caller that reads the strategy alone would otherwise believe
+/// that the search rejected the omitted actions.
+#[test]
+fn mcts_widening_reports_a_truncated_root() {
+    let config = MctsConfig {
+        iterations: 20,
+        widening: Some(Widening {
+            initial: 2,
+            coefficient: 0.1,
+            exponent: 0.5,
+        }),
+        ..widening_config()
+    };
+    let result = run_wide_mcts(9, &config);
+
+    let truncated: Vec<&SolveWarning> = result
+        .warnings
+        .iter()
+        .filter(|warning| matches!(warning, SolveWarning::ActionsTruncated { .. }))
+        .collect();
+    assert_eq!(truncated.len(), 2, "{:?}", result.warnings);
+    for warning in truncated {
+        let SolveWarning::ActionsTruncated { kept, total, .. } = warning else {
+            unreachable!("the filter kept only truncations");
+        };
+        assert!(kept < total, "the warning reports {kept} of {total}");
+    }
+
+    // The same search without widening reports nothing.
+    let complete = MctsConfig {
+        widening: None,
+        ..config
+    };
+    let unwidened = run_wide_mcts(9, &complete);
+    assert!(
+        unwidened
+            .warnings
+            .iter()
+            .all(|warning| !matches!(warning, SolveWarning::ActionsTruncated { .. })),
+        "{:?}",
+        unwidened.warnings
+    );
+}
+
+/// The warning must describe the last prefix that contributed to the strategy.
+#[test]
+fn mcts_widening_warning_does_not_count_the_next_prefix() {
+    let config = MctsConfig {
+        iterations: 10,
+        widening: Some(Widening {
+            initial: 1,
+            coefficient: 1.0,
+            exponent: 1.0,
+        }),
+        ..widening_config()
+    };
+    let result = run_wide_mcts(9, &config);
+
+    for player in [Player::P1, Player::P2] {
+        let warning = result
+            .warnings
+            .iter()
+            .find(|warning| {
+                matches!(
+                    warning,
+                    SolveWarning::ActionsTruncated {
+                        player: warned,
+                        ..
+                    } if *warned == player
+                )
+            })
+            .expect("the last prefix omits one action");
+        let SolveWarning::ActionsTruncated { kept, total, .. } = warning else {
+            unreachable!("the search found a truncation warning")
+        };
+        assert_eq!((*kept, *total), (9, 10));
+        assert!(warning.to_string().contains("limited to 9 of 10"));
+    }
+}
+

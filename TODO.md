@@ -59,10 +59,8 @@ It runs double oracle over the 180 choices, and it caches or precomputes cells.
 `solver::mcts` holds the sampling search.
 It runs decoupled simultaneous-move MCTS with regret matching or Exp3.
 It reports the sampling error and the discarded outcome mass.
-
-- [ ] Add progressive action widening to `solver::mcts`.
-  - [ ] Add a best-response search over the complete action set.
-  - [ ] Test the widened search only with full-set exploitability checks.
+`MctsConfig::widening` grows the action set of a node with its visit count.
+`solver::exploit` measures a strategy pair against the complete action set.
 
 `ChanceMode::Sample` currently builds the full outcome distribution before sampling.
 This does not reduce the cost of turn resolution.

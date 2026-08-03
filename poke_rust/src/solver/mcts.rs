@@ -42,6 +42,25 @@
 //! statically, and plays an action there on the next visit.
 //! The search creates the root before the first iteration.
 //!
+//! # Progressive widening
+//!
+//! [`MctsConfig::widening`] limits a node to a prefix of its action list.
+//! The prefix grows with the visit count of the node, so the early iterations
+//! spread over few actions instead of over hundreds.
+//! [`Widening::allowed`] holds the growth rule.
+//!
+//! A node in this mode stores its actions in the coverage order of
+//! [`actions::coverage_order`], so a prefix of `k` actions holds as many
+//! distinct slot commands, targets, and resource choices as `k` permits.
+//!
+//! Each learner sees only the allowed prefix. A hidden action keeps a score of
+//! zero, so it starts level with the visible actions when the prefix reaches it.
+//!
+//! A root that never reaches its complete set reports
+//! [`SolveWarning::ActionsTruncated`], because its strategy then covers a subset
+//! of the legal actions. [`exploit`](super::exploit) measures what that subset
+//! costs.
+//!
 //! # Averages
 //!
 //! The result holds the average strategy of each root learner, not the last
@@ -135,6 +154,61 @@ pub struct MctsConfig {
     pub prune_dominated_actions: bool,
     /// Maximum decision chain that does not consume depth.
     pub max_forced_chain: u8,
+    /// Grows the action set of a node with its visit count.
+    /// `None` gives every node its complete action set from the first visit.
+    pub widening: Option<Widening>,
+}
+
+/// The growth rule of progressive widening.
+///
+/// A node with `visits` visits and `total` actions may play
+/// `max(initial, floor(coefficient * visits ^ exponent))`, clamped to
+/// `1..=total`. The count never falls, so a node never loses an action that it
+/// already played.
+///
+/// A small `exponent` widens slowly and gives each action more samples. An
+/// `exponent` of 1 widens in proportion to the visit count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Widening {
+    /// Actions of the first visit.
+    pub initial: usize,
+    /// The multiplier of the growth term.
+    pub coefficient: f64,
+    /// The exponent of the growth term, from 0 through 1.
+    pub exponent: f64,
+}
+
+impl Default for Widening {
+    fn default() -> Self {
+        Widening {
+            initial: 4,
+            coefficient: 2.0,
+            exponent: 0.5,
+        }
+    }
+}
+
+impl Widening {
+    /// The actions that a node with `visits` visits may play.
+    ///
+    /// The result is never above `total` and never below one, so a caller can
+    /// index the action list with it. A node with no action returns zero.
+    pub fn allowed(&self, visits: u64, total: usize) -> usize {
+        if total == 0 {
+            return 0;
+        }
+        // Both fields come from a caller, so both need a sane range. A negative
+        // exponent would shrink the count as the node grows.
+        let exponent = self.exponent.clamp(0.0, 1.0);
+        let coefficient = self.coefficient.max(0.0);
+        let grown = coefficient * (visits as f64).powf(exponent);
+        let grown = if grown.is_finite() {
+            grown.floor().max(0.0).min(total as f64) as usize
+        } else {
+            total
+        };
+        grown.max(self.initial).clamp(1, total)
+    }
 }
 
 impl Default for MctsConfig {
@@ -151,6 +225,7 @@ impl Default for MctsConfig {
             max_actions_per_player: None,
             prune_dominated_actions: false,
             max_forced_chain: 8,
+            widening: None,
         }
     }
 }
@@ -266,10 +341,43 @@ pub fn search(
         values.push(ctx.iterate(state, depth, 0));
     }
 
-    let root = ctx
-        .tree
-        .get(&root_key)
-        .expect("the first iteration always creates the root node");
+    // Every field that the report needs, read before the truncation record
+    // borrows the context mutably.
+    let (root_visits, root_counts, p1_strategy, p2_strategy) = {
+        let root = ctx
+            .tree
+            .get(&root_key)
+            .expect("the first iteration always creates the root node");
+        (
+            root.visits,
+            [
+                (root.p1_actions.actions.len(), root.p1_actions.total),
+                (root.p2_actions.actions.len(), root.p2_actions.total),
+            ],
+            // A zero floor, not `EPS`: explicit exploration gives every action a
+            // real probability, and a large action set can push that probability
+            // below `EPS`.
+            strategy_of(&root.p1_actions, &root.p1.average_strategy(), 0.0),
+            strategy_of(&root.p2_actions, &root.p2.average_strategy(), 0.0),
+        )
+    };
+
+    // A root that never widened to its complete set played a subset, exactly as
+    // a cap does, so it reports the same warning.
+    if let Some(widening) = config.widening {
+        // The search chose the last strategy before it incremented `visits`.
+        // Use that count so the warning matches the reported average strategy.
+        let last_visit = root_visits.saturating_sub(1);
+        for (player, (kept, total)) in [
+            (Player::P1, root_counts[0]),
+            (Player::P2, root_counts[1]),
+        ] {
+            let allowed = widening.allowed(last_visit, kept);
+            if allowed < total {
+                ctx.record_truncation(player, allowed, total);
+            }
+        }
+    }
 
     let value = values.mean().clamp(LOSS, WIN);
     let mut warnings = Vec::new();
@@ -290,11 +398,6 @@ pub fn search(
             });
         }
     }
-
-    // A zero floor, not `EPS`: explicit exploration gives every action a real
-    // probability, and a large action set can push that probability below `EPS`.
-    let p1_strategy = strategy_of(&root.p1_actions, &root.p1.average_strategy(), 0.0);
-    let p2_strategy = strategy_of(&root.p2_actions, &root.p2.average_strategy(), 0.0);
 
     let mut stats = ctx.stats;
     stats.iterations = values.count;
@@ -359,9 +462,11 @@ pub fn learn_matrix_game(
     let mut col_learner = Learner::new(cols);
     let mut values = RunningStats::default();
 
+    // This entry point plays the complete matrix, so both learners always see
+    // every action.
     for _ in 0..iterations.max(1) {
-        let row_strategy = row_learner.strategy(policy, exploration);
-        let col_strategy = col_learner.strategy(policy, exploration);
+        let row_strategy = row_learner.strategy(policy, exploration, rows);
+        let col_strategy = col_learner.strategy(policy, exploration, cols);
         let row = draw_index(&row_strategy);
         let col = draw_index(&col_strategy);
         let payoff = payoffs[row][col];
@@ -369,8 +474,8 @@ pub fn learn_matrix_game(
         values.push(payoff);
         row_learner.accumulate(&row_strategy);
         col_learner.accumulate(&col_strategy);
-        row_learner.update(policy, row, row_strategy[row], payoff);
-        col_learner.update(policy, col, col_strategy[col], WIN - payoff);
+        row_learner.update(policy, row, row_strategy[row], payoff, rows);
+        col_learner.update(policy, col, col_strategy[col], WIN - payoff, cols);
     }
 
     LearnedMatrix {
@@ -400,29 +505,27 @@ impl Learner {
     }
 
     /// The strategy to play now, mixed with the uniform strategy.
-    fn strategy(&self, policy: SelectionPolicy, exploration: f64) -> Vec<f64> {
-        let actions = self.scores.len();
+    ///
+    /// `allowed` is the action prefix that progressive widening permits. The
+    /// returned vector holds that many entries, so a draw from it never returns
+    /// a hidden action and never returns a probability of zero.
+    fn strategy(&self, policy: SelectionPolicy, exploration: f64, allowed: usize) -> Vec<f64> {
+        let actions = allowed.min(self.scores.len());
         if actions == 0 {
             return Vec::new();
         }
         let uniform = 1.0 / actions as f64;
+        let scores = &self.scores[..actions];
 
         let weights: Vec<f64> = match policy {
-            SelectionPolicy::RegretMatching => self.scores.iter().map(|r| r.max(0.0)).collect(),
+            SelectionPolicy::RegretMatching => scores.iter().map(|r| r.max(0.0)).collect(),
             SelectionPolicy::Exp3 => {
                 // The learning rate of Exp3 over `actions` arms. The subtracted
                 // maximum keeps the exponential finite, and it cancels in the
                 // normalization below.
                 let rate = exploration / actions as f64;
-                let highest = self
-                    .scores
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                self.scores
-                    .iter()
-                    .map(|s| (rate * (s - highest)).exp())
-                    .collect()
+                let highest = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                scores.iter().map(|s| (rate * (s - highest)).exp()).collect()
             }
         };
 
@@ -452,19 +555,25 @@ impl Learner {
     ///
     /// `played_probability` is the selection probability of that action. It is
     /// never zero, because the explicit exploration bounds it from below.
+    ///
+    /// `allowed` is the action prefix that the strategy covered. An action
+    /// outside that prefix keeps a score of zero, so it starts level with the
+    /// played actions once progressive widening reaches it.
     fn update(
         &mut self,
         policy: SelectionPolicy,
         played: usize,
         played_probability: f64,
         reward: f64,
+        allowed: usize,
     ) {
+        let actions = allowed.min(self.scores.len());
         // The payoff of the played action alone, scaled so that its expectation
         // over the played strategy is the payoff of that action.
         let estimate = reward / played_probability;
         match policy {
             SelectionPolicy::RegretMatching => {
-                for (action, score) in self.scores.iter_mut().enumerate() {
+                for (action, score) in self.scores[..actions].iter_mut().enumerate() {
                     let counterfactual = if action == played { estimate } else { 0.0 };
                     *score += counterfactual - reward;
                 }
@@ -504,6 +613,10 @@ struct Node {
     p2: Learner,
     p1_actions: JointActions,
     p2_actions: JointActions,
+    /// Iterations that played an action here.
+    /// Progressive widening reads it, and each player derives its own allowed
+    /// count from it.
+    visits: u64,
 }
 
 struct MctsContext<'a> {
@@ -545,10 +658,23 @@ impl MctsContext<'_> {
             return (self.cfg.eval)(battle);
         }
 
-        let (p1_strategy, p2_strategy, p1_index, p2_index, p1_commands, p2_commands) = {
+        let (
+            p1_strategy,
+            p2_strategy,
+            p1_index,
+            p2_index,
+            p1_allowed,
+            p2_allowed,
+            p1_commands,
+            p2_commands,
+        ) = {
             let node = &self.tree[&key];
-            let p1_strategy = node.p1.strategy(self.cfg.policy, self.exploration);
-            let p2_strategy = node.p2.strategy(self.cfg.policy, self.exploration);
+            // The visit count of this node before this visit. A first visit
+            // therefore plays the initial prefix.
+            let p1_allowed = self.allowed(node.visits, node.p1_actions.actions.len());
+            let p2_allowed = self.allowed(node.visits, node.p2_actions.actions.len());
+            let p1_strategy = node.p1.strategy(self.cfg.policy, self.exploration, p1_allowed);
+            let p2_strategy = node.p2.strategy(self.cfg.policy, self.exploration, p2_allowed);
             let p1_index = draw_index(&p1_strategy);
             let p2_index = draw_index(&p2_strategy);
             (
@@ -556,6 +682,8 @@ impl MctsContext<'_> {
                 p2_strategy,
                 p1_index,
                 p2_index,
+                p1_allowed,
+                p2_allowed,
                 node.p1_actions.actions[p1_index].clone(),
                 node.p2_actions.actions[p2_index].clone(),
             )
@@ -575,26 +703,56 @@ impl MctsContext<'_> {
             .tree
             .get_mut(&key)
             .expect("the node exists for the whole iteration");
+        node.visits += 1;
         node.p1.accumulate(&p1_strategy);
         node.p2.accumulate(&p2_strategy);
-        node.p1
-            .update(self.cfg.policy, p1_index, p1_strategy[p1_index], value);
+        node.p1.update(
+            self.cfg.policy,
+            p1_index,
+            p1_strategy[p1_index],
+            value,
+            p1_allowed,
+        );
         // The game is zero-sum over `[0, 1]`, so P2 maximizes the complement.
-        node.p2
-            .update(self.cfg.policy, p2_index, p2_strategy[p2_index], WIN - value);
+        node.p2.update(
+            self.cfg.policy,
+            p2_index,
+            p2_strategy[p2_index],
+            WIN - value,
+            p2_allowed,
+        );
         value
+    }
+
+    /// The actions that a node with `visits` visits may play.
+    ///
+    /// A configuration without widening returns the complete count, so every
+    /// learner sees every action from the first visit.
+    fn allowed(&self, visits: u64, total: usize) -> usize {
+        match self.cfg.widening {
+            Some(widening) => widening.allowed(visits, total),
+            None => total,
+        }
     }
 
     /// Build the node of a position that the tree does not hold yet.
     fn new_node(&mut self, battle: &BattleState, state: &MatchState) -> Node {
         let phase = actions::phase_of(state);
-        let p1_actions = self.joint_actions(battle, Player::P1, phase);
-        let p2_actions = self.joint_actions(battle, Player::P2, phase);
+        let mut p1_actions = self.joint_actions(battle, Player::P1, phase);
+        let mut p2_actions = self.joint_actions(battle, Player::P2, phase);
+        // The allowed set is a prefix of the list, so the coverage order decides
+        // which choices a narrow prefix holds. A search without widening keeps
+        // the generated order, and therefore keeps its current results.
+        if self.cfg.widening.is_some() {
+            reorder_by_coverage(&mut p1_actions);
+            reorder_by_coverage(&mut p2_actions);
+        }
         Node {
             p1: Learner::new(p1_actions.actions.len()),
             p2: Learner::new(p2_actions.actions.len()),
             p1_actions,
             p2_actions,
+            visits: 0,
         }
     }
 
@@ -615,19 +773,26 @@ impl MctsContext<'_> {
             self.cfg.prune_dominated_actions,
         );
         if joint.was_capped() {
-            let slot = match player {
-                Player::P1 => 0,
-                Player::P2 => 1,
-            };
-            let candidate = (joint.actions.len(), joint.total);
-            let dropped = |(kept, total): (usize, usize)| total - kept;
-            if self.action_truncations[slot]
-                .is_none_or(|previous| dropped(candidate) > dropped(previous))
-            {
-                self.action_truncations[slot] = Some(candidate);
-            }
+            self.record_truncation(player, joint.actions.len(), joint.total);
         }
         joint
+    }
+
+    /// Record the largest action-set reduction of one player.
+    ///
+    /// A cap and progressive widening both reach this method, because both make
+    /// a strategy a distribution over a subset of the legal actions.
+    fn record_truncation(&mut self, player: Player, kept: usize, total: usize) {
+        let slot = match player {
+            Player::P1 => 0,
+            Player::P2 => 1,
+        };
+        let candidate = (kept, total);
+        let dropped = |(kept, total): (usize, usize)| total.saturating_sub(kept);
+        if self.action_truncations[slot].is_none_or(|previous| dropped(candidate) > dropped(previous))
+        {
+            self.action_truncations[slot] = Some(candidate);
+        }
     }
 
     /// Resolve one joint action into its weighted successors, reduced by the
@@ -691,6 +856,20 @@ impl MctsContext<'_> {
 }
 
 // ── Shared plumbing ─────────────────────────────────────────────────────────
+
+/// Put the actions of one player in the coverage order.
+///
+/// Progressive widening plays a prefix of the list, so the order decides what a
+/// narrow prefix holds. [`actions::coverage_order`] returns a permutation, so
+/// this rewrite drops no action and `total` stays correct.
+fn reorder_by_coverage(joint: &mut JointActions) {
+    let order = actions::coverage_order(&joint.actions);
+    let reordered: Vec<Vec<BattleCommand>> = order
+        .iter()
+        .map(|&index| joint.actions[index].clone())
+        .collect();
+    joint.actions = reordered;
+}
 
 /// The mean and the standard error of a value stream.
 ///
@@ -771,7 +950,7 @@ mod tests {
     #[test]
     fn regret_matching_plays_uniformly_before_it_learns() {
         let learner = Learner::new(4);
-        let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1);
+        let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1, 4);
         assert_eq!(strategy.len(), 4);
         for probability in &strategy {
             assert!((probability - 0.25).abs() < 1e-12, "{probability}");
@@ -783,7 +962,7 @@ mod tests {
         let mut learner = Learner::new(3);
         learner.scores = vec![100.0, -5.0, -5.0];
         for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
-            let strategy = learner.strategy(policy, 0.3);
+            let strategy = learner.strategy(policy, 0.3, 3);
             let total: f64 = strategy.iter().sum();
             assert!((total - 1.0).abs() < 1e-9, "{policy:?} sums to {total}");
             for probability in &strategy {
@@ -792,12 +971,27 @@ mod tests {
         }
     }
 
+    /// A widened learner plays a prefix. The hidden entries must keep their
+    /// score, so they start level with the played entries later.
+    #[test]
+    fn a_widened_update_leaves_the_hidden_scores_alone() {
+        let mut learner = Learner::new(4);
+        let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1, 2);
+        assert_eq!(strategy.len(), 2);
+
+        learner.update(SelectionPolicy::RegretMatching, 0, strategy[0], 1.0, 2);
+
+        assert!(learner.scores[0] > 0.0, "{:?}", learner.scores);
+        assert_eq!(learner.scores[2], 0.0);
+        assert_eq!(learner.scores[3], 0.0);
+    }
+
     /// A large cumulative reward must not overflow the exponential.
     #[test]
     fn exp3_survives_a_large_score() {
         let mut learner = Learner::new(2);
         learner.scores = vec![1e6, 0.0];
-        let strategy = learner.strategy(SelectionPolicy::Exp3, 0.1);
+        let strategy = learner.strategy(SelectionPolicy::Exp3, 0.1, 2);
         let total: f64 = strategy.iter().sum();
         assert!((total - 1.0).abs() < 1e-9, "sums to {total}");
         assert!(strategy[0] > strategy[1]);

@@ -847,6 +847,89 @@ impl<'a> SearchContext<'a> {
     }
 }
 
+/// Evaluates single matrix cells of one root position.
+///
+/// [`run`] solves a whole game, and it never exposes one cell.
+/// A caller that needs named cells, such as the exploitability check in
+/// [`exploit`](super::exploit), uses this wrapper instead.
+///
+/// One instance holds one [`SearchContext`], so every cell shares the
+/// transposition table and the turn cache of that context.
+/// A cell is exact for the configured depth and [`ChanceMode`](super::chance::ChanceMode),
+/// as a cell of [`run`] is.
+pub struct RootCells<'a> {
+    ctx: SearchContext<'a>,
+    depth: u8,
+}
+
+impl<'a> RootCells<'a> {
+    pub fn new(
+        pokemon_dex: &'a HashMap<Species, PokemonData>,
+        move_dex: &'a HashMap<PokemonMove, MoveData>,
+        config: &'a SolveConfig,
+    ) -> Self {
+        RootCells {
+            // Depth 0 would score the root without a decision, as it would in
+            // `run`. One turn is the minimum.
+            depth: config.depth.max(1),
+            ctx: SearchContext::new(pokemon_dex, move_dex, config, Instant::now()),
+        }
+    }
+
+    /// The value of one command pair at `state`, to the configured depth.
+    ///
+    /// `state` must be a battle position.
+    pub fn cell_value(
+        &mut self,
+        state: &MatchState,
+        p1_commands: &[BattleCommand],
+        p2_commands: &[BattleCommand],
+    ) -> f64 {
+        self.ctx
+            .cell_value(state, p1_commands, p2_commands, self.depth, 0)
+    }
+
+    /// What the evaluated cells cost so far.
+    pub fn stats(&self) -> SolveStats {
+        let mut stats = self.ctx.stats.clone();
+        stats.elapsed = self.ctx.started.elapsed();
+        stats
+    }
+
+    /// Why the cell values are approximate.
+    pub fn warnings(&self) -> Vec<SolveWarning> {
+        let mut warnings = Vec::new();
+        if self.ctx.budget_hit
+            && let Some(budget) = self.ctx.cfg.node_budget
+        {
+            warnings.push(SolveWarning::BudgetExhausted { budget });
+        }
+        if self.ctx.deadline_hit
+            && let Some(budget) = self.ctx.cfg.deadline
+        {
+            warnings.push(SolveWarning::DeadlineExceeded { budget });
+        }
+        if self.ctx.max_discarded > EPS {
+            warnings.push(SolveWarning::ChanceMassDiscarded {
+                max_fraction: self.ctx.max_discarded,
+            });
+        }
+        for (player, truncation) in [
+            (Player::P1, self.ctx.action_truncations[0]),
+            (Player::P2, self.ctx.action_truncations[1]),
+        ] {
+            if let Some((kept, total)) = truncation {
+                warnings.push(SolveWarning::ActionsTruncated {
+                    player,
+                    kept,
+                    total,
+                });
+            }
+        }
+        warnings
+    }
+}
+
 fn terminal_value(winner: Player) -> f64 {
     match winner {
         Player::P1 => WIN,
