@@ -25,7 +25,7 @@ use crate::solver::actions as solver_actions;
 use crate::solver::chance::ChanceMode;
 use crate::solver::exploit::exploitability;
 use crate::solver::matrix::solve_matrix_game;
-use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, Widening};
+use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
@@ -1981,7 +1981,7 @@ fn mcts_config() -> MctsConfig {
         depth: 1,
         damage_rolls: 1,
         consider_crit: false,
-        chance: ChanceMode::Enumerate,
+        transition: TransitionMode::Enumerated(ChanceMode::Enumerate),
         ..MctsConfig::default()
     }
 }
@@ -2148,7 +2148,7 @@ fn mcts_sparse_chance_reports_discarded_mass() {
     let config = MctsConfig {
         iterations: 60,
         damage_rolls: 4,
-        chance: ChanceMode::TopK(1),
+        transition: TransitionMode::Enumerated(ChanceMode::TopK(1)),
         ..mcts_config()
     };
     let result = run_mcts(13, &config);
@@ -2167,7 +2167,7 @@ fn mcts_sparse_chance_reports_discarded_mass() {
     );
 
     let enumerated = MctsConfig {
-        chance: ChanceMode::Enumerate,
+        transition: TransitionMode::Enumerated(ChanceMode::Enumerate),
         ..config
     };
     let unreduced = run_mcts(13, &enumerated);
@@ -2179,6 +2179,95 @@ fn mcts_sparse_chance_reports_discarded_mass() {
         "{:?}",
         unreduced.warnings
     );
+}
+
+/// The generative transition mode with the same lookahead as [`mcts_config`].
+fn generative_mcts_config() -> MctsConfig {
+    MctsConfig {
+        transition: TransitionMode::Generative,
+        ..mcts_config()
+    }
+}
+
+/// The generative mode samples inside turn resolution instead of enumerating the
+/// outcome distribution. The draw stays unbiased, so the search must still reach
+/// the value that backward induction computes.
+///
+/// The tolerance matches `mcts_approaches_the_exact_value`: explicit exploration
+/// biases the mean by more than the sampling error alone, so a three-error band
+/// would fail on the bias rather than on the transition mode.
+#[test]
+fn generative_mcts_agrees_with_the_exact_search() {
+    let exact = exact_value();
+    let result = run_mcts(3, &generative_mcts_config());
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the generative search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+    let error = result
+        .sampling
+        .standard_error
+        .expect("the search ran many iterations");
+    assert!(error.is_finite() && error >= 0.0, "the error is {error}");
+}
+
+/// The generative mode never builds an outcome list, so it cannot drop outcome
+/// mass. A sparse [`ChanceMode`] is what discards mass, and this mode has none.
+#[test]
+fn generative_mcts_discards_no_outcome_mass() {
+    let config = MctsConfig {
+        iterations: 60,
+        damage_rolls: 16,
+        consider_crit: true,
+        ..generative_mcts_config()
+    };
+    let result = run_mcts(13, &config);
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .all(|warning| !matches!(warning, SolveWarning::ChanceMassDiscarded { .. })),
+        "{:?}",
+        result.warnings
+    );
+
+    // The same budget under a sparse enumerated mode does discard mass, which is
+    // what keeps the check above from passing for a trivial reason.
+    let sparse = MctsConfig {
+        transition: TransitionMode::Enumerated(ChanceMode::TopK(1)),
+        ..config
+    };
+    assert!(
+        run_mcts(13, &sparse)
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, SolveWarning::ChanceMassDiscarded { .. })),
+        "the sparse mode must still report discarded mass"
+    );
+}
+
+/// One seed must give one answer in the generative mode too. Every draw of the
+/// transition comes from the seeded generator of the search.
+#[test]
+fn generative_mcts_repeats_under_one_seed() {
+    let config = MctsConfig {
+        iterations: 120,
+        ..generative_mcts_config()
+    };
+
+    let first = run_mcts(77, &config);
+    let second = run_mcts(77, &config);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.p1_strategy.len(), second.p1_strategy.len());
+    for (left, right) in first.p1_strategy.iter().zip(&second.p1_strategy) {
+        assert_eq!(left.probability, right.probability);
+    }
+    assert_eq!(first.stats.turns_simulated, second.stats.turns_simulated);
 }
 
 /// The average strategy of each root learner must be a distribution over that
@@ -2544,7 +2633,7 @@ fn widening_config() -> MctsConfig {
         depth: 1,
         damage_rolls: 1,
         consider_crit: false,
-        chance: ChanceMode::Enumerate,
+        transition: TransitionMode::Enumerated(ChanceMode::Enumerate),
         // The root holds ten actions, so this schedule plays four of them for
         // the first hundred visits and reaches all ten at four hundred.
         widening: Some(Widening {

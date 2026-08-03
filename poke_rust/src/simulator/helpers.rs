@@ -332,9 +332,26 @@ where
 /// branch set's weights sum to the parent branch's weight, repeatedly sampling
 /// at expansion chokepoints leaves a single trajectory whose weight is the
 /// exact joint probability of every sampled choice along the way.
-pub(crate) fn sample_one_weighted<T>(mut items: Vec<T>, weight: impl Fn(&T) -> f64) -> Vec<T> {
+pub(crate) fn sample_one_weighted<T>(items: Vec<T>, weight: impl Fn(&T) -> f64) -> Vec<T> {
+    sample_one_of(items, weight, None)
+}
+
+/// The body of every weighted single-branch draw.
+///
+/// `record` is `None` for a draw outside turn resolution (the determinizer, the
+/// team generator, the solver's chance reduction) and `Some(renormalized)` at a
+/// turn-resolution chokepoint. A recorded chokepoint reports its choice to
+/// `crate::simulator::record_chokepoint`, which is what lets
+/// `simulator::generative` separate the true trajectory probability from the
+/// probability that the sampler drew it.
+fn sample_one_of<T>(
+    mut items: Vec<T>,
+    weight: impl Fn(&T) -> f64,
+    record: Option<bool>,
+) -> Vec<T> {
     use rand::distributions::{Distribution, WeightedIndex};
     if items.len() <= 1 {
+        // A set of one is not a decision, so it changes neither accumulator.
         return items;
     }
     let weights: Vec<f64> = items.iter().map(|item| weight(item).max(0.0)).collect();
@@ -343,12 +360,17 @@ pub(crate) fn sample_one_weighted<T>(mut items: Vec<T>, weight: impl Fn(&T) -> f
         // All-zero / non-finite weights: degenerate set, keep the first branch.
         Err(_) => 0,
     };
+    if let Some(renormalized) = record {
+        let total: f64 = weights.iter().sum();
+        crate::simulator::record_chokepoint(weights[index], total, renormalized);
+    }
     vec![items.swap_remove(index)]
 }
 
-/// `sample_one_weighted` for the ubiquitous `(state, probability)` branch shape.
+/// `sample_one_weighted` for the ubiquitous `(state, probability)` branch shape,
+/// recorded as a turn-resolution chokepoint that keeps its own weight.
 pub(crate) fn sample_one_branch<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
-    sample_one_weighted(branches, |(_, p)| *p)
+    sample_one_of(branches, |(_, p)| *p, Some(false))
 }
 
 /// Like `sample_one_branch`, but RENORMALIZES the survivor's weight to the full sum of the
@@ -371,10 +393,24 @@ pub(crate) fn sample_one_branch<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
 /// further per-action sampling) — renormalizing there would incorrectly inflate the reported
 /// joint probability.
 pub(crate) fn sample_one_branch_renormalized<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
-    let total_weight: f64 = branches.iter().map(|(_, p)| *p).sum();
-    let mut survivor = sample_one_branch(branches);
-    if let Some((_, p)) = survivor.first_mut() {
-        *p = total_weight;
+    sample_one_weighted_renormalized(branches, |(_, p)| *p, |branch, total| branch.1 = total)
+}
+
+/// `sample_one_branch_renormalized` for a branch shape that carries its weight
+/// somewhere other than the second tuple field.
+///
+/// `set_weight` writes the group total back onto the survivor. Read
+/// `sample_one_branch_renormalized`'s doc comment for when renormalization is the
+/// correct choice; this function only generalizes the shape.
+pub(crate) fn sample_one_weighted_renormalized<T>(
+    items: Vec<T>,
+    weight: impl Fn(&T) -> f64,
+    set_weight: impl Fn(&mut T, f64),
+) -> Vec<T> {
+    let total_weight: f64 = items.iter().map(&weight).sum();
+    let mut survivor = sample_one_of(items, weight, Some(true));
+    if let Some(item) = survivor.first_mut() {
+        set_weight(item, total_weight);
     }
     survivor
 }
@@ -3598,6 +3634,8 @@ fn maybe_apply_berry_confusion(mon: &mut PokemonState, env: &BerryEnv) {
     }
     if !is_confused(mon) {
         let duration = crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5));
+        // A direct draw of four durations. See `direct_uniform_choice_log`.
+        mon.direct_choice_log_probability += crate::simulator::direct_uniform_choice_log(4);
         mon.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::Confusion,
             duration,
@@ -3672,6 +3710,8 @@ pub(crate) fn apply_berry_effect(mon: &mut PokemonState, berry: &Item, env: &Ber
             // Picks one of 5 stats at random (non-branching, same pattern as Confusion duration).
             let s = if ripen { 4 } else { 2 };
             let idx = crate::simulator::with_sample_rng(|rng| rng.gen_range(0..5usize));
+            // A direct draw of five stats. See `direct_uniform_choice_log`.
+            mon.direct_choice_log_probability += crate::simulator::direct_uniform_choice_log(5);
             let mut boosts = [0i8; 7];
             boosts[idx] = s;
             apply_stat_boosts_to_pokemon(mon, &boosts, env.suppressed, false);
@@ -7265,10 +7305,14 @@ fn apply_switch_out_ability_effects(mon: &mut PokemonState, env: BerryEnv) {
         let live_hp = mon.hp;
         let live_status = mon.status.clone();
         let live_fainted = mon.fainted;
+        // The snapshot holds the count as it stood at the transform. The live
+        // count also holds every draw made while transformed, so it wins.
+        let live_direct_choice_log = mon.direct_choice_log_probability;
         *mon = *saved;
         mon.hp = live_hp;
         mon.status = live_status;
         mon.fainted = live_fainted;
+        mon.direct_choice_log_probability = live_direct_choice_log;
         // `boosts` will be zeroed by the caller; no need to overwrite here.
     }
     // Revert ability stolen/replaced by Mummy or Wandering Spirit.
@@ -10459,7 +10503,11 @@ fn apply_volatile_to_pokemon(
             VolatileStatus::GlaiveRush => 1,
             VolatileStatus::SemiInvulnerable(_) => 0,
             VolatileStatus::Confusion => {
-                crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5))
+                let duration = crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5));
+                // A direct draw of four durations. See `direct_uniform_choice_log`.
+                mon.direct_choice_log_probability +=
+                    crate::simulator::direct_uniform_choice_log(4);
+                duration
             }
             _ => get_volatile_duration(volatile),
         };

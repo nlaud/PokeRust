@@ -90,7 +90,8 @@ pub enum Nature {
     Serious,
 }
 
-/// Excludes `used_moves_this_field` from equality and hashing.
+/// Excludes `used_moves_this_field` and `direct_choice_log_probability` from
+/// equality and hashing.
 /// This runtime history must not prevent branch coalescing.
 #[derive(Clone)]
 pub struct PokemonState {
@@ -162,6 +163,22 @@ pub struct PokemonState {
 
     pub status: Option<Status>,
     pub volatiles: Vec<VolatileStatusState>,
+
+    /// The log probability of the direct random choices made on this branch.
+    ///
+    /// A few random choices inside turn resolution never build a weighted branch
+    /// set. Confusion duration and the Starf Berry stat pick are the examples.
+    /// The engine draws them with `simulator::with_sample_rng`, so no chokepoint
+    /// sees them.
+    ///
+    /// The count must follow the branch, not the thread. A branch that a later
+    /// chokepoint discards takes its own draws away with it.
+    /// `simulator::generative::sample_transition` reads this value from the
+    /// state that survives, and then clears it.
+    ///
+    /// The value stays zero outside a generative transition. Equality, hashing,
+    /// and `Debug` all exclude it.
+    pub(crate) direct_choice_log_probability: f64,
 
     pub ability: Ability,
 
@@ -696,6 +713,7 @@ pub fn build_pokemon_state(
         stats,
         status: None,
         volatiles: Vec::new(),
+        direct_choice_log_probability: 0.0,
         ability,
         gender,
         weight_hg,

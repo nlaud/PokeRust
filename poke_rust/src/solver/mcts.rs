@@ -31,8 +31,8 @@
 //! # One iteration
 //!
 //! 1. Select one joint action for each player from the node strategy.
-//! 2. Resolve the action pair with `simulate_turn`.
-//! 3. Reduce the outcomes with [`ChanceMode`], and draw one successor by weight.
+//! 2. Resolve the action pair with [`MctsConfig::transition`].
+//! 3. Take the one successor that the mode produced.
 //! 4. Repeat at the successor until the depth limit, a finished battle, or a new
 //!    node.
 //! 5. Score a leaf with [`MctsConfig::eval`], and a finished battle with 0 or 1.
@@ -41,6 +41,18 @@
 //! A new node ends the descent. The search creates the node, scores the position
 //! statically, and plays an action there on the next visit.
 //! The search creates the root before the first iteration.
+//!
+//! # Transition modes
+//!
+//! [`TransitionMode::Enumerated`] builds the complete outcome distribution of the
+//! turn, reduces it with a [`ChanceMode`], and draws one successor by weight.
+//! Every node then pays for the whole distribution.
+//!
+//! [`TransitionMode::Generative`] samples inside turn resolution with
+//! [`simulator::generative`](crate::simulator::generative). The engine keeps one
+//! branch at each chokepoint, so a node costs one trajectory. The draw stays
+//! unbiased, because each chokepoint picks a branch in proportion to its weight,
+//! and this mode discards no outcome mass.
 //!
 //! # Progressive widening
 //!
@@ -85,6 +97,7 @@ use rand::Rng;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::simulator::generative::{TransitionConfig, sample_transition};
 use crate::simulator::helpers::sample_one_branch;
 use crate::simulator::{scoped_sample_rng, simulate_turn, with_sample_rng};
 use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
@@ -140,10 +153,8 @@ pub struct MctsConfig {
     pub damage_rolls: u8,
     /// Whether to branch on critical hits.
     pub consider_crit: bool,
-    /// How much of each turn's outcome distribution the draw can reach.
-    /// A sparse mode removes outcome mass before the draw, and the result then
-    /// holds [`SolveWarning::ChanceMassDiscarded`].
-    pub chance: ChanceMode,
+    /// How the search turns one joint action into one successor.
+    pub transition: TransitionMode,
     /// Scores positions at the depth horizon.
     pub eval: LeafEvaluator,
     /// Maximum joint actions for each player.
@@ -157,6 +168,22 @@ pub struct MctsConfig {
     /// Grows the action set of a node with its visit count.
     /// `None` gives every node its complete action set from the first visit.
     pub widening: Option<Widening>,
+}
+
+/// How the search produces the successor of one joint action.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionMode {
+    /// Enumerate the outcome distribution of the turn, reduce it with the
+    /// [`ChanceMode`], and draw one successor by weight.
+    ///
+    /// A sparse [`ChanceMode`] removes outcome mass before the draw, and the
+    /// result then holds [`SolveWarning::ChanceMassDiscarded`].
+    Enumerated(ChanceMode),
+    /// Sample one successor inside turn resolution.
+    ///
+    /// The engine never builds the outcome list, so a node costs one trajectory
+    /// instead of one distribution. This mode discards no outcome mass.
+    Generative,
 }
 
 /// The growth rule of progressive widening.
@@ -220,7 +247,7 @@ impl Default for MctsConfig {
             exploration: 0.1,
             damage_rolls: 1,
             consider_crit: false,
-            chance: ChanceMode::Enumerate,
+            transition: TransitionMode::Enumerated(ChanceMode::Enumerate),
             eval: eval::heuristic,
             max_actions_per_player: None,
             prune_dominated_actions: false,
@@ -795,8 +822,8 @@ impl MctsContext<'_> {
         }
     }
 
-    /// Resolve one joint action into its weighted successors, reduced by the
-    /// configured [`ChanceMode`].
+    /// Resolve one joint action into the successors that the configured
+    /// [`TransitionMode`] offers the draw.
     fn resolve(
         &mut self,
         state: &MatchState,
@@ -804,6 +831,12 @@ impl MctsContext<'_> {
         p2_commands: &[BattleCommand],
     ) -> Vec<(MatchState, f64)> {
         self.stats.turns_simulated += 1;
+        let chance = match self.cfg.transition {
+            TransitionMode::Enumerated(chance) => chance,
+            TransitionMode::Generative => {
+                return self.resolve_generative(state, p1_commands, p2_commands);
+            }
+        };
         let raw: Vec<(MatchState, f64)> = simulate_turn(
             state,
             &PlayerCommand::Battle(p1_commands.to_vec()),
@@ -834,11 +867,44 @@ impl MctsContext<'_> {
             .map(|(_, child, probability)| (child, probability))
             .collect();
 
-        let (kept, discarded) = self.cfg.chance.apply(sorted);
+        let (kept, discarded) = chance.apply(sorted);
         if discarded > self.max_discarded {
             self.max_discarded = discarded;
         }
         kept
+    }
+
+    /// Sample one successor inside turn resolution.
+    ///
+    /// The single returned branch is the successor itself, so the caller's draw
+    /// is a no-op. Its weight is one because the branch set holds the whole
+    /// outcome mass: the trajectory probability of the sample describes the path
+    /// that produced the successor, not the share of the successors that it
+    /// stands for.
+    ///
+    /// The engine draws from the seeded RNG of the search, so one seed still
+    /// gives one result. The successor sort of the enumerated mode is unneeded
+    /// here, because no `HashMap` drain decides the order of a single branch.
+    fn resolve_generative(
+        &self,
+        state: &MatchState,
+        p1_commands: &[BattleCommand],
+        p2_commands: &[BattleCommand],
+    ) -> Vec<(MatchState, f64)> {
+        let sample = sample_transition(
+            state,
+            &PlayerCommand::Battle(p1_commands.to_vec()),
+            &PlayerCommand::Battle(p2_commands.to_vec()),
+            self.move_dex,
+            self.pokemon_dex,
+            TransitionConfig {
+                consider_crit: self.cfg.consider_crit,
+                damage_rolls: self.cfg.damage_rolls,
+                // The search reads no events, and tracking them would cost time.
+                observe: false,
+            },
+        );
+        vec![(sample.state, 1.0)]
     }
 
     /// The depth and forced-chain counter that a successor uses.

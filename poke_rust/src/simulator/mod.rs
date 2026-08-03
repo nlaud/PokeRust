@@ -20,6 +20,7 @@ use colored::Colorize;
 use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::collections::HashMap;
+pub mod generative;
 pub mod helpers;
 use self::helpers as simulator_helpers;
 
@@ -28,6 +29,128 @@ thread_local! {
     /// callers leave this as `None` and continue to use `thread_rng`; fuzz tests
     /// install a per-match seed so a reported iteration is exactly replayable.
     static SAMPLE_RNG_OVERRIDE: RefCell<Option<rand::rngs::StdRng>> = const { RefCell::new(None) };
+
+    /// Per-chokepoint bookkeeping of the sampled trajectory that is resolving now.
+    /// `None` means that no caller asked for it, which is the normal case: a
+    /// chokepoint then pays one `Option` check and records nothing.
+    static CHOKEPOINT_LOG: RefCell<Option<ChokepointLog>> = const { RefCell::new(None) };
+}
+
+/// The logarithms that one sampled turn accumulates at its branch chokepoints.
+///
+/// Both fields are logarithms because a turn passes through many chokepoints,
+/// and a product of many small ratios underflows.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ChokepointLog {
+    /// The sum of `ln(chosen / total)` over every chokepoint. Its exponential is
+    /// the chance that the sampler drew this exact trajectory.
+    pub sampling: f64,
+    /// The sum of `ln(chosen / total)` over the renormalized chokepoints only.
+    ///
+    /// A renormalized chokepoint reports the weight of its whole branch set
+    /// instead of the weight of the chosen branch, so the reported probability of
+    /// [`sample_turn_raw`] overstates the trajectory by exactly the inverse of
+    /// this term. See `sample_one_branch_renormalized` for why the engine reports
+    /// the group weight.
+    pub correction: f64,
+}
+
+/// Restores the previous chokepoint log when dropped, as [`SampleRngGuard`] does
+/// for the RNG.
+pub(crate) struct ChokepointGuard(Option<ChokepointLog>);
+
+impl ChokepointGuard {
+    /// The logarithms accumulated since this guard was installed.
+    pub(crate) fn read(&self) -> ChokepointLog {
+        CHOKEPOINT_LOG.with(|slot| slot.borrow().unwrap_or_default())
+    }
+}
+
+impl Drop for ChokepointGuard {
+    fn drop(&mut self) {
+        CHOKEPOINT_LOG.with(|slot| {
+            *slot.borrow_mut() = self.0.take();
+        });
+    }
+}
+
+/// Record every chokepoint choice of this thread until the returned guard drops.
+pub(crate) fn scoped_chokepoint_log() -> ChokepointGuard {
+    let previous =
+        CHOKEPOINT_LOG.with(|slot| slot.borrow_mut().replace(ChokepointLog::default()));
+    ChokepointGuard(previous)
+}
+
+/// Add one chokepoint choice to the installed log, if a caller installed one.
+///
+/// `renormalized` marks a chokepoint that reports the weight of its whole branch
+/// set. A degenerate set — no positive total, or a non-finite weight — carries no
+/// information about the draw, so it contributes nothing.
+pub(crate) fn record_chokepoint(chosen: f64, total: f64, renormalized: bool) {
+    CHOKEPOINT_LOG.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(log) = slot.as_mut() else {
+            return;
+        };
+        if chosen <= 0.0 || total <= 0.0 || !chosen.is_finite() || !total.is_finite() {
+            return;
+        }
+        let ratio = (chosen / total).ln();
+        log.sampling += ratio;
+        if renormalized {
+            log.correction += ratio;
+        }
+    });
+}
+
+/// The log probability of one uniform choice among `outcomes` results.
+///
+/// A direct draw builds no branch set, so no chokepoint reports it. The caller
+/// adds this value to `PokemonState::direct_choice_log_probability` on the
+/// branch that made the draw. `simulator::generative::sample_transition` then
+/// reads the total from the branch that survives.
+///
+/// The value is zero when no caller installed a chokepoint log. This keeps the
+/// field at zero for every other entry point.
+pub(crate) fn direct_uniform_choice_log(outcomes: usize) -> f64 {
+    if outcomes <= 1 || !CHOKEPOINT_LOG.with(|slot| slot.borrow().is_some()) {
+        return 0.0;
+    }
+    -(outcomes as f64).ln()
+}
+
+/// Sum `direct_choice_log_probability` over every Pokémon of `state`, and clear
+/// each one.
+///
+/// The clear stops a second turn from counting the draws of the first turn.
+/// A `pre_transform` snapshot holds a copy of the count, so this function clears
+/// the snapshot too. The count of the live Pokémon is the one that survives a
+/// switch-out revert.
+pub(crate) fn take_direct_choice_log(state: &mut MatchState) -> f64 {
+    let battle = match state {
+        MatchState::BattleState(bs) => bs,
+        MatchState::GameOverState { final_state, .. } => final_state.as_mut(),
+        MatchState::TeamPreviewState(_) => return 0.0,
+    };
+    let mut total = 0.0;
+    let sides = [
+        &mut battle.p1_active_mons,
+        &mut battle.p2_active_mons,
+        &mut battle.p1_back_mons,
+        &mut battle.p2_back_mons,
+    ];
+    for side in sides {
+        for mon in side.iter_mut() {
+            total += mon.direct_choice_log_probability;
+            mon.direct_choice_log_probability = 0.0;
+            let mut snapshot = mon.pre_transform.as_deref_mut();
+            while let Some(pre) = snapshot {
+                pre.direct_choice_log_probability = 0.0;
+                snapshot = pre.pre_transform.as_deref_mut();
+            }
+        }
+    }
+    total
 }
 
 /// Restores the previous thread-local sampled-trajectory RNG when dropped, even
@@ -2010,13 +2133,11 @@ fn resolve_multihit_move_for_target(
             // overweight those fail branches relative to "the move actually executed" (S30 —
             // see `sample_one_branch_renormalized`'s doc comment for the general pattern).
             sequence_branches = if config.sample {
-                let total_weight: f64 = next_sequence_branches.iter().map(|b| b.1).sum();
-                let mut survivor =
-                    simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1);
-                if let Some(b) = survivor.first_mut() {
-                    b.1 = total_weight;
-                }
-                survivor
+                simulator_helpers::sample_one_weighted_renormalized(
+                    next_sequence_branches,
+                    |b| b.1,
+                    |b, total_weight| b.1 = total_weight,
+                )
             } else {
                 next_sequence_branches
             };
@@ -9102,6 +9223,8 @@ fn disrupt_rampage_lock(
         && !is_misty_terrain;
     if confusion_added {
         let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+        // A direct draw of four durations. See `direct_uniform_choice_log`.
+        mon.direct_choice_log_probability += direct_uniform_choice_log(4);
         mon.volatiles
             .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
                 VolatileStatus::Confusion,
@@ -10564,6 +10687,9 @@ fn apply_post_damage_move_effects(
                     if let MatchState::BattleState(ref mut end_bs) = end_state {
                         if let Some(mon) = mon_at_slot_mut(end_bs, attacker_slot) {
                             let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+                            // The end branch made this draw. The continue branch
+                            // did not, so the count must stay on this state.
+                            mon.direct_choice_log_probability += direct_uniform_choice_log(4);
                             mon.volatiles.push(
                                 crate::state::pokemon::VolatileStatusState::MoveStatus(
                                     VolatileStatus::Confusion,

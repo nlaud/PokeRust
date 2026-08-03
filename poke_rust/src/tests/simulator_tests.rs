@@ -50433,13 +50433,26 @@ mod sample_mode {
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::state::battle::{MatchState, Player, PlayerCommand};
-    use crate::state::pokemon::{PokemonState, build_pokemon_state};
+    use crate::information::information::{EventKind, InformationEvent, mask_events_for};
+    use crate::information::unknowns::PokemonHP;
+    use crate::simulator::generative::{
+        TransitionConfig, sample_transition, sample_transition_seeded,
+    };
+    use crate::simulator::{sample_turn_raw_seeded, scoped_sample_rng, simulate_turn};
+    use crate::state::battle::{
+        BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand,
+    };
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{PokemonState, VolatileStatusState, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
     };
 
     fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        mon_with_ability(species, mv, Ability::None)
+    }
+
+    fn mon_with_ability(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         build_pokemon_state(
             species,
             pokemon_dex(),
@@ -50447,7 +50460,7 @@ mod sample_mode {
             Some(50),
             Some([Some(mv), None, None, None]),
             None,
-            Some(Ability::None),
+            Some(ability),
             None,
             None,
             None,
@@ -50735,6 +50748,654 @@ mod sample_mode {
         assert!(
             (observed_rate - 0.125).abs() < 0.08,
             "Cant{{Paralysis}} should appear in ~1/8 of samples, observed {observed_rate:.3} ({cant_count}/{samples})"
+        );
+    }
+
+    // ── The generative transition API ────────────────────────────────────────
+
+    /// A branching single-target position: Rock Slide is 90-percent accurate and
+    /// carries a flinch secondary, so the turn holds a miss branch, a hit
+    /// branch, and a flinch branch. Snorlax always moves first.
+    fn branching_position() -> (MatchState, PlayerCommand, PlayerCommand) {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::RockSlide);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        (
+            state,
+            PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+        )
+    }
+
+    /// Both sides attack, so each side's stream holds an HP event of its own and
+    /// an HP event of the foe.
+    fn damage_trade_position() -> (MatchState, PlayerCommand, PlayerCommand) {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Tackle);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        (
+            state,
+            PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+        )
+    }
+
+    fn transition_config(consider_crit: bool, damage_rolls: u8, observe: bool) -> TransitionConfig {
+        TransitionConfig {
+            consider_crit,
+            damage_rolls,
+            observe,
+        }
+    }
+
+    /// Every sampled state must be a state that full enumeration also reaches,
+    /// and one trajectory can never be likelier than the state it lands on.
+    #[test]
+    fn generative_state_is_a_member_of_the_enumeration() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let enumerated = simulate_turn(
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            true,
+            16,
+            None,
+        );
+        assert!(enumerated.len() > 1, "the position must actually branch");
+
+        for seed in 0..20 {
+            let sample = sample_transition_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(true, 16, false),
+            );
+            let matched = enumerated.iter().find(|(st, _, _)| *st == sample.state);
+            let Some((_, _, enumerated_p)) = matched else {
+                panic!("seed {seed} sampled a state that enumeration does not hold");
+            };
+            let trajectory = sample.trajectory_probability;
+            assert!(
+                trajectory > 0.0 && trajectory <= enumerated_p + 1e-9,
+                "seed {seed}: trajectory probability {trajectory} must be in (0, {enumerated_p}]"
+            );
+        }
+    }
+
+    /// The state marginal of the sampler must be the exact successor
+    /// distribution. This is the check that the chokepoint draws compose into an
+    /// unbiased transition.
+    #[test]
+    fn generative_matches_the_exact_distribution() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let enumerated = simulate_turn(
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            false,
+            1,
+            None,
+        );
+        assert!(
+            enumerated.len() >= 2,
+            "one roll and no crit must still leave a branching position"
+        );
+
+        let samples = 4_000;
+        let mut counts = vec![0_u32; enumerated.len()];
+        let _guard = scoped_sample_rng(20_260_803);
+        for _ in 0..samples {
+            let sample = sample_transition(
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let index = enumerated
+                .iter()
+                .position(|(st, _, _)| *st == sample.state)
+                .expect("the sampled state must be an enumerated state");
+            counts[index] += 1;
+        }
+
+        for (index, (_, _, exact)) in enumerated.iter().enumerate() {
+            let observed = counts[index] as f64 / samples as f64;
+            assert!(
+                (observed - exact).abs() < 0.03,
+                "outcome {index} has exact probability {exact}, observed {observed:.4}"
+            );
+        }
+    }
+
+    /// One roll, no crit, and a move that cannot miss: the turn has one
+    /// trajectory, so both probabilities are one.
+    #[test]
+    fn generative_trajectory_probability_is_exact_when_deterministic() {
+        let (state, p1_cmd, p2_cmd) = damage_trade_position();
+        let sample = sample_transition_seeded(
+            4,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, false),
+        );
+
+        assert!(
+            (sample.trajectory_probability - 1.0).abs() < 1e-9,
+            "trajectory probability was {}",
+            sample.trajectory_probability
+        );
+        assert!(
+            (sample.sampling_probability - 1.0).abs() < 1e-9,
+            "sampling probability was {}",
+            sample.sampling_probability
+        );
+        assert!((sample.importance_weight() - 1.0).abs() < 1e-9);
+    }
+
+    /// A position whose move attempt has no sibling fail branch passes through no
+    /// renormalized chokepoint. The sampler then draws each trajectory at its
+    /// true rate, so the importance weight is one and the reported figure of
+    /// `sample_turn_raw` is already the trajectory probability.
+    #[test]
+    fn generative_importance_weight_is_one_without_renormalization() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        for seed in 0..10 {
+            let sample = sample_transition_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(true, 16, false),
+            );
+            let weight = sample.importance_weight();
+            assert!(
+                (weight - 1.0).abs() < 1e-9,
+                "seed {seed} gave an importance weight of {weight}"
+            );
+
+            // One seed drives one trajectory, so the two calls resolve the same
+            // turn. The recorder reads the chokepoint weights and draws nothing,
+            // so it cannot move the trajectory.
+            let (reported_state, _events, reported) = sample_turn_raw_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                true,
+                16,
+                None,
+            );
+            assert_eq!(sample.state, reported_state, "seed {seed} diverged");
+            assert!(
+                (sample.trajectory_probability - reported).abs() < 1e-12,
+                "seed {seed}: {} against the reported {reported}",
+                sample.trajectory_probability
+            );
+        }
+    }
+
+    /// A multi-hit move collapses its per-hit branches through a renormalized
+    /// chokepoint, which makes `sample_turn_raw` report the weight of the whole
+    /// collapsed set instead of the weight of the surviving branch. The
+    /// correction must pull that figure down to the trajectory that was rolled:
+    /// three hits at sixteen rolls with critical-hit branching cannot be a
+    /// tenth-likely event.
+    ///
+    /// The two calls below are not compared state to state. A multi-hit
+    /// resolution is not reproducible under one seed, because the engine drains
+    /// a `HashMap` whose tie order varies between runs; only the magnitudes
+    /// matter here, and every trajectory of this position is many orders below
+    /// every figure that `sample_turn_raw` reports for it.
+    #[test]
+    fn generative_correction_applies_to_a_multi_hit_move() {
+        let mut p1 = mon(Species::Cloyster, PokemonMove::IcicleSpear);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 1000;
+        p2.hp = 1000;
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for seed in 0..5 {
+            let sample = sample_transition_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(true, 16, false),
+            );
+            let (_state, _events, reported) = sample_turn_raw_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                true,
+                16,
+                None,
+            );
+
+            assert!(
+                sample.trajectory_probability > 0.0,
+                "seed {seed} gave a trajectory probability of zero"
+            );
+            assert!(
+                sample.trajectory_probability < reported / 1_000.0,
+                "seed {seed}: the correction left {} against the reported {reported}",
+                sample.trajectory_probability
+            );
+        }
+    }
+
+    /// One seed and one position give one transition, including both reported
+    /// probabilities.
+    #[test]
+    fn generative_seed_repeats_the_transition() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let draw = || {
+            sample_transition_seeded(
+                77,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(true, 16, true),
+            )
+        };
+
+        let first = draw();
+        let second = draw();
+        assert_eq!(first.state, second.state);
+        assert_eq!(
+            first.trajectory_probability,
+            second.trajectory_probability
+        );
+        assert_eq!(first.sampling_probability, second.sampling_probability);
+        assert_eq!(first.observations, second.observations);
+    }
+
+    /// Count the HP-carrying events of a stream, and the ones that hold an exact
+    /// number rather than a percentage.
+    fn count_hp_events(events: &[InformationEvent]) -> (usize, usize) {
+        let mut total = 0;
+        let mut exact = 0;
+        for event in events {
+            let mut hps: Vec<&PokemonHP> = Vec::new();
+            match &event.kind {
+                EventKind::DamageDealt { new_hp, .. }
+                | EventKind::Healed { new_hp, .. }
+                | EventKind::SetHp { new_hp, .. } => hps.push(new_hp),
+                EventKind::Switch(switch) => hps.push(&switch.hp),
+                EventKind::SimultaneousSwitch { switches } => {
+                    hps.extend(switches.iter().map(|switch| &switch.hp));
+                }
+                _ => {}
+            }
+            total += hps.len();
+            exact += hps
+                .iter()
+                .filter(|hp| matches!(hp, PokemonHP::Number(_)))
+                .count();
+            let (nested_total, nested_exact) = count_hp_events(&event.reactions);
+            total += nested_total;
+            exact += nested_exact;
+        }
+        (total, exact)
+    }
+
+    /// The public stream belongs to neither side, so it must report every HP as a
+    /// percentage. Each private stream must still hold its owner's exact HP,
+    /// which is what keeps this check from passing on an empty stream.
+    #[test]
+    fn public_observation_hides_both_players_hp() {
+        let (state, p1_cmd, p2_cmd) = damage_trade_position();
+        let sample = sample_transition_seeded(
+            8,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, true),
+        );
+        let observations = sample.observations.expect("observe was set");
+
+        let (public_total, public_exact) = count_hp_events(&observations.public);
+        assert!(
+            public_total >= 2,
+            "both sides attacked, so the public stream must hold HP events"
+        );
+        assert_eq!(
+            public_exact, 0,
+            "the public stream must hold no exact HP; {public_total} HP events"
+        );
+
+        for (label, stream) in [("P1", &observations.p1), ("P2", &observations.p2)] {
+            let (total, exact) = count_hp_events(stream);
+            assert_eq!(total, public_total, "{label} lost an HP event");
+            assert!(exact > 0, "{label} must see its own exact HP");
+        }
+    }
+
+    /// Find the first entering-Pokémon event of a stream, flattened to one list
+    /// of `(slot, species)` pairs.
+    fn first_send_out(events: &[InformationEvent]) -> Option<Vec<(Player, Species)>> {
+        for event in events {
+            let found = match &event.kind {
+                EventKind::Switch(switch) => {
+                    Some(vec![(switch.slot.player, switch.species.clone())])
+                }
+                EventKind::SimultaneousSwitch { switches } => Some(
+                    switches
+                        .iter()
+                        .map(|switch| (switch.slot.player, switch.species.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+            if let Some(nested) = first_send_out(&event.reactions) {
+                return Some(nested);
+            }
+        }
+        None
+    }
+
+    /// An Illusion user shows its disguise to everyone except its owner. Two
+    /// applications of `mask_events_for` cannot build that view, because the
+    /// first application clears the disguise, so the public stream needs its own
+    /// pass over the raw events.
+    #[test]
+    fn public_observation_keeps_the_illusion_disguise() {
+        let p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let zoroark =
+            mon_with_ability(Species::Zoroark, PokemonMove::Splash, Ability::Illusion);
+        let bench = mon(Species::Blissey, PokemonMove::Splash);
+        let state = MatchState::BattleState(battle_state_from_lists(
+            vec![p1],
+            vec![],
+            vec![p2],
+            vec![zoroark, bench],
+        ));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd =
+            PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+
+        let sample = sample_transition_seeded(
+            12,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, true),
+        );
+        let observations = sample.observations.expect("observe was set");
+
+        let owner = first_send_out(&observations.p2).expect("P2 sent a Pokémon out");
+        let foe = first_send_out(&observations.p1).expect("P2 sent a Pokémon out");
+        let public = first_send_out(&observations.public).expect("P2 sent a Pokémon out");
+
+        let p2_species = |stream: &[(Player, Species)]| {
+            stream
+                .iter()
+                .find(|(player, _)| *player == Player::P2)
+                .map(|(_, species)| species.clone())
+                .expect("the send-out belongs to P2")
+        };
+        assert_eq!(
+            p2_species(&owner),
+            Species::Zoroark,
+            "the owner sees its own Pokémon"
+        );
+        assert_ne!(
+            p2_species(&foe),
+            Species::Zoroark,
+            "the foe sees the disguise"
+        );
+        assert_eq!(
+            p2_species(&public),
+            p2_species(&foe),
+            "the public view sees the same disguise as the foe"
+        );
+    }
+
+    /// The two private streams must equal a direct `mask_events_for` of the same
+    /// resolution. One seed drives one trajectory, so `sample_turn_raw_seeded`
+    /// supplies the raw stream of that same turn.
+    #[test]
+    fn private_observations_match_mask_events_for() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let seed = 21;
+        let sample = sample_transition_seeded(
+            seed,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(true, 16, true),
+        );
+        let (raw_state, raw_events, _probability) = sample_turn_raw_seeded(
+            seed,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            true,
+            16,
+            Some(Player::P1),
+        );
+
+        let raw = raw_events.expect("an observer turns event tracking on");
+        let observations = sample.observations.expect("observe was set");
+        assert_eq!(sample.state, raw_state, "the two calls diverged");
+        assert_eq!(observations.p1, mask_events_for(Player::P1, &raw));
+        assert_eq!(observations.p2, mask_events_for(Player::P2, &raw));
+    }
+
+    // ── Direct random choices ────────────────────────────────────────────────
+
+    fn is_confused(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|v| {
+            matches!(
+                v,
+                VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _)
+            )
+        })
+    }
+
+    fn active_p1(state: &MatchState) -> &PokemonState {
+        match state {
+            MatchState::BattleState(bs) => &bs.p1_active_mons[0],
+            MatchState::GameOverState { final_state, .. } => &final_state.p1_active_mons[0],
+            MatchState::TeamPreviewState(_) => panic!("a resolved turn is not a team preview"),
+        }
+    }
+
+    /// Confusion duration is a direct draw of four results. Nothing else in this
+    /// position is random: Confuse Ray never misses, and Splash does nothing. Both
+    /// probabilities must therefore be a quarter, and the weight must stay at one.
+    ///
+    /// A run that ignored the direct draw would report one for both.
+    #[test]
+    fn generative_counts_a_direct_confusion_duration_draw() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ConfuseRay);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut durations = std::collections::HashSet::new();
+        for seed in 0..16 {
+            let sample = sample_transition_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let target = match &sample.state {
+                MatchState::BattleState(bs) => &bs.p2_active_mons[0],
+                other => panic!("seed {seed} ended the battle: {other:?}"),
+            };
+            assert!(is_confused(target), "seed {seed} left the target unconfused");
+            for volatile in &target.volatiles {
+                if let VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) = volatile {
+                    durations.insert(*turns);
+                }
+            }
+
+            assert!(
+                (sample.trajectory_probability - 0.25).abs() < 1e-9,
+                "seed {seed}: trajectory probability {} must be a quarter",
+                sample.trajectory_probability
+            );
+            assert!(
+                (sample.sampling_probability - 0.25).abs() < 1e-9,
+                "seed {seed}: sampling probability {} must be a quarter",
+                sample.sampling_probability
+            );
+            assert!(
+                (sample.importance_weight() - 1.0).abs() < 1e-9,
+                "seed {seed}: a direct draw must leave the weight at one"
+            );
+        }
+        assert!(
+            durations.len() > 1,
+            "the seeds must reach more than one duration, reached {durations:?}"
+        );
+    }
+
+    /// The count of a direct draw must follow the branch that made it.
+    ///
+    /// A Thrash lock with one attack behind it forks in two: the move ends and
+    /// confuses its user, or the lock continues. Only the ending branch draws a
+    /// confusion duration. The sampler keeps one of the two branches, so a
+    /// thread-wide count would put the quarter on the continuing branch as well.
+    #[test]
+    fn generative_direct_draw_follows_the_branch() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        p1.stats[5] = 200;
+        // A count of one means one attack is done. The next attack forks.
+        p1.volatiles.push(VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(PokemonMove::Thrash),
+            1,
+        ));
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 1000;
+        p2.hp = 1000;
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut ended = 0;
+        let mut continued = 0;
+        for seed in 0..24 {
+            let sample = sample_transition_seeded(
+                seed,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let expected = if is_confused(active_p1(&sample.state)) {
+                ended += 1;
+                // The fork keeps half the mass, and the duration keeps a quarter.
+                0.125
+            } else {
+                continued += 1;
+                0.5
+            };
+            assert!(
+                (sample.trajectory_probability - expected).abs() < 1e-9,
+                "seed {seed}: trajectory probability {} must be {expected}",
+                sample.trajectory_probability
+            );
+            assert!(
+                (sample.sampling_probability - expected).abs() < 1e-9,
+                "seed {seed}: sampling probability {} must be {expected}",
+                sample.sampling_probability
+            );
+        }
+        assert!(ended > 0, "no seed ended the rampage");
+        assert!(continued > 0, "no seed continued the rampage");
+    }
+
+    /// The count must not survive into a second turn. `sample_transition` clears
+    /// the field of every Pokémon before it returns the state.
+    #[test]
+    fn generative_clears_the_direct_count_from_the_returned_state() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ConfuseRay);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let first = sample_transition_seeded(
+            3,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, false),
+        );
+        assert!((first.trajectory_probability - 0.25).abs() < 1e-9);
+
+        // The target is already confused, so the second turn draws no duration.
+        let second = sample_transition_seeded(
+            3,
+            &first.state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, false),
+        );
+        assert!(
+            (second.trajectory_probability - 1.0).abs() < 1e-9,
+            "the second turn kept the count of the first: {}",
+            second.trajectory_probability
         );
     }
 }

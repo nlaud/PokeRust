@@ -152,6 +152,7 @@ pub fn materialize_pokemon(
         stats: stats_override,
         status: unk.status.clone(),
         volatiles: unk.volatiles.clone(),
+        direct_choice_log_probability: 0.0,
         ability,
         gender,
         weight_hg,

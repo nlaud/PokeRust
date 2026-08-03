@@ -454,43 +454,74 @@ pub enum EventKind {
 /// regression anchor (see `mask_events_for_p1_parity` in the test suite). The P2 stream is
 /// simply the same transform with the observer flipped.
 pub fn mask_events_for(observer: Player, events: &[InformationEvent]) -> Vec<InformationEvent> {
-    events.iter().map(|ev| mask_event(observer, ev)).collect()
+    mask_events(Perspective::Player(observer), events)
 }
 
-fn mask_event(observer: Player, ev: &InformationEvent) -> InformationEvent {
-    let kind = mask_event_kind(observer, &ev.kind);
-    let reactions = ev
-        .reactions
-        .iter()
-        .map(|r| mask_event(observer, r))
-        .collect();
+/// Downgrade the same **raw** event tree into the stream that a spectator sees:
+/// a percentage for every HP, and the disguise species of every Illusion user.
+///
+/// This is not two applications of [`mask_events_for`]. The first application
+/// clears `disguise_species`, so a second one would restore the true species of
+/// an Illusion user on the side that the first observer owned. The public view
+/// therefore needs its own pass over the raw stream.
+///
+/// The public stream is the common knowledge of the turn. A search that needs
+/// what both players learned in common — and nothing that either player learned
+/// alone — reads this instead of intersecting the two private streams.
+pub fn mask_events_public(events: &[InformationEvent]) -> Vec<InformationEvent> {
+    mask_events(Perspective::Public, events)
+}
+
+/// Whose view a mask builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Perspective {
+    /// One player's own view. That player's slots keep exact HP and true species.
+    Player(Player),
+    /// A spectator's view. No slot is owned, so every slot is masked.
+    Public,
+}
+
+impl Perspective {
+    /// Whether this perspective owns the side that `slot_player` plays.
+    fn owns(self, slot_player: Player) -> bool {
+        matches!(self, Perspective::Player(observer) if observer == slot_player)
+    }
+}
+
+fn mask_events(view: Perspective, events: &[InformationEvent]) -> Vec<InformationEvent> {
+    events.iter().map(|ev| mask_event(view, ev)).collect()
+}
+
+fn mask_event(view: Perspective, ev: &InformationEvent) -> InformationEvent {
+    let kind = mask_event_kind(view, &ev.kind);
+    let reactions = ev.reactions.iter().map(|r| mask_event(view, r)).collect();
     InformationEvent { kind, reactions }
 }
 
 /// `raw` is the true HP as `PokemonHP::Number` (pre-mask contract); `max_hp` is its
 /// companion. Returns the observer-appropriate `Number` (own slot) or `Percent` (foe slot).
-fn mask_hp(observer: Player, slot_player: Player, raw: &PokemonHP, max_hp: u16) -> PokemonHP {
+fn mask_hp(view: Perspective, slot_player: Player, raw: &PokemonHP, max_hp: u16) -> PokemonHP {
     let hp = match raw {
         PokemonHP::Number(n) => *n,
         // Already masked (shouldn't occur pre-mask, but stay sound if it ever does).
         PokemonHP::Percent(p) => return PokemonHP::Percent(*p),
     };
-    if slot_player == observer {
+    if view.owns(slot_player) {
         PokemonHP::Number(hp)
     } else {
         PokemonHP::Percent(crate::simulator::helpers::hp_to_percent(hp, max_hp))
     }
 }
 
-fn mask_switch_state(observer: Player, raw: &SwitchState) -> SwitchState {
-    let species = if raw.slot.player == observer {
+fn mask_switch_state(view: Perspective, raw: &SwitchState) -> SwitchState {
+    let species = if view.owns(raw.slot.player) {
         raw.species.clone()
     } else {
         raw.disguise_species
             .clone()
             .unwrap_or_else(|| raw.species.clone())
     };
-    let hp = mask_hp(observer, raw.slot.player, &raw.hp, raw.max_hp);
+    let hp = mask_hp(view, raw.slot.player, &raw.hp, raw.max_hp);
     SwitchState {
         slot: raw.slot,
         species,
@@ -504,7 +535,7 @@ fn mask_switch_state(observer: Player, raw: &SwitchState) -> SwitchState {
     }
 }
 
-fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
+fn mask_event_kind(view: Perspective, kind: &EventKind) -> EventKind {
     match kind {
         EventKind::DamageDealt {
             target,
@@ -512,7 +543,7 @@ fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
             max_hp,
         } => EventKind::DamageDealt {
             target: *target,
-            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            new_hp: mask_hp(view, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
         EventKind::Healed {
@@ -521,7 +552,7 @@ fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
             max_hp,
         } => EventKind::Healed {
             target: *target,
-            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            new_hp: mask_hp(view, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
         EventKind::SetHp {
@@ -530,14 +561,14 @@ fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
             max_hp,
         } => EventKind::SetHp {
             target: *target,
-            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            new_hp: mask_hp(view, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
-        EventKind::Switch(sw) => EventKind::Switch(mask_switch_state(observer, sw)),
+        EventKind::Switch(sw) => EventKind::Switch(mask_switch_state(view, sw)),
         EventKind::SimultaneousSwitch { switches } => EventKind::SimultaneousSwitch {
             switches: switches
                 .iter()
-                .map(|sw| mask_switch_state(observer, sw))
+                .map(|sw| mask_switch_state(view, sw))
                 .collect(),
         },
         // No perspective-sensitive payload — every other event category (major actions

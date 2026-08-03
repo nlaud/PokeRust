@@ -62,17 +62,12 @@ It reports the sampling error and the discarded outcome mass.
 `MctsConfig::widening` grows the action set of a node with its visit count.
 `solver::exploit` measures a strategy pair against the complete action set.
 
-`ChanceMode::Sample` currently builds the full outcome distribution before sampling.
-This does not reduce the cost of turn resolution.
+`MctsConfig::transition` chooses between enumeration and the generative model.
+`simulator::generative` holds the generative model.
+It samples inside turn resolution, and it returns the trajectory probability and the sampling probability.
 
-- [ ] Add a generative transition API.
-    - Sample inside turn resolution.
-    - Return the next state.
-    - Return public and private observations.
-    - Return the true trajectory probability.
-    - Return the sampling probability.
-  - [ ] Test stratified sampling for hits, critical hits, secondary effects, and speed ties.
-  - [ ] Test common random numbers and control variates.
+- [ ] Test stratified sampling for hits, critical hits, secondary effects, and speed ties.
+- [ ] Test common random numbers and control variates.
 
 ### Evaluation
 
