@@ -308,23 +308,39 @@ pub(crate) fn emit_berry_cure(bs: &mut BattleState, slot: FieldSlot, cure: &Berr
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Merge equal branches and add their probabilities.
+///
+/// The result runs from the likeliest branch to the least likely. Equal branches
+/// keep the order of their first input branch. This order does not depend on the
+/// random key of the `HashMap`. Sample mode therefore reads an equal branch set
+/// in the same order for each batch member.
 pub(crate) fn coalesce_branches<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)>
 where
     T: Eq + Hash + Clone,
 {
-    let mut combined: HashMap<T, f64> = HashMap::new();
+    let mut combined: HashMap<T, (f64, usize)> = HashMap::new();
 
-    for (state, probability) in branches {
+    for (input_index, (state, probability)) in branches.into_iter().enumerate() {
         if probability <= 0.0 {
             continue;
         }
 
-        *combined.entry(state).or_insert(0.0) += probability;
+        let entry = combined.entry(state).or_insert((0.0, input_index));
+        entry.0 += probability;
     }
 
-    let mut merged: Vec<(T, f64)> = combined.into_iter().collect();
-    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    merged
+    let mut merged: Vec<(usize, (T, f64))> = combined
+        .into_iter()
+        .map(|(state, (probability, input_index))| (input_index, (state, probability)))
+        .collect();
+    merged.sort_by(|a, b| {
+        b.1
+            .1
+            .partial_cmp(&a.1.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    merged.into_iter().map(|(_, branch)| branch).collect()
 }
 
 /// Sample mode: keep exactly one branch, chosen proportionally to `weight`, and
@@ -344,6 +360,12 @@ pub(crate) fn sample_one_weighted<T>(items: Vec<T>, weight: impl Fn(&T) -> f64) 
 /// `crate::simulator::record_chokepoint`, which is what lets
 /// `simulator::generative` separate the true trajectory probability from the
 /// probability that the sampler drew it.
+///
+/// A recorded chokepoint also reads the stratified stream when a batch installed
+/// one. It then picks the branch by inversion of the cumulative weights instead
+/// of by a `WeightedIndex` draw. Both rules give the same marginal law, so a
+/// caller without a stream keeps its current result. Read
+/// `crate::simulator::stratify` for what the stream changes.
 fn sample_one_of<T>(
     mut items: Vec<T>,
     weight: impl Fn(&T) -> f64,
@@ -351,14 +373,28 @@ fn sample_one_of<T>(
 ) -> Vec<T> {
     use rand::distributions::{Distribution, WeightedIndex};
     if items.len() <= 1 {
-        // A set of one is not a decision, so it changes neither accumulator.
+        // A set of one is not a decision, so it changes neither accumulator, and
+        // it consumes no stratified dimension.
         return items;
     }
     let weights: Vec<f64> = items.iter().map(|item| weight(item).max(0.0)).collect();
-    let index = match WeightedIndex::new(&weights) {
-        Ok(dist) => crate::simulator::with_sample_rng(|rng| dist.sample(rng)),
-        // All-zero / non-finite weights: degenerate set, keep the first branch.
-        Err(_) => 0,
+    // The read comes before the weight check, so a degenerate set consumes its
+    // dimension too. This keeps the dimension of a chokepoint the same across a
+    // batch.
+    let stratified = record
+        .is_some()
+        .then(crate::simulator::stratify::next_uniform)
+        .flatten();
+    let index = match stratified {
+        Some(uniform) => {
+            // A degenerate set has no slice to invert, so keep the first branch.
+            crate::simulator::stratify::branch_for_uniform(&weights, uniform).unwrap_or(0)
+        }
+        None => match WeightedIndex::new(&weights) {
+            Ok(dist) => crate::simulator::with_sample_rng(|rng| dist.sample(rng)),
+            // All-zero / non-finite weights: degenerate set, keep the first branch.
+            Err(_) => 0,
+        },
     };
     if let Some(renormalized) = record {
         let total: f64 = weights.iter().sum();
@@ -3633,7 +3669,9 @@ fn maybe_apply_berry_confusion(mon: &mut PokemonState, env: &BerryEnv) {
         return;
     }
     if !is_confused(mon) {
-        let duration = crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5));
+        let duration = crate::simulator::stratify::uniform_index(4)
+            .map(|index| index as u16 + 2)
+            .unwrap_or_else(|| crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5)));
         // A direct draw of four durations. See `direct_uniform_choice_log`.
         mon.direct_choice_log_probability += crate::simulator::direct_uniform_choice_log(4);
         mon.volatiles.push(VolatileStatusState::MoveStatus(
@@ -3709,7 +3747,9 @@ pub(crate) fn apply_berry_effect(mon: &mut PokemonState, berry: &Item, env: &Ber
         Item::StarfBerry => {
             // Picks one of 5 stats at random (non-branching, same pattern as Confusion duration).
             let s = if ripen { 4 } else { 2 };
-            let idx = crate::simulator::with_sample_rng(|rng| rng.gen_range(0..5usize));
+            let idx = crate::simulator::stratify::uniform_index(5).unwrap_or_else(|| {
+                crate::simulator::with_sample_rng(|rng| rng.gen_range(0..5usize))
+            });
             // A direct draw of five stats. See `direct_uniform_choice_log`.
             mon.direct_choice_log_probability += crate::simulator::direct_uniform_choice_log(5);
             let mut boosts = [0i8; 7];
@@ -10503,7 +10543,11 @@ fn apply_volatile_to_pokemon(
             VolatileStatus::GlaiveRush => 1,
             VolatileStatus::SemiInvulnerable(_) => 0,
             VolatileStatus::Confusion => {
-                let duration = crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5));
+                let duration = crate::simulator::stratify::uniform_index(4)
+                    .map(|index| index as u16 + 2)
+                    .unwrap_or_else(|| {
+                        crate::simulator::with_sample_rng(|rng| rng.gen_range(2..=5))
+                    });
                 // A direct draw of four durations. See `direct_uniform_choice_log`.
                 mon.direct_choice_log_probability +=
                     crate::simulator::direct_uniform_choice_log(4);

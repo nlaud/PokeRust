@@ -66,7 +66,14 @@ It reports the sampling error and the discarded outcome mass.
 `simulator::generative` holds the generative model.
 It samples inside turn resolution, and it returns the trajectory probability and the sampling probability.
 
-- [ ] Test stratified sampling for hits, critical hits, secondary effects, and speed ties.
+`simulator::stratify` holds the Latin hypercube plan.
+`generative::sample_transition_batch` draws a stratified batch of successors.
+One batch member keeps the law of one independent sample.
+
+- [ ] Drive the stratified batch from `solver::mcts`.
+  - [ ] Give a chance node one batch instead of one draw for each visit.
+  - [ ] Keep the column index of a chokepoint stable across the batch.
+  - [ ] Measure the sampling error against the independent sampler.
 - [ ] Test common random numbers and control variates.
 
 ### Evaluation

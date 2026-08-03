@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 pub mod generative;
 pub mod helpers;
+pub mod stratify;
 use self::helpers as simulator_helpers;
 
 thread_local! {
@@ -9222,7 +9223,9 @@ fn disrupt_rampage_lock(
         && !simulator_helpers::is_confused(mon)
         && !is_misty_terrain;
     if confusion_added {
-        let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+        let duration = stratify::uniform_index(4)
+            .map(|index| index as u16 + 2)
+            .unwrap_or_else(|| with_sample_rng(|rng| rng.gen_range(2u16..=5u16)));
         // A direct draw of four durations. See `direct_uniform_choice_log`.
         mon.direct_choice_log_probability += direct_uniform_choice_log(4);
         mon.volatiles
@@ -10686,7 +10689,11 @@ fn apply_post_damage_move_effects(
                 if should_confuse {
                     if let MatchState::BattleState(ref mut end_bs) = end_state {
                         if let Some(mon) = mon_at_slot_mut(end_bs, attacker_slot) {
-                            let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+                            let duration = stratify::uniform_index(4)
+                                .map(|index| index as u16 + 2)
+                                .unwrap_or_else(|| {
+                                    with_sample_rng(|rng| rng.gen_range(2u16..=5u16))
+                                });
                             // The end branch made this draw. The continue branch
                             // did not, so the count must stay on this state.
                             mon.direct_choice_log_probability += direct_uniform_choice_log(4);

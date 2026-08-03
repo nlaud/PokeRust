@@ -50436,9 +50436,10 @@ mod sample_mode {
     use crate::information::information::{EventKind, InformationEvent, mask_events_for};
     use crate::information::unknowns::PokemonHP;
     use crate::simulator::generative::{
-        TransitionConfig, sample_transition, sample_transition_seeded,
+        TransitionConfig, sample_transition, sample_transition_batch, sample_transition_seeded,
     };
     use crate::simulator::{sample_turn_raw_seeded, scoped_sample_rng, simulate_turn};
+    use std::collections::HashMap;
     use crate::state::battle::{
         BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand,
     };
@@ -51396,6 +51397,522 @@ mod sample_mode {
             (second.trajectory_probability - 1.0).abs() < 1e-9,
             "the second turn kept the count of the first: {}",
             second.trajectory_probability
+        );
+    }
+
+    // ── Stratified batches ───────────────────────────────────────────────────
+
+    /// A position whose only chance is the accuracy of a status move.
+    ///
+    /// Poison Powder is 75-percent accurate, it deals no damage, and it carries
+    /// no secondary effect. Splash does nothing. The turn therefore holds exactly
+    /// one chokepoint, of a miss branch and a hit branch.
+    fn accuracy_position() -> (MatchState, PlayerCommand, PlayerCommand) {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PoisonPowder);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        (
+            state,
+            PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+        )
+    }
+
+    fn active_p2(state: &MatchState) -> &PokemonState {
+        match state {
+            MatchState::BattleState(bs) => &bs.p2_active_mons[0],
+            MatchState::GameOverState { final_state, .. } => &final_state.p2_active_mons[0],
+            MatchState::TeamPreviewState(_) => panic!("a resolved turn is not a team preview"),
+        }
+    }
+
+    fn p1_hp(state: &MatchState) -> u16 {
+        active_p1(state).hp
+    }
+
+    /// The count of members whose predicate holds.
+    fn count_where(
+        samples: &[crate::simulator::generative::TransitionSample],
+        predicate: impl Fn(&crate::simulator::generative::TransitionSample) -> bool,
+    ) -> usize {
+        samples.iter().filter(|sample| predicate(sample)).count()
+    }
+
+    /// Equal-probability branches keep their first input order, even when all
+    /// branch hashes collide.
+    #[test]
+    fn coalesced_equal_branches_keep_input_order() {
+        use std::hash::{Hash, Hasher};
+
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct CollidingBranch(u8);
+
+        impl Hash for CollidingBranch {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                0_u8.hash(state);
+            }
+        }
+
+        let branches: Vec<_> = (0..64)
+            .map(|index| (CollidingBranch(index), 1.0))
+            .collect();
+        let coalesced = crate::simulator::helpers::coalesce_branches(branches);
+        let actual: Vec<_> = coalesced
+            .into_iter()
+            .map(|(branch, _)| branch.0)
+            .collect();
+        let expected: Vec<_> = (0..64).collect();
+        assert_eq!(actual, expected);
+    }
+
+    /// A direct four-result draw uses each result ten times in a batch of 40.
+    /// Confuse Ray has no branch-set choice, so this test checks direct draws.
+    #[test]
+    fn stratified_direct_choice_count_is_exact() {
+        let p1 = mon(Species::Snorlax, PokemonMove::ConfuseRay);
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        p2.stats[5] = 200;
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for seed in 0..8 {
+            let samples = sample_transition_batch(
+                seed,
+                40,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let mut counts = [0_usize; 4];
+            for sample in samples {
+                let target = active_p2(&sample.state);
+                let duration = target
+                    .volatiles
+                    .iter()
+                    .find_map(|volatile| match volatile {
+                        VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) => {
+                            Some(*turns)
+                        }
+                        _ => None,
+                    })
+                    .expect("Confuse Ray must confuse its target");
+                counts[usize::from(duration - 2)] += 1;
+                assert!((sample.trajectory_probability - 0.25).abs() < 1e-9);
+                assert!((sample.sampling_probability - 0.25).abs() < 1e-9);
+            }
+            assert_eq!(counts, [10; 4], "seed {seed} gave {counts:?}");
+        }
+    }
+
+    /// A 75-percent accurate move over 100 stratified samples hits exactly 75
+    /// times, for every seed.
+    ///
+    /// The hit count from 100 independent samples has a standard deviation of
+    /// approximately 4.3. Inversion gives each branch one contiguous
+    /// unit-interval slice. The batch fills every stratum once.
+    #[test]
+    fn stratified_accuracy_count_is_exact() {
+        let (state, p1_cmd, p2_cmd) = accuracy_position();
+        for seed in 0..8 {
+            let samples = sample_transition_batch(
+                seed,
+                100,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            assert_eq!(samples.len(), 100);
+            let hits = count_where(&samples, |sample| {
+                active_p2(&sample.state).status == Some(crate::state::dex_data::Status::Poison)
+            });
+            assert_eq!(hits, 75, "seed {seed}: Poison Powder must hit 75 of 100");
+        }
+    }
+
+    /// A 1-in-24 critical hit over 48 stratified samples crits exactly 2 times.
+    ///
+    /// Tackle never misses and carries no secondary effect, so the crit split is
+    /// the only chokepoint of the turn. Its two branches keep their own weights.
+    /// The trajectory probability identifies the branch. A critical hit reports
+    /// 1/24, and a normal hit reports 23/24.
+    #[test]
+    fn stratified_crit_count_is_exact() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for seed in 0..8 {
+            let samples = sample_transition_batch(
+                seed,
+                48,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(true, 1, false),
+            );
+            let crits = count_where(&samples, |sample| {
+                (sample.trajectory_probability - 1.0 / 24.0).abs() < 1e-9
+            });
+            let normal = count_where(&samples, |sample| {
+                (sample.trajectory_probability - 23.0 / 24.0).abs() < 1e-9
+            });
+            assert_eq!(crits, 2, "seed {seed}: 48 samples must hold 2 crits");
+            assert_eq!(normal, 46, "seed {seed}: 48 samples must hold 46 normal hits");
+        }
+    }
+
+    /// A 30-percent paralysis secondary over 100 stratified samples paralyzes
+    /// exactly 30 times.
+    ///
+    /// Body Slam never misses. P2 is faster, so Splash resolves before the
+    /// paralysis lands and adds no chokepoint of its own.
+    #[test]
+    fn stratified_secondary_count_is_exact() {
+        let p1 = mon(Species::Snorlax, PokemonMove::BodySlam);
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        p2.stats[5] = 200;
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for seed in 0..8 {
+            let samples = sample_transition_batch(
+                seed,
+                100,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let paralyzed = count_where(&samples, |sample| {
+                active_p2(&sample.state).status == Some(crate::state::dex_data::Status::Paralysis)
+            });
+            assert_eq!(
+                paralyzed, 30,
+                "seed {seed}: Body Slam must paralyze 30 of 100"
+            );
+        }
+    }
+
+    /// An exact speed tie over 64 stratified samples gives each order 32 wins.
+    ///
+    /// Both Pokémon are Snorlax at the same level, so their Speed is equal and
+    /// the engine branches equally on the tie. Growl lowers the Attack of P2, so
+    /// the Tackle of P2 deals less damage when P1 moves first. The HP of P1
+    /// therefore names the order that the sample took.
+    #[test]
+    fn stratified_speed_tie_count_is_exact() {
+        let p1 = mon(Species::Snorlax, PokemonMove::Growl);
+        let p2 = mon(Species::Snorlax, PokemonMove::Tackle);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for seed in 0..8 {
+            let samples = sample_transition_batch(
+                seed,
+                64,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            let mut counts: HashMap<u16, usize> = HashMap::new();
+            for sample in &samples {
+                *counts.entry(p1_hp(&sample.state)).or_insert(0) += 1;
+            }
+            assert_eq!(
+                counts.len(),
+                2,
+                "seed {seed}: the tie must reach two HP results, reached {counts:?}"
+            );
+            for (hp, count) in &counts {
+                assert_eq!(
+                    *count, 32,
+                    "seed {seed}: HP {hp} must appear 32 times, appeared {count}"
+                );
+            }
+        }
+    }
+
+    /// The batch mean of a stratified batch varies far less than the batch mean
+    /// of the same count of independent draws.
+    ///
+    /// Both estimators measure the same quantity: the rate at which Poison Powder
+    /// lands. The stratified batch reports the exact rate every time, so its
+    /// spread is zero. The independent batch keeps the binomial spread of about
+    /// 0.077 at 32 draws.
+    #[test]
+    fn stratified_accuracy_variance_falls() {
+        let (state, p1_cmd, p2_cmd) = accuracy_position();
+        let batches = 40;
+        let per_batch = 32;
+
+        let poisoned = |sample: &crate::simulator::generative::TransitionSample| {
+            active_p2(&sample.state).status == Some(crate::state::dex_data::Status::Poison)
+        };
+
+        let mut stratified_rates = Vec::new();
+        let mut independent_rates = Vec::new();
+        for batch in 0..batches {
+            let seed = 1_000 + batch as u64;
+            let stratified = sample_transition_batch(
+                seed,
+                per_batch,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 1, false),
+            );
+            stratified_rates
+                .push(count_where(&stratified, poisoned) as f64 / per_batch as f64);
+
+            let _guard = scoped_sample_rng(seed);
+            let independent: Vec<_> = (0..per_batch)
+                .map(|_| {
+                    sample_transition(
+                        &state,
+                        &p1_cmd,
+                        &p2_cmd,
+                        move_dex(),
+                        pokemon_dex(),
+                        transition_config(false, 1, false),
+                    )
+                })
+                .collect();
+            independent_rates
+                .push(count_where(&independent, poisoned) as f64 / per_batch as f64);
+        }
+
+        let deviation = |rates: &[f64]| {
+            let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+            let variance = rates
+                .iter()
+                .map(|rate| (rate - mean) * (rate - mean))
+                .sum::<f64>()
+                / rates.len() as f64;
+            (mean, variance.sqrt())
+        };
+        let (stratified_mean, stratified_deviation) = deviation(&stratified_rates);
+        let (independent_mean, independent_deviation) = deviation(&independent_rates);
+
+        assert!(
+            (stratified_mean - 0.75).abs() < 1e-9,
+            "the stratified mean {stratified_mean} must be the true rate"
+        );
+        assert!(
+            (independent_mean - 0.75).abs() < 0.06,
+            "the independent mean {independent_mean} must be near the true rate"
+        );
+        assert!(
+            independent_deviation > 0.03,
+            "the independent spread {independent_deviation} is too small to compare"
+        );
+        assert!(
+            stratified_deviation < independent_deviation / 5.0,
+            "the stratified spread {stratified_deviation} must be far below {independent_deviation}"
+        );
+    }
+
+    /// The pooled frequency of every outcome state must match the exact
+    /// distribution of `simulate_turn`.
+    ///
+    /// Stratification changes the joint law of a batch, not the law of one
+    /// member. The state marginal therefore stays the exact successor
+    /// distribution.
+    #[test]
+    fn stratified_batch_matches_the_exact_distribution() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let enumerated = simulate_turn(
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            false,
+            2,
+            None,
+        );
+
+        let per_batch = 256;
+        let batches = 8;
+        let total = per_batch * batches;
+        let mut counts: HashMap<MatchState, usize> = HashMap::new();
+        for batch in 0..batches {
+            let samples = sample_transition_batch(
+                7_000 + batch as u64,
+                per_batch,
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                move_dex(),
+                pokemon_dex(),
+                transition_config(false, 2, false),
+            );
+            for sample in samples {
+                *counts.entry(sample.state).or_insert(0) += 1;
+            }
+        }
+
+        for (outcome, _, probability) in &enumerated {
+            let observed = *counts.get(outcome).unwrap_or(&0) as f64 / total as f64;
+            assert!(
+                (observed - probability).abs() < 0.03,
+                "observed {observed} must match the exact {probability}"
+            );
+        }
+        assert_eq!(
+            counts.len(),
+            enumerated.len(),
+            "the batch reached a state that enumeration does not hold"
+        );
+    }
+
+    /// Enumeration must also reach every batch member. A trajectory cannot be
+    /// more likely than its final state.
+    #[test]
+    fn stratified_batch_is_a_member_of_the_enumeration() {
+        let (state, p1_cmd, p2_cmd) = branching_position();
+        let enumerated = simulate_turn(
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            true,
+            16,
+            None,
+        );
+        assert!(enumerated.len() > 1, "the position must branch");
+
+        let samples = sample_transition_batch(
+            11,
+            64,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(true, 16, false),
+        );
+        for sample in &samples {
+            let matched = enumerated.iter().find(|(st, _, _)| *st == sample.state);
+            let Some((_, _, exact)) = matched else {
+                panic!("a batch member is not among the enumerated outcomes");
+            };
+            assert!(
+                sample.trajectory_probability > 0.0
+                    && sample.trajectory_probability <= exact + 1e-9,
+                "trajectory probability {} must be in (0, {exact}]",
+                sample.trajectory_probability
+            );
+        }
+    }
+
+    /// A deterministic position reports one for both probabilities of every
+    /// member, and every member reaches the same state.
+    ///
+    /// A stratified batch must not change what one member reports. The position
+    /// holds no chokepoint, so the stream stays unread.
+    #[test]
+    fn stratified_probabilities_match_the_independent_sampler() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state =
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let reference = sample_transition_seeded(
+            5,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, false),
+        );
+        let samples = sample_transition_batch(
+            5,
+            16,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            move_dex(),
+            pokemon_dex(),
+            transition_config(false, 1, false),
+        );
+        for sample in &samples {
+            assert_eq!(
+                sample.state, reference.state,
+                "a deterministic position must give one state"
+            );
+            assert!(
+                (sample.trajectory_probability - 1.0).abs() < 1e-9,
+                "trajectory probability {} must be one",
+                sample.trajectory_probability
+            );
+            assert!(
+                (sample.sampling_probability - 1.0).abs() < 1e-9,
+                "sampling probability {} must be one",
+                sample.sampling_probability
+            );
+        }
+    }
+
+    /// An installed stream must not reach a draw outside turn resolution.
+    ///
+    /// The determinizer, the team generator, and the chance reduction of the
+    /// solver all draw through `sample_one_weighted`, which passes `record:
+    /// None`. Those draws must give the same results with a stream installed as
+    /// without one, and they must consume no stratum.
+    #[test]
+    fn stratified_stream_does_not_reach_an_unrecorded_draw() {
+        use crate::simulator::helpers::sample_one_weighted;
+        use crate::simulator::stratify::StratifiedPlan;
+
+        let draws = |install: bool| {
+            let _guard = scoped_sample_rng(21);
+            let plan = StratifiedPlan::new(64, 21);
+            let _stream = install.then(|| plan.install(0));
+            (0..64)
+                .map(|_| {
+                    let items: Vec<u8> = (0..5).collect();
+                    sample_one_weighted(items, |item| (*item as f64) + 1.0)[0]
+                })
+                .collect::<Vec<u8>>()
+        };
+
+        let without_stream = draws(false);
+        let with_stream = draws(true);
+        assert_eq!(
+            without_stream, with_stream,
+            "an unrecorded draw must ignore the stratified stream"
         );
     }
 }

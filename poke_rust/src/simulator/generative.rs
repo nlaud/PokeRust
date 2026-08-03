@@ -57,6 +57,13 @@
 //!
 //! A search does not read events, so [`TransitionConfig::observe`] turns event
 //! tracking off. The observations are then `None`.
+//!
+//! # Batches
+//!
+//! [`sample_transition_batch`] draws many successors of one position as a
+//! stratified batch. Each member keeps the law of an independent draw, so both
+//! reported probabilities keep their meaning. Stratification can reduce the
+//! variance of a batch mean. Read [`super::stratify`] for the construction.
 
 use std::collections::HashMap;
 
@@ -68,6 +75,7 @@ use crate::information::information::{
 use crate::state::battle::{MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
+use super::stratify::StratifiedPlan;
 use super::{sample_turn_raw, scoped_chokepoint_log, scoped_sample_rng, take_direct_choice_log};
 
 /// The three views of one resolved turn.
@@ -213,4 +221,40 @@ pub fn sample_transition_seeded(
 ) -> TransitionSample {
     let _guard = scoped_sample_rng(seed);
     sample_transition(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config)
+}
+
+/// Resolve `state` under both commands `samples` times, as one stratified batch.
+///
+/// The batch draws every random choice of a turn from a Latin hypercube. The
+/// members cover each random dimension across the unit interval. This coverage
+/// can reduce the variance of a mean over the successor distribution.
+///
+/// Each member keeps the law of one independent draw, so
+/// [`TransitionSample::trajectory_probability`] and
+/// [`TransitionSample::sampling_probability`] keep their meaning. Read
+/// [`super::stratify`] for the construction and for the proof of that law.
+///
+/// One seed and one position always give one batch. A caller that wants its own
+/// loop builds a [`StratifiedPlan`] and installs each member itself.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_transition_batch(
+    seed: u64,
+    samples: usize,
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    config: TransitionConfig,
+) -> Vec<TransitionSample> {
+    // One guard covers the whole batch: the jitter of every member and every
+    // fallback draw comes from this one stream.
+    let _guard = scoped_sample_rng(seed);
+    let plan = StratifiedPlan::new(samples, seed);
+    (0..samples)
+        .map(|index| {
+            let _stream = plan.install(index);
+            sample_transition(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config)
+        })
+        .collect()
 }
