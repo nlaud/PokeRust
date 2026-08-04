@@ -2012,7 +2012,7 @@ fn mcts_matrix_game_finds_the_equilibrium() {
     let exact = solve_matrix_game(&payoffs).value;
 
     for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
-        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1);
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, false);
         assert!(
             (learned.value - exact).abs() < 0.05,
             "{policy:?} learned {}, the exact value is {exact}",
@@ -2983,5 +2983,251 @@ fn mcts_stratified_batch_lowers_the_sampling_error() {
     assert!(
         batched < independent * 0.75,
         "the batch scored {batched}, the independent sampler scored {independent}"
+    );
+}
+
+// ── Common random numbers and control variates ──────────────────────────────
+
+/// The payoff matrix of [`mcts_matrix_game_finds_the_equilibrium`]. It has no
+/// saddle point, so only a mixed strategy reaches its value.
+fn learner_payoffs() -> Vec<Vec<f64>> {
+    vec![vec![0.7, 0.2], vec![0.3, 0.6]]
+}
+
+/// The root-mean-square error of [`mcts::learn_matrix_game`] against `exact`,
+/// over `seeds`.
+fn matrix_rmse(
+    seeds: &[u64],
+    iterations: u32,
+    policy: SelectionPolicy,
+    control_variate: bool,
+    exact: f64,
+) -> f64 {
+    let payoffs = learner_payoffs();
+    let squares: f64 = seeds
+        .iter()
+        .map(|&seed| {
+            let learned =
+                mcts::learn_matrix_game(seed, &payoffs, iterations, policy, 0.1, control_variate);
+            (learned.value - exact).powi(2)
+        })
+        .sum();
+    (squares / seeds.len() as f64).sqrt()
+}
+
+/// The mean exploitability gap of the root strategy pair that the sampling
+/// search learned on `contested_position`, over `seeds`.
+///
+/// Both variance controls act on the action comparison of a learner, so the
+/// strategy is what they improve. Read the module documentation of
+/// [`mcts`](crate::solver::mcts) for the reported value, which they do not.
+fn contested_mean_gap(seeds: &[u64], config: &MctsConfig) -> f64 {
+    let total: f64 = seeds
+        .iter()
+        .map(|&seed| {
+            let result = run_mcts(seed, config);
+            gap_of(
+                &contested_position(),
+                &result.p1_strategy,
+                &result.p2_strategy,
+            )
+        })
+        .sum();
+    total / seeds.len() as f64
+}
+
+/// The control variate changes the variance of the estimate, not its
+/// expectation. Both learners must therefore still reach the exact value of the
+/// matrix.
+#[test]
+fn control_variates_keep_the_matrix_value() {
+    let payoffs = learner_payoffs();
+    let exact = solve_matrix_game(&payoffs).value;
+
+    for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, true);
+        assert!(
+            (learned.value - exact).abs() < 0.05,
+            "{policy:?} learned {}, the exact value is {exact}",
+            learned.value
+        );
+        for (label, strategy) in [
+            ("row", &learned.row_strategy),
+            ("column", &learned.col_strategy),
+        ] {
+            let total: f64 = strategy.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "{policy:?} {label} strategy sums to {total}"
+            );
+        }
+    }
+}
+
+/// The point of the baseline: it must beat the plain importance weight on the
+/// same iteration budget.
+///
+/// The measurement uses a short run, because a long run reaches the value from
+/// either estimate and hides the difference. The test states a margin instead of
+/// an exact bound, because the reduction depends on how close the running mean
+/// sits to the value of the action.
+#[test]
+fn control_variates_lower_the_matrix_error() {
+    let exact = solve_matrix_game(&learner_payoffs()).value;
+    let seeds: Vec<u64> = (1..=8).collect();
+
+    let plain = matrix_rmse(&seeds, 400, SelectionPolicy::RegretMatching, false, exact);
+    let corrected = matrix_rmse(&seeds, 400, SelectionPolicy::RegretMatching, true, exact);
+
+    assert!(plain > 0.0, "the plain estimate hit the value on every seed");
+    assert!(
+        corrected < plain,
+        "the baseline scored {corrected}, the plain estimate scored {plain}"
+    );
+}
+
+/// The baseline must not move the value that the search reports.
+#[test]
+fn control_variates_keep_the_search_value() {
+    let exact = exact_value();
+    let config = MctsConfig {
+        control_variate: true,
+        ..mcts_config()
+    };
+
+    let result = run_mcts(3, &config);
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the corrected search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// A universe pool adds a seed for every node. Each one must come from the
+/// seeded stream of the search, so one seed still gives one answer.
+#[test]
+fn common_random_numbers_repeat_under_one_seed() {
+    let config = MctsConfig {
+        iterations: 120,
+        common_random_numbers: Some(8),
+        ..mcts_config()
+    };
+
+    let first = run_mcts(77, &config);
+    let second = run_mcts(77, &config);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.p1_strategy.len(), second.p1_strategy.len());
+    for (left, right) in first.p1_strategy.iter().zip(&second.p1_strategy) {
+        assert_eq!(left.probability, right.probability);
+    }
+    assert_eq!(first.stats.turns_simulated, second.stats.turns_simulated);
+}
+
+/// One universe keeps the law of one independent draw, so the search must still
+/// reach the value that backward induction computes.
+///
+/// The tolerance matches `mcts_approaches_the_exact_value`, because explicit
+/// exploration biases the mean by more than the sampling error alone.
+#[test]
+fn common_random_numbers_keep_the_search_value() {
+    let exact = exact_value();
+    let config = MctsConfig {
+        common_random_numbers: Some(16),
+        ..mcts_config()
+    };
+
+    let result = run_mcts(3, &config);
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the shared-universe search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// Visits that share a universe are dependent. The independent-sample formula
+/// does not give a valid standard error for this search.
+#[test]
+fn common_random_numbers_omit_the_standard_error() {
+    for pool in [1, 8] {
+        let config = MctsConfig {
+            iterations: 32,
+            common_random_numbers: Some(pool),
+            ..mcts_config()
+        };
+
+        let result = run_mcts(77, &config);
+
+        assert_eq!(result.sampling.iterations, 32);
+        assert_eq!(result.sampling.standard_error, None, "a pool of {pool}");
+    }
+
+    // A pool of zero cannot serve a visit, so that search keeps the independent
+    // draw and reports its error.
+    let empty = MctsConfig {
+        iterations: 32,
+        common_random_numbers: Some(0),
+        ..mcts_config()
+    };
+    assert!(run_mcts(77, &empty).sampling.standard_error.is_some());
+}
+
+/// The point of the shared universes: they must beat the independent draw on
+/// the same budget.
+///
+/// The measured quantity is the exploitability gap of the learned strategy, not
+/// the error of the reported value. A pool caps the successors of one action
+/// pair, so the mean root value averages fewer distinct universes and its own
+/// error grows. The measurement over these seeds records that trade: the gap
+/// falls, and the error of the value does not.
+///
+/// The test states a margin instead of an exact bound, because the size of the
+/// reduction depends on how much of the noise of one comparison comes from the
+/// universe.
+#[test]
+fn common_random_numbers_lower_the_exploitability_gap() {
+    let seeds: Vec<u64> = (1..=16).collect();
+    let independent = mcts_config();
+    let shared = MctsConfig {
+        common_random_numbers: Some(16),
+        ..independent
+    };
+
+    let plain = contested_mean_gap(&seeds, &independent);
+    let common = contested_mean_gap(&seeds, &shared);
+
+    assert!(plain > 0.0, "the independent draw learned an exact answer");
+    assert!(
+        common < plain,
+        "the shared universes scored {common}, the independent draw scored {plain}"
+    );
+}
+
+/// The baseline must also beat the plain importance weight inside the search.
+///
+/// This test measures the same quantity as
+/// [`common_random_numbers_lower_the_exploitability_gap`], for the same reason.
+#[test]
+fn control_variates_lower_the_exploitability_gap() {
+    let seeds: Vec<u64> = (1..=16).collect();
+    let plain_config = mcts_config();
+    let corrected_config = MctsConfig {
+        control_variate: true,
+        ..plain_config
+    };
+
+    let plain = contested_mean_gap(&seeds, &plain_config);
+    let corrected = contested_mean_gap(&seeds, &corrected_config);
+
+    assert!(plain > 0.0, "the plain estimate learned an exact answer");
+    assert!(
+        corrected < plain,
+        "the baseline scored {corrected}, the plain estimate scored {plain}"
     );
 }

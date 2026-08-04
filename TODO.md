@@ -71,7 +71,11 @@ It samples inside turn resolution, and it returns the trajectory probability and
 One batch member keeps the law of one independent sample.
 `TransitionMode::Generative` carries the batch size, and each chance node spreads one batch over consecutive visits.
 
-- [ ] Test common random numbers and control variates.
+`MctsConfig::common_random_numbers` gives each node a pool of universe seeds.
+Each action pair uses the same seed for the same resolution index.
+`MctsConfig::control_variate` subtracts the running mean reward of an action before the learner divides by its selection probability.
+Both controls lower the exploitability gap of the learned strategy.
+Neither lowers the error of the reported value.
 
 ### Evaluation
 

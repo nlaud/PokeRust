@@ -94,6 +94,60 @@
 //! A `batch` of one or zero installs no plan, so the search keeps the
 //! independent draw.
 //!
+//! # Common random numbers
+//!
+//! Two visits of one node draw two different random universes. A learner that
+//! compares two actions across those visits sees the noise of the universe on
+//! top of the difference between the actions.
+//!
+//! [`MctsConfig::common_random_numbers`] removes that noise. Each node holds a
+//! pool of `k` universe seeds. Resolution `v` of each action pair uses universe
+//! `v % k`. Thus, all action pairs use the same seed for their first resolution.
+//! They also use the same seed for each later resolution index.
+//!
+//! The pool comes from the seeded stream of the search, so one seed still gives
+//! one result. A uniform seed gives a correct draw of the transition, so one
+//! visit keeps the law of one independent draw. The pool makes the visits of one
+//! node dependent, as a stratified batch does, and the result therefore reports
+//! no standard error while a pool is active.
+//!
+//! A pool of `k` universes gives one action pair at most `k` distinct
+//! successors. A small pool reduces outcome coverage but gives a cleaner action
+//! comparison.
+//!
+//! That trade has a measured cost. The reported value is the mean root value
+//! over the iterations, and a pool leaves fewer distinct universes in that mean,
+//! so the error of the value grows. The gain is a lower exploitability gap of
+//! the root strategy. `common_random_numbers_lower_the_exploitability_gap` holds
+//! the measurement.
+//!
+//! # Control variates
+//!
+//! Both learners divide the payoff of the played action by its selection
+//! probability. That estimate is unbiased, and its variance grows as the
+//! probability falls.
+//!
+//! [`MctsConfig::control_variate`] subtracts a baseline before the division:
+//!
+//! ```text
+//! value(a) = baseline(a) + [a == played] * (reward - baseline(a)) / p(a)
+//! ```
+//!
+//! The expectation over the draw is the true value of the action for any
+//! baseline, so the estimate stays unbiased. The variance falls when the
+//! baseline is close to that value.
+//!
+//! Each learner keeps the running mean reward of each action as its baseline.
+//! The learner reads the baseline before it adds the new sample, so the baseline
+//! holds no part of the draw that it corrects.
+//!
+//! The baseline lowers the error of
+//! [`learn_matrix_game`] on a short run, and it lowers the exploitability gap of
+//! the root strategy of the search. It does not lower the error of the reported
+//! value, which the explicit exploration biases.
+//! `control_variates_lower_the_matrix_error` and
+//! `control_variates_lower_the_exploitability_gap` hold the measurements.
+//!
 //! # Progressive widening
 //!
 //! [`MctsConfig::widening`] limits a node to a prefix of its action list.
@@ -140,7 +194,7 @@ use crate::data::species::Species;
 use crate::simulator::generative::{TransitionConfig, TransitionSample, sample_transition};
 use crate::simulator::helpers::sample_one_branch;
 use crate::simulator::stratify::StratifiedPlan;
-use crate::simulator::{scoped_sample_rng, simulate_turn, with_sample_rng};
+use crate::simulator::{SampleRngGuard, scoped_sample_rng, simulate_turn, with_sample_rng};
 use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
@@ -209,6 +263,23 @@ pub struct MctsConfig {
     /// Grows the action set of a node with its visit count.
     /// `None` gives every node its complete action set from the first visit.
     pub widening: Option<Widening>,
+    /// Universe seeds that each node reuses across its visits.
+    ///
+    /// `None` and `Some(0)` keep independent draws. Each action pair uses the
+    /// same seed for the same resolution index. The pool size limits the distinct
+    /// successors of one action pair.
+    ///
+    /// The search limits the pool size to [`MctsConfig::iterations`].
+    ///
+    /// A pool makes the visits of one node dependent, so
+    /// [`MctsSamplingError::standard_error`] then reports `None`.
+    pub common_random_numbers: Option<usize>,
+    /// Subtracts the running mean reward of an action before the learner
+    /// divides by its selection probability.
+    ///
+    /// The estimate stays unbiased, and its variance falls as the mean
+    /// approaches the value of the action.
+    pub control_variate: bool,
 }
 
 /// How the search produces the successor of one joint action.
@@ -305,6 +376,8 @@ impl Default for MctsConfig {
             prune_dominated_actions: false,
             max_forced_chain: 8,
             widening: None,
+            common_random_numbers: None,
+            control_variate: false,
         }
     }
 }
@@ -325,8 +398,9 @@ pub struct MctsSamplingError {
     /// This is the sample standard deviation divided by the square root of
     /// `iterations`.
     ///
-    /// One iteration gives `None`. A stratified search also gives `None` because
-    /// its visits are dependent.
+    /// One iteration gives `None`. A stratified search and a search with common
+    /// random numbers also give `None`, because both make the visits of one node
+    /// dependent.
     pub standard_error: Option<f64>,
 }
 
@@ -396,6 +470,7 @@ pub fn search(
     let depth = config.depth.max(1);
     let iterations = config.iterations.max(1);
     let batch = effective_batch(config.transition, iterations);
+    let universes = effective_universes(config, iterations);
 
     let mut ctx = MctsContext {
         pokemon_dex,
@@ -403,6 +478,7 @@ pub fn search(
         cfg: config,
         exploration: config.exploration.clamp(MIN_EXPLORATION, 1.0),
         batch,
+        universes,
         tree: HashMap::new(),
         chance_cursors: BatchCursors::default(),
         stats: MctsStats::default(),
@@ -497,8 +573,11 @@ pub fn search(
         sampling: MctsSamplingError {
             iterations: values.count,
             mean: value,
-            standard_error: match batch {
-                Some(2..) => None,
+            // Dependent visits break the independent-sample formula. A batch of
+            // two or more members and a universe pool both create that
+            // dependence.
+            standard_error: match (batch, universes) {
+                (Some(2..), _) | (_, Some(_)) => None,
                 _ => values.standard_error(),
             },
         },
@@ -527,12 +606,16 @@ pub struct LearnedMatrix {
 /// the search.
 /// [`solve_matrix_game`](super::matrix::solve_matrix_game) supplies the exact
 /// value of the same matrix.
+///
+/// `control_variate` is [`MctsConfig::control_variate`] for these two learners,
+/// so a caller can measure the baseline without the engine.
 pub fn learn_matrix_game(
     seed: u64,
     payoffs: &[Vec<f64>],
     iterations: u32,
     policy: SelectionPolicy,
     exploration: f64,
+    control_variate: bool,
 ) -> LearnedMatrix {
     let rows = payoffs.len();
     let cols = payoffs.first().map_or(0, |row| row.len());
@@ -562,8 +645,8 @@ pub fn learn_matrix_game(
         values.push(payoff);
         row_learner.accumulate(&row_strategy);
         col_learner.accumulate(&col_strategy);
-        row_learner.update(policy, row, row_strategy[row], payoff, rows);
-        col_learner.update(policy, col, col_strategy[col], WIN - payoff, cols);
+        row_learner.update(policy, row, &row_strategy, payoff, control_variate);
+        col_learner.update(policy, col, &col_strategy, WIN - payoff, control_variate);
     }
 
     LearnedMatrix {
@@ -582,6 +665,12 @@ struct Learner {
     scores: Vec<f64>,
     /// The sum of every played strategy. It gives the average strategy.
     strategy_sum: Vec<f64>,
+    /// The running mean reward of each action, and the samples behind each mean.
+    ///
+    /// The control variate reads them. A learner without the control variate
+    /// never writes them, so it keeps its current result.
+    baselines: Vec<f64>,
+    baseline_counts: Vec<u64>,
 }
 
 impl Learner {
@@ -589,6 +678,8 @@ impl Learner {
         Learner {
             scores: vec![0.0; actions],
             strategy_sum: vec![0.0; actions],
+            baselines: vec![0.0; actions],
+            baseline_counts: vec![0; actions],
         }
     }
 
@@ -641,32 +732,91 @@ impl Learner {
 
     /// Learn from the payoff of the played action.
     ///
-    /// `played_probability` is the selection probability of that action. It is
-    /// never zero, because the explicit exploration bounds it from below.
+    /// `strategy` is the strategy that this learner played, so its length is the
+    /// action prefix that progressive widening permitted. An action outside that
+    /// prefix keeps a score of zero, so it starts level with the played actions
+    /// once the prefix reaches it.
     ///
-    /// `allowed` is the action prefix that the strategy covered. An action
-    /// outside that prefix keeps a score of zero, so it starts level with the
-    /// played actions once progressive widening reaches it.
+    /// The selection probability of the played action is never zero, because the
+    /// explicit exploration bounds it from below.
+    ///
+    /// `control_variate` subtracts the running mean of an action before the
+    /// division and adds it back outside. Read the module documentation for the
+    /// estimator and for the reason that it stays unbiased.
     fn update(
         &mut self,
         policy: SelectionPolicy,
         played: usize,
-        played_probability: f64,
+        strategy: &[f64],
         reward: f64,
-        allowed: usize,
+        control_variate: bool,
     ) {
-        let actions = allowed.min(self.scores.len());
+        let actions = strategy.len().min(self.scores.len());
+        if played >= actions {
+            return;
+        }
+        // The baseline of the played action, read before this sample enters it.
+        // A baseline that held the current sample would correlate with it and
+        // would bias the estimate.
+        let baseline = if control_variate {
+            self.baselines[played]
+        } else {
+            0.0
+        };
         // The payoff of the played action alone, scaled so that its expectation
         // over the played strategy is the payoff of that action.
-        let estimate = reward / played_probability;
+        let played_value = baseline + (reward - baseline) / strategy[played];
+        // The value of an action that this iteration did not play. Without a
+        // baseline it is zero, and the estimate of the played action then carries
+        // the whole payoff.
+        let values: Vec<f64> = if control_variate {
+            (0..actions)
+                .map(|action| {
+                    if action == played {
+                        played_value
+                    } else {
+                        self.baselines[action]
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let value_of = |action: usize| match (control_variate, action == played) {
+            (true, _) => values[action],
+            (false, true) => played_value,
+            (false, false) => 0.0,
+        };
+
         match policy {
             SelectionPolicy::RegretMatching => {
+                // The value of the node under the played strategy. Without a
+                // baseline the weighted sum is the reward itself, so this branch
+                // keeps the arithmetic that the search already used.
+                let node_value: f64 = if control_variate {
+                    (0..actions).map(|action| values[action] * strategy[action]).sum()
+                } else {
+                    reward
+                };
                 for (action, score) in self.scores[..actions].iter_mut().enumerate() {
-                    let counterfactual = if action == played { estimate } else { 0.0 };
-                    *score += counterfactual - reward;
+                    *score += value_of(action) - node_value;
                 }
             }
-            SelectionPolicy::Exp3 => self.scores[played] += estimate,
+            // Without a baseline every unplayed action adds zero, so this policy
+            // only has to touch the played action.
+            SelectionPolicy::Exp3 if !control_variate => self.scores[played] += played_value,
+            SelectionPolicy::Exp3 => {
+                for (action, score) in self.scores[..actions].iter_mut().enumerate() {
+                    *score += value_of(action);
+                }
+            }
+        }
+
+        if control_variate {
+            // The next visit reads this sample as part of the baseline.
+            self.baseline_counts[played] += 1;
+            let count = self.baseline_counts[played] as f64;
+            self.baselines[played] += (reward - self.baselines[played]) / count;
         }
     }
 
@@ -751,6 +901,36 @@ struct Node {
     /// Progressive widening reads it, and each player derives its own allowed
     /// count from it.
     visits: u64,
+    /// The common random numbers for this node.
+    universes: UniversePool,
+}
+
+/// The common universe seeds and the resolution index of each action pair.
+struct UniversePool {
+    seeds: Vec<u64>,
+    pair_visits: HashMap<(usize, usize), u64>,
+}
+
+impl UniversePool {
+    /// Create a pool from the seeded search stream.
+    fn new(count: Option<usize>) -> Self {
+        let seeds = count.map_or_else(Vec::new, |count| (0..count).map(|_| draw_seed()).collect());
+        UniversePool {
+            seeds,
+            pair_visits: HashMap::new(),
+        }
+    }
+
+    /// Get the universe for the next resolution of one action pair.
+    fn next_seed(&mut self, pair: (usize, usize)) -> Option<u64> {
+        if self.seeds.is_empty() {
+            return None;
+        }
+        let visits = self.pair_visits.entry(pair).or_default();
+        let index = (*visits % self.seeds.len() as u64) as usize;
+        *visits += 1;
+        Some(self.seeds[index])
+    }
 }
 
 struct MctsContext<'a> {
@@ -761,6 +941,8 @@ struct MctsContext<'a> {
     exploration: f64,
     /// The stratified batch after the iteration-count limit.
     batch: Option<usize>,
+    /// The universe pool of each node. `None` keeps the independent draw.
+    universes: Option<usize>,
     tree: HashMap<NodeKey, Node>,
     chance_cursors: BatchCursors,
     stats: MctsStats,
@@ -795,16 +977,7 @@ impl MctsContext<'_> {
             return (self.cfg.eval)(battle);
         }
 
-        let (
-            p1_strategy,
-            p2_strategy,
-            p1_index,
-            p2_index,
-            p1_allowed,
-            p2_allowed,
-            p1_commands,
-            p2_commands,
-        ) = {
+        let (p1_strategy, p2_strategy, p1_index, p2_index, p1_commands, p2_commands) = {
             let node = &self.tree[&key];
             // The visit count of this node before this visit. A first visit
             // therefore plays the initial prefix.
@@ -819,15 +992,20 @@ impl MctsContext<'_> {
                 p2_strategy,
                 p1_index,
                 p2_index,
-                p1_allowed,
-                p2_allowed,
                 node.p1_actions.actions[p1_index].clone(),
                 node.p2_actions.actions[p2_index].clone(),
             )
         };
 
-        let branches = self.resolve(state, (key, p1_index, p2_index), &p1_commands, &p2_commands);
-        let value = match draw_successor(branches) {
+        // The resolution uses this action pair's next common universe. The guard
+        // drops before the descent and restores the search stream.
+        let successor = {
+            let _universe = self.universe_stream(&key, (p1_index, p2_index));
+            let branches =
+                self.resolve(state, (key, p1_index, p2_index), &p1_commands, &p2_commands);
+            draw_successor(branches)
+        };
+        let value = match successor {
             Some(child) => {
                 let (child_depth, child_chain) = self.descend(&child, depth, chain);
                 self.iterate(&child, child_depth, child_chain)
@@ -846,19 +1024,28 @@ impl MctsContext<'_> {
         node.p1.update(
             self.cfg.policy,
             p1_index,
-            p1_strategy[p1_index],
+            &p1_strategy,
             value,
-            p1_allowed,
+            self.cfg.control_variate,
         );
         // The game is zero-sum over `[0, 1]`, so P2 maximizes the complement.
         node.p2.update(
             self.cfg.policy,
             p2_index,
-            p2_strategy[p2_index],
+            &p2_strategy,
             WIN - value,
-            p2_allowed,
+            self.cfg.control_variate,
         );
         value
+    }
+
+    /// Install the next common universe for one action pair.
+    ///
+    /// `None` means that the node holds no universe pool, so the visit keeps the
+    /// stream of the search itself.
+    fn universe_stream(&mut self, key: &NodeKey, pair: (usize, usize)) -> Option<SampleRngGuard> {
+        let seed = self.tree.get_mut(key)?.universes.next_seed(pair)?;
+        Some(scoped_sample_rng(seed))
     }
 
     /// The actions that a node with `visits` visits may play.
@@ -884,12 +1071,15 @@ impl MctsContext<'_> {
             reorder_by_coverage(&mut p1_actions);
             reorder_by_coverage(&mut p2_actions);
         }
+        // The pool uses the search stream. Thus, one search seed gives one result.
+        let universes = UniversePool::new(self.universes);
         Node {
             p1: Learner::new(p1_actions.actions.len()),
             p2: Learner::new(p2_actions.actions.len()),
             p1_actions,
             p2_actions,
             visits: 0,
+            universes,
         }
     }
 
@@ -1142,6 +1332,17 @@ fn effective_batch(transition: TransitionMode, iterations: u32) -> Option<usize>
     }
 }
 
+/// Get the universe pool that each node holds.
+///
+/// A node cannot use more universes than the search has iterations.
+/// A pool of zero keeps independent draws.
+fn effective_universes(config: &MctsConfig, iterations: u32) -> Option<usize> {
+    config
+        .common_random_numbers
+        .map(|count| count.min(iterations as usize))
+        .filter(|&count| count > 0)
+}
+
 /// Draw one successor by weight, and drop the rest.
 fn draw_successor(branches: Vec<(MatchState, f64)>) -> Option<MatchState> {
     sample_one_branch(branches)
@@ -1201,11 +1402,97 @@ mod tests {
         let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1, 2);
         assert_eq!(strategy.len(), 2);
 
-        learner.update(SelectionPolicy::RegretMatching, 0, strategy[0], 1.0, 2);
+        learner.update(SelectionPolicy::RegretMatching, 0, &strategy, 1.0, false);
 
         assert!(learner.scores[0] > 0.0, "{:?}", learner.scores);
         assert_eq!(learner.scores[2], 0.0);
         assert_eq!(learner.scores[3], 0.0);
+    }
+
+    /// The baseline must hold no part of the sample that it corrects. A learner
+    /// that read the updated mean would subtract the current draw from itself.
+    #[test]
+    fn a_baseline_holds_only_the_earlier_samples() {
+        let mut learner = Learner::new(2);
+        let strategy = vec![0.5, 0.5];
+
+        learner.update(SelectionPolicy::RegretMatching, 0, &strategy, 1.0, true);
+        // The first sample met a baseline of zero, so the estimate is the plain
+        // importance weight.
+        assert!((learner.scores[0] - 1.0).abs() < 1e-12, "{:?}", learner.scores);
+        assert!((learner.baselines[0] - 1.0).abs() < 1e-12);
+
+        let first_score = learner.scores[0];
+        learner.update(SelectionPolicy::RegretMatching, 0, &strategy, 0.0, true);
+        // The second sample met a baseline of one: 1 + (0 - 1) / 0.5 = -1. The
+        // unplayed action never held a reward, so its baseline is still zero.
+        let played_value = 1.0 + (0.0 - 1.0) / 0.5;
+        let node_value = 0.5 * played_value + 0.5 * 0.0;
+        assert!(
+            (learner.scores[0] - (first_score + played_value - node_value)).abs() < 1e-12,
+            "{:?}",
+            learner.scores
+        );
+        assert!((learner.baselines[0] - 0.5).abs() < 1e-12);
+    }
+
+    /// A learner without the control variate must keep every current result, so
+    /// its update has to stay the plain importance weight.
+    #[test]
+    fn an_update_without_a_baseline_keeps_the_importance_weight() {
+        let strategy = vec![0.25, 0.75];
+        // The estimate of the played action is 0.5 / 0.25. Regret matching then
+        // subtracts the node value, which is the reward itself.
+        let expected = [
+            (SelectionPolicy::RegretMatching, [2.0 - 0.5, -0.5]),
+            (SelectionPolicy::Exp3, [2.0, 0.0]),
+        ];
+        for (policy, scores) in expected {
+            let mut learner = Learner::new(2);
+            learner.update(policy, 0, &strategy, 0.5, false);
+            assert_eq!(learner.scores, scores, "{policy:?}");
+            assert_eq!(learner.baselines, vec![0.0, 0.0], "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn a_universe_pool_aligns_action_pairs_by_resolution_index() {
+        let mut pool = UniversePool {
+            seeds: vec![11, 22],
+            pair_visits: HashMap::new(),
+        };
+
+        assert_eq!(pool.next_seed((0, 0)), Some(11));
+        assert_eq!(pool.next_seed((0, 0)), Some(22));
+        assert_eq!(pool.next_seed((1, 0)), Some(11));
+        assert_eq!(pool.next_seed((1, 0)), Some(22));
+        assert_eq!(pool.next_seed((0, 0)), Some(11));
+    }
+
+    #[test]
+    fn a_universe_pool_cannot_exceed_the_iteration_count() {
+        let off = MctsConfig::default();
+        assert_eq!(effective_universes(&off, 4), None);
+        assert_eq!(
+            effective_universes(
+                &MctsConfig {
+                    common_random_numbers: Some(0),
+                    ..off
+                },
+                4
+            ),
+            None
+        );
+        assert_eq!(
+            effective_universes(
+                &MctsConfig {
+                    common_random_numbers: Some(usize::MAX),
+                    ..off
+                },
+                4
+            ),
+            Some(4)
+        );
     }
 
     /// A large cumulative reward must not overflow the exponential.
