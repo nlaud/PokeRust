@@ -200,7 +200,7 @@ use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
 use super::chance::ChanceMode;
-use super::eval::{self, LeafEvaluator};
+use super::eval::{self, BatchEvaluator, EvalContext, LeafEvaluator, PolicyFeatures};
 use super::matrix::EPS;
 use super::search::strategy_of;
 use super::{JointActionProb, SolveError, SolveWarning};
@@ -252,6 +252,19 @@ pub struct MctsConfig {
     pub transition: TransitionMode,
     /// Scores positions at the depth horizon.
     pub eval: LeafEvaluator,
+    /// Scores a slice of positions in one call; see [`eval::BatchEvaluator`].
+    ///
+    /// This search is depth first, so it reaches one leaf at a time and never
+    /// calls this pointer. A model evaluator and a parallel search need the
+    /// entry point.
+    pub eval_batch: Option<BatchEvaluator>,
+    /// Orders each action list by the policy score of
+    /// [`eval::policy_scores`] before progressive widening takes its prefix.
+    ///
+    /// `false` keeps [`actions::coverage_order`]. The flag changes only which
+    /// actions a narrow prefix reaches, because no other part of the search
+    /// reads the policy.
+    pub policy_prior: bool,
     /// Maximum joint actions for each player.
     /// `None` keeps the complete action set.
     pub max_actions_per_player: Option<usize>,
@@ -371,7 +384,9 @@ impl Default for MctsConfig {
             damage_rolls: 1,
             consider_crit: false,
             transition: TransitionMode::Enumerated(ChanceMode::Enumerate),
-            eval: eval::heuristic,
+            eval: eval::fitted,
+            eval_batch: None,
+            policy_prior: false,
             max_actions_per_player: None,
             prune_dominated_actions: false,
             max_forced_chain: 8,
@@ -953,6 +968,19 @@ struct MctsContext<'a> {
 }
 
 impl MctsContext<'_> {
+    /// Scores one position with the configured leaf evaluator.
+    ///
+    /// The evaluator reads the move dex, so every call site builds the same
+    /// context here instead of assembling one of its own.
+    fn score(&self, battle: &BattleState) -> f64 {
+        (self.cfg.eval)(battle, &self.eval_context())
+    }
+
+    /// The context that the evaluator and the policy both read.
+    fn eval_context(&self) -> EvalContext<'_> {
+        EvalContext::new(self.pokemon_dex, self.move_dex)
+    }
+
     /// Sample one path from `state`, and return P1's value of that path.
     fn iterate(&mut self, state: &MatchState, depth: u8, chain: u8) -> f64 {
         let battle = match state {
@@ -963,7 +991,7 @@ impl MctsContext<'_> {
             MatchState::BattleState(battle) => battle,
         };
         if depth == 0 {
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
 
         let key = (hash_state(state), depth, chain);
@@ -974,7 +1002,7 @@ impl MctsContext<'_> {
             // A new node holds no experience, so it has no strategy to play.
             // The static score goes back to the parent, and the next visit
             // plays an action here.
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
 
         let (p1_strategy, p2_strategy, p1_index, p2_index, p1_commands, p2_commands) = {
@@ -1011,7 +1039,7 @@ impl MctsContext<'_> {
                 self.iterate(&child, child_depth, child_chain)
             }
             // The engine returned no outcome. Score the position instead.
-            None => (self.cfg.eval)(battle),
+            None => self.score(battle),
         };
 
         let node = self
@@ -1064,12 +1092,19 @@ impl MctsContext<'_> {
         let phase = actions::phase_of(state);
         let mut p1_actions = self.joint_actions(battle, Player::P1, phase);
         let mut p2_actions = self.joint_actions(battle, Player::P2, phase);
-        // The allowed set is a prefix of the list, so the coverage order decides
-        // which choices a narrow prefix holds. A search without widening keeps
-        // the generated order, and therefore keeps its current results.
+        // The allowed set is a prefix of the list, so the order decides which
+        // choices a narrow prefix holds. A search without widening keeps the
+        // generated order, and therefore keeps its current results.
         if self.cfg.widening.is_some() {
-            reorder_by_coverage(&mut p1_actions);
-            reorder_by_coverage(&mut p2_actions);
+            if self.cfg.policy_prior {
+                let ctx = self.eval_context();
+                let weights = eval::fitted_policy_weights();
+                reorder_by_policy(&mut p1_actions, battle, Player::P1, &ctx, weights);
+                reorder_by_policy(&mut p2_actions, battle, Player::P2, &ctx, weights);
+            } else {
+                reorder_by_coverage(&mut p1_actions);
+                reorder_by_coverage(&mut p2_actions);
+            }
         }
         // The pool uses the search stream. Thus, one search seed gives one result.
         let universes = UniversePool::new(self.universes);
@@ -1260,6 +1295,40 @@ impl MctsContext<'_> {
 /// this rewrite drops no action and `total` stays correct.
 fn reorder_by_coverage(joint: &mut JointActions) {
     let order = actions::coverage_order(&joint.actions);
+    apply_order(joint, &order);
+}
+
+/// Put the actions of one player in the policy order.
+///
+/// The highest policy score comes first, so a narrow prefix holds the actions
+/// that the policy likes. A score tie keeps the generated order, which keeps
+/// the result stable inside one process.
+///
+/// This rewrite is a permutation, so it drops no action and `total` stays
+/// correct.
+fn reorder_by_policy(
+    joint: &mut JointActions,
+    battle: &BattleState,
+    player: Player,
+    ctx: &EvalContext<'_>,
+    weights: &PolicyFeatures,
+) {
+    let scores: Vec<f64> = joint
+        .actions
+        .iter()
+        .map(|action| eval::policy_score(battle, player, action, ctx, weights))
+        .collect();
+    let mut order: Vec<usize> = (0..joint.actions.len()).collect();
+    order.sort_by(|&left, &right| {
+        scores[right]
+            .total_cmp(&scores[left])
+            .then_with(|| left.cmp(&right))
+    });
+    apply_order(joint, &order);
+}
+
+/// Rewrite an action list into the given permutation.
+fn apply_order(joint: &mut JointActions, order: &[usize]) {
     let reordered: Vec<Vec<BattleCommand>> = order
         .iter()
         .map(|&index| joint.actions[index].clone())

@@ -54,6 +54,7 @@ use std::hash::{Hash, Hasher};
 use poke_rust::benchmarking::{SolverRow, run_solver};
 use poke_rust::simulator::{simulate_turn, team_preview_state_from_teamsheets};
 use poke_rust::solver::chance::ChanceMode;
+use poke_rust::solver::eval::{self, EvalContext};
 use poke_rust::solver::{SolveConfig, solve};
 use poke_rust::state::battle::{MatchState, Player, PlayerCommand, TeamPreviewCommand};
 use poke_rust::state::dex_data::{parse_move_dex, parse_pokemon_dex};
@@ -181,13 +182,18 @@ fn print_pruning_summary(rows: &[SolverRow]) {
     }
 }
 
-/// Solve one real teamsheet matchup and print the equilibrium.
+/// The teamsheet pair that the sample position and the leaf-cost measurement
+/// both use.
+const SAMPLE_SHEETS: (&str, &str) = (
+    "../teamsheets/MA_dragonite_rain.txt",
+    "../teamsheets/MB_gyarados_volcarona.txt",
+);
+
+/// Resolves one fixed teamsheet matchup into its first battle position.
 ///
-/// The table above measures cost; this shows what is actually being bought. It
-/// is also the sweep's end-to-end sanity check on a genuine position — the
-/// probabilities are printed rather than asserted, so a strategy that failed to
-/// sum to 1 or win odds outside `[0, 1]` would be visible at a glance.
-fn print_sample_solve(
+/// The leads are fixed and the most probable branch wins the draw, so the
+/// position is the same on every run.
+fn sample_position(
     pokemon_dex: &std::collections::HashMap<
         poke_rust::data::species::Species,
         poke_rust::state::dex_data::PokemonData,
@@ -196,16 +202,11 @@ fn print_sample_solve(
         poke_rust::data::pokemon_move::PokemonMove,
         poke_rust::state::dex_data::MoveData,
     >,
-) {
-    let (p1_sheet, p2_sheet) = (
-        "../teamsheets/MA_dragonite_rain.txt",
-        "../teamsheets/MB_gyarados_volcarona.txt",
+) -> Option<MatchState> {
+    let (p1_sheet, p2_sheet) = SAMPLE_SHEETS;
+    let preview = team_preview_state_from_teamsheets(
+        p1_sheet, p2_sheet, pokemon_dex, move_dex, 1, 3, true,
     );
-    let (active, brought) = (1u8, 3u8);
-
-    let preview =
-        team_preview_state_from_teamsheets(p1_sheet, p2_sheet, pokemon_dex, move_dex, active, brought, true);
-    // Fixed leads, so the printed position is the same on every run.
     let picks = || {
         PlayerCommand::TeamPreview(TeamPreviewCommand {
             active_indices: vec![0],
@@ -213,7 +214,7 @@ fn print_sample_solve(
         })
     };
 
-    let Some(state) = simulate_turn(
+    simulate_turn(
         &MatchState::TeamPreviewState(preview),
         &picks(),
         &picks(),
@@ -230,8 +231,136 @@ fn print_sample_solve(
         (hasher.finish(), state, probability)
     })
     .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| b.0.cmp(&a.0)))
-    .map(|(_, state, _)| state) else {
-        eprintln!("sample solve: team preview produced no branches");
+    .map(|(_, state, _)| state)
+}
+
+/// The weights of the evaluator before the matchup features existed.
+///
+/// Health, status, boosts, and hazards keep their weights, and every matchup
+/// weight is zero.
+///
+/// This vector answers the search-shape question. A more discriminating
+/// evaluator gives double oracle different best responses, so the two runs
+/// differ in how many cells they reach. `even` cannot answer that question,
+/// because a constant evaluator makes every cell equal and the oracle stops at
+/// its first pair.
+///
+/// It does not answer the leaf-cost question. [`features`] runs whatever the
+/// weights are, so this vector costs one full feature vector like the others.
+///
+/// [`features`]: poke_rust::solver::eval::features
+fn legacy_weights() -> poke_rust::solver::eval::Features {
+    let mut weights = eval::HAND_WEIGHTS;
+    for value in weights.iter_mut().skip(5) {
+        *value = 0.0;
+    }
+    weights
+}
+
+/// Scores a position as the evaluator did before the matchup features existed.
+fn legacy(
+    state: &poke_rust::state::battle::BattleState,
+    ctx: &EvalContext<'_>,
+) -> f64 {
+    eval::score_with(state, ctx, &legacy_weights())
+}
+
+/// Time one leaf evaluation of each shipped weight vector.
+///
+/// Search cost comes mainly from `simulate_turn`, so a leaf has to stay far
+/// below one turn resolution. The threat features cost damage calculations, and
+/// this row is what says how much.
+fn print_leaf_cost(
+    pokemon_dex: &std::collections::HashMap<
+        poke_rust::data::species::Species,
+        poke_rust::state::dex_data::PokemonData,
+    >,
+    move_dex: &std::collections::HashMap<
+        poke_rust::data::pokemon_move::PokemonMove,
+        poke_rust::state::dex_data::MoveData,
+    >,
+) {
+    let Some(MatchState::BattleState(battle)) = sample_position(pokemon_dex, move_dex) else {
+        eprintln!("leaf cost: preview did not resolve into a battle");
+        return;
+    };
+    let ctx = EvalContext::new(pokemon_dex, move_dex);
+    let repeats = 20_000;
+
+    println!();
+    println!("Leaf evaluation cost — one call, averaged over {repeats} calls");
+    for (name, evaluator) in [
+        // `even` computes no feature, so it is the floor that the feature frame
+        // is measured against. The evaluator before this frame read no move
+        // data, and it sat near this floor.
+        ("even", eval::even as poke_rust::solver::eval::LeafEvaluator),
+        ("legacy", legacy as poke_rust::solver::eval::LeafEvaluator),
+        ("heuristic", eval::heuristic as poke_rust::solver::eval::LeafEvaluator),
+        ("fitted", eval::fitted as poke_rust::solver::eval::LeafEvaluator),
+    ] {
+        // One untimed call warms the weight cache and the branch predictor.
+        let mut sink = evaluator(&battle, &ctx);
+        let started = std::time::Instant::now();
+        for _ in 0..repeats {
+            sink += evaluator(&battle, &ctx);
+        }
+        // A leaf costs a few microseconds, so `fmt_time` would round it to one
+        // digit. Print nanoseconds instead.
+        let elapsed = started.elapsed().as_secs_f64() / f64::from(repeats);
+        println!(
+            "  {name:>10}: {:.0}ns  (checksum {sink:.3})",
+            elapsed * 1e9
+        );
+    }
+
+    // A leaf is cheap on its own, and a search reaches many more leaves than
+    // turns. These rows are what the feature frame costs one whole solve, and
+    // how much the sharper leaf values move the double-oracle search.
+    let state = MatchState::BattleState(battle);
+    println!();
+    println!("Depth-2 solve of the same position, one roll, exact outcomes");
+    for (name, evaluator) in [
+        ("legacy", legacy as poke_rust::solver::eval::LeafEvaluator),
+        ("fitted", eval::fitted as poke_rust::solver::eval::LeafEvaluator),
+    ] {
+        let config = SolveConfig {
+            depth: 2,
+            damage_rolls: 1,
+            chance: ChanceMode::Enumerate,
+            eval: evaluator,
+            ..SolveConfig::default()
+        };
+        match solve(&state, pokemon_dex, move_dex, &config) {
+            Ok(result) => println!(
+                "  {name:>10}: {:>8}  {} turns  value {:.4}",
+                fmt_time(result.stats.elapsed.as_secs_f64()),
+                fmt_count(result.stats.turns_simulated as f64),
+                result.value,
+            ),
+            Err(error) => println!("  {name:>10}: failed: {error}"),
+        }
+    }
+}
+
+/// Solve one real teamsheet matchup and print the equilibrium.
+///
+/// The table above measures cost; this shows what is actually being bought. It
+/// is also the sweep's end-to-end sanity check on a genuine position — the
+/// probabilities are printed rather than asserted, so a strategy that failed to
+/// sum to 1 or win odds outside `[0, 1]` would be visible at a glance.
+fn print_sample_solve(
+    pokemon_dex: &std::collections::HashMap<
+        poke_rust::data::species::Species,
+        poke_rust::state::dex_data::PokemonData,
+    >,
+    move_dex: &std::collections::HashMap<
+        poke_rust::data::pokemon_move::PokemonMove,
+        poke_rust::state::dex_data::MoveData,
+    >,
+) {
+    let (p1_sheet, p2_sheet) = SAMPLE_SHEETS;
+    let Some(state) = sample_position(pokemon_dex, move_dex) else {
+        eprintln!("sample solve: team preview produced no battle position");
         return;
     };
     let MatchState::BattleState(battle) = &state else {
@@ -297,6 +426,13 @@ fn main() {
     let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
     let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
+    // The sweep runs for many minutes. `--leaf-cost` re-measures the evaluator
+    // alone, which is what a weight or feature change needs.
+    if std::env::args().any(|argument| argument == "--leaf-cost") {
+        print_leaf_cost(&pokemon_dex, &move_dex);
+        return;
+    }
+
     let mut last_reported = 0usize;
     let rows = run_solver(&pokemon_dex, &move_dex, &mut |done, total| {
         // One line per ten cells: the sweep runs for minutes and a silent
@@ -312,4 +448,5 @@ fn main() {
     print_table(&rows);
     print_pruning_summary(&rows);
     print_sample_solve(&pokemon_dex, &move_dex);
+    print_leaf_cost(&pokemon_dex, &move_dex);
 }

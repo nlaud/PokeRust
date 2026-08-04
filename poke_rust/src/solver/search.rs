@@ -58,6 +58,7 @@ use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, Playe
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
+use super::eval::EvalContext;
 use super::matrix::{self, EPS, MatrixSolution};
 use super::{
     JointActionProb, SolveConfig, SolveError, SolveResult, SolveStats, SolveWarning,
@@ -308,6 +309,14 @@ impl<'a> SearchContext<'a> {
         }
     }
 
+    /// Scores one position with the configured leaf evaluator.
+    ///
+    /// The evaluator reads the move dex, so every call site builds the same
+    /// context here instead of assembling one of its own.
+    fn score(&self, battle: &BattleState) -> f64 {
+        (self.cfg.eval)(battle, &EvalContext::new(self.pokemon_dex, self.move_dex))
+    }
+
     /// Whether serialized alpha-beta bounds should be computed at each node.
     fn serial_bounds_enabled(&self) -> bool {
         self.cfg.algorithm == SolverAlgorithm::SerializedBounds || self.cfg.use_serialized_bounds
@@ -371,7 +380,7 @@ impl<'a> SearchContext<'a> {
         };
 
         if depth == 0 || self.should_stop() {
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
 
         let key = hash_state(state) ^ SALT_SIMULTANEOUS;
@@ -575,7 +584,7 @@ impl<'a> SearchContext<'a> {
         // Check here to stop new turn simulations after the deadline.
         if self.deadline_expired() {
             let battle = as_battle(state).expect("cell_value requires a battle position");
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
         let branches = self.resolve(state, p1_commands, p2_commands);
 
@@ -618,7 +627,7 @@ impl<'a> SearchContext<'a> {
             MatchState::BattleState(battle) => battle,
         };
         if depth == 0 || self.should_stop() {
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
 
         let phase = actions::phase_of(state);
@@ -702,7 +711,7 @@ impl<'a> SearchContext<'a> {
         // A deadline can expire after serial_ab starts and before it resolves a cell.
         if self.deadline_expired() {
             let battle = as_battle(state).expect("serial_cell requires a battle position");
-            return (self.cfg.eval)(battle);
+            return self.score(battle);
         }
         let branches = self.resolve(state, p1_commands, p2_commands);
 

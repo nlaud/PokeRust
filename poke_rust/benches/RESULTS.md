@@ -183,3 +183,133 @@ doubles      1     4 enumerate        25.3k        11.9k    2.12x
 - Peak memory use was 87 MB. Normal memory use was about 20 MB.
 - Depth-first search keeps memory use proportional to depth and branching.
 - Singles often have pure equilibria. Doubles need mixed equilibria more often.
+
+## 2026-08-04: Evaluator training
+
+- Machine: Windows 11 with 31.5 GB of RAM
+- Build: release profile
+- Total training time: about 67 seconds
+
+`solver::eval` now scores a position from a named feature vector and a weight
+vector.
+Each feature is a P1 quantity minus the matching P2 quantity.
+A mirrored position therefore negates every feature, and the logistic map
+returns one minus the original score.
+Side-swap symmetry holds for every weight vector, fitted or hand-set.
+
+`bin/train_eval` produced both weight files.
+
+```sh
+cargo run --release --bin train_eval -- --positions 400 --label-depth 2 --seed 1
+```
+
+Both weight files held `eval::HAND_WEIGHTS` and `eval::HAND_POLICY_WEIGHTS`
+when the run started.
+A label comes from a search that scores its own horizon with the committed
+weights, so the run below is one improvement step from the hand-set vectors.
+Restore both files to the hand-set values before a rerun.
+
+The corpus draws two teams from the usage cache, plays twelve turns of random
+legal commands, and records the position before each turn.
+A state hash removes a repeated position.
+Each label is an exact solve at depth two, with no node budget.
+
+### Value model
+
+| Weights | Train loss | Train MAE | Held-out loss | Held-out MAE |
+|---|---|---|---|---|
+| hand-set | 0.6349 | 0.0800 | 0.6349 | 0.0694 |
+| fitted | 0.6257 | 0.0637 | 0.6307 | 0.0623 |
+
+`weights/eval_v1.json`:
+
+```text
+health           +1.3291
+status           -1.0962
+boosts           +0.1056
+accuracy_evasion +0.0294
+hazards          -1.1159
+threat           +0.5347
+guaranteed_kill  +0.0140
+possible_kill    -0.0659
+speed            +0.0819
+protect          -0.0932
+tera             +0.0866
+mega             +0.2263
+screens          +0.0980
+```
+
+### Policy model
+
+| Weights | Train loss | Train top-1 | Held-out loss | Held-out top-1 |
+|---|---|---|---|---|
+| hand-set | 2.6222 | 0.257 | 2.3635 | 0.304 |
+| fitted | 1.8474 | 0.229 | 1.7213 | 0.291 |
+
+`weights/policy_v1.json`:
+
+```text
+damage      +2.1196
+kill        -0.2239
+accuracy    -0.4844
+priority    +0.0452
+faster      +0.1632
+switch      +0.7825
+protect     -0.4695
+status_move +0.3782
+```
+
+### Evaluator cost
+
+`cargo bench --bench solver_speed -- --leaf-cost` measures the evaluator alone.
+It skips the sweep, so a weight change or a feature change costs seconds to
+re-measure.
+
+The position is the first battle state of `MA_dragonite_rain.txt` against
+`MB_gyarados_volcarona.txt`, singles, fixed leads.
+
+| Evaluator | One leaf |
+|---|---|
+| `even` | 2 ns |
+| legacy weights | 3255 ns |
+| `heuristic` | 3339 ns |
+| `fitted` | 3353 ns |
+
+`features` runs whatever the weights are, so the legacy row costs a full feature
+vector. It measures the search shape, not the leaf cost. `even` is the floor.
+
+| Evaluator | Depth-2 solve | Turns | Value |
+|---|---|---|---|
+| legacy weights | 202.02 ms | 3.0k | 0.5642 |
+| `fitted` | 191.33 ms | 2.9k | 0.6421 |
+
+The sweep table of 2026-07-28 was not re-recorded in this session.
+
+## Takeaways
+
+- One leaf costs about 3.3 microseconds, against about 50 microseconds for a
+  one-roll singles turn.
+- The whole feature vector is that cost. The weights are a dot product.
+- The threat feature asks `get_possible_commands_for_active_slot` which moves a
+  slot may still pick, so a move without PP scores nothing. That check is about
+  a third of the leaf cost.
+- A depth-2 solve of the sample position spends most of its 191 milliseconds in
+  `simulate_turn`, so turn resolution still dominates.
+- The sharper leaf values did not cost the search anything here. Double oracle
+  reached fewer cells with the fitted weights than with the legacy weights.
+- The fitted value weights beat the hand-set weights on both splits.
+- `SolveConfig::eval` and `MctsConfig::eval` therefore default to `eval::fitted`.
+- The health and hazard weights moved little, so the original scale was close.
+- The threat weight rose from 0.30 to 0.53, so the matchup carries real signal.
+- Both kill weights sit near zero.
+- One damage roll gives one branch, so a certain kill and a likely kill differ
+  only by accuracy.
+- Random play rarely reaches a position where a kill is in range, so the corpus
+  teaches those two features little.
+- A larger corpus needs more damage rolls, or more decided positions.
+- The policy fit lowered the held-out cross entropy from 2.36 to 1.72, and it
+  lowered held-out top-1 agreement from 0.304 to 0.291.
+- Cross entropy scores the whole mixture, and top-1 scores only the mode. The
+  two measures disagree on 400 positions.
+- `MctsConfig::policy_prior` therefore stays `false`. The flag changes only the
+  widening prefix.

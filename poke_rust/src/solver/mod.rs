@@ -111,6 +111,7 @@ pub mod matrix;
 pub mod mcts;
 pub mod preview;
 pub mod search;
+pub mod train;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -123,7 +124,7 @@ use crate::state::battle::{BattleCommand, MatchState, Player};
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use chance::ChanceMode;
-use eval::LeafEvaluator;
+use eval::{BatchEvaluator, LeafEvaluator};
 
 /// Selects one solver algorithm.
 /// All algorithms must compute the same value.
@@ -159,6 +160,12 @@ pub struct SolveConfig {
     pub algorithm: SolverAlgorithm,
     /// Scores positions at the depth horizon; see [`eval::LeafEvaluator`].
     pub eval: LeafEvaluator,
+    /// Scores a slice of positions in one call; see [`eval::BatchEvaluator`].
+    ///
+    /// The search is depth first, so it reaches one leaf at a time and never
+    /// calls this pointer. A model evaluator and a parallel search need the
+    /// entry point, and [`eval::score_batch`] routes to it.
+    pub eval_batch: Option<BatchEvaluator>,
     /// Enables serialized bounds during double-oracle search.
     /// Each bound requires an auxiliary search.
     pub use_serialized_bounds: bool,
@@ -201,7 +208,8 @@ impl Default for SolveConfig {
             consider_crit: false,
             chance: ChanceMode::Enumerate,
             algorithm: SolverAlgorithm::DoubleOracle,
-            eval: eval::heuristic,
+            eval: eval::fitted,
+            eval_batch: None,
             use_serialized_bounds: false,
             max_actions_per_player: None,
             prune_dominated_actions: false,

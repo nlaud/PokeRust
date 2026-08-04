@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::data::ability::Ability;
+use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::determinize::DeterminizeConfig;
@@ -3231,3 +3232,703 @@ fn control_variates_lower_the_exploitability_gap() {
         "the baseline scored {corrected}, the plain estimate scored {plain}"
     );
 }
+
+// ── The leaf evaluator ──────────────────────────────────────────────────────
+
+/// The context that every evaluator test uses.
+fn eval_ctx() -> eval::EvalContext<'static> {
+    let (pokemon_dex, move_dex) = dexes();
+    eval::EvalContext::new(pokemon_dex, move_dex)
+}
+
+/// Reads one named feature of a position.
+fn feature(state: &crate::state::battle::BattleState, name: &str) -> f64 {
+    let index = eval::FEATURE_NAMES
+        .iter()
+        .position(|stored| *stored == name)
+        .unwrap_or_else(|| panic!("no feature named {name}"));
+    eval::features(state, &eval_ctx())[index]
+}
+
+/// The weights of the evaluator before this feature frame existed.
+///
+/// Health, status, boosts, and hazards keep their weights, and every matchup
+/// weight is zero. The calibration test measures the new evaluator against this
+/// baseline.
+fn legacy_weights() -> eval::Features {
+    let mut weights = eval::HAND_WEIGHTS;
+    for value in weights.iter_mut().skip(5) {
+        *value = 0.0;
+    }
+    weights
+}
+
+/// Exchanges the two sides of a position.
+///
+/// Every side-owned field moves, so a mirrored position is the same game seen
+/// from the other seat.
+fn mirror(state: &crate::state::battle::BattleState) -> crate::state::battle::BattleState {
+    let mut out = state.clone();
+    std::mem::swap(&mut out.p1_active_mons, &mut out.p2_active_mons);
+    std::mem::swap(&mut out.p1_back_mons, &mut out.p2_back_mons);
+    std::mem::swap(&mut out.p1_side_conditions, &mut out.p2_side_conditions);
+    std::mem::swap(
+        &mut out.p1_side_condition_turns,
+        &mut out.p2_side_condition_turns,
+    );
+    std::mem::swap(&mut out.p1_slot_conditions, &mut out.p2_slot_conditions);
+    std::mem::swap(&mut out.p1_has_tera, &mut out.p2_has_tera);
+    std::mem::swap(&mut out.p1_has_mega, &mut out.p2_has_mega);
+    out
+}
+
+/// The feature frame is antisymmetric, so a mirrored position must score one
+/// minus the original. This holds for every weight vector, which is why the
+/// model carries no bias term. The test therefore runs both shipped vectors.
+#[test]
+fn side_swap_symmetry() {
+    let mut state = battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack],
+        )],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::BodySlam, PokemonMove::Crunch],
+        )],
+        vec![mon(Species::Gengar, &[PokemonMove::ShadowBall])],
+    );
+    state.p1_active_mons[0].hp /= 2;
+    state.p2_back_mons[0].status = Some(crate::state::dex_data::Status::Burn);
+    state
+        .p1_side_conditions
+        .push(crate::state::dex_data::SideCondition::StealthRock);
+    state.p1_side_condition_turns.push(0);
+    state.p2_has_tera = false;
+    state.p1_active_mons[0].boosts[1] = 2;
+
+    let flipped = mirror(&state);
+    for (name, score) in [
+        ("heuristic", eval::heuristic as eval::LeafEvaluator),
+        ("fitted", eval::fitted as eval::LeafEvaluator),
+    ] {
+        let original = score(&state, &eval_ctx());
+        let swapped = score(&flipped, &eval_ctx());
+        assert!(
+            (original + swapped - 1.0).abs() < 1e-9,
+            "{name}: {original} and {swapped} do not complement"
+        );
+    }
+}
+
+/// Every feature sums over slots or over slot pairs, so exchanging the two
+/// active slots of both sides cannot move the score.
+#[test]
+fn slot_order_symmetry() {
+    let mut state = battle_state_from_lists(
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+        ],
+        vec![],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+        vec![],
+    );
+    state.p1_active_mons[0].hp /= 2;
+
+    let mut exchanged = state.clone();
+    exchanged.p1_active_mons.swap(0, 1);
+    exchanged.p2_active_mons.swap(0, 1);
+
+    let original = eval::heuristic(&state, &eval_ctx());
+    let swapped = eval::heuristic(&exchanged, &eval_ctx());
+    assert!(
+        (original - swapped).abs() < 1e-9,
+        "{original} moved to {swapped} when the slots exchanged"
+    );
+}
+
+/// Two identical Pokemon differ only in what their move hits.
+///
+/// The old evaluator read no move data, so it scored this position at exactly
+/// 0.5. The threat feature is the reason the new one does not.
+#[test]
+fn a_super_effective_matchup_beats_a_resisted_one() {
+    // Gyarados is Water/Flying: Electric hits it for four times, Water for half.
+    let state = battle_state_from_lists(
+        vec![mon(Species::Gyarados, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![],
+    );
+
+    assert!(
+        feature(&state, "threat") > 0.0,
+        "the better matchup did not read as a larger threat"
+    );
+    let score = eval::heuristic(&state, &eval_ctx());
+    assert!(score > 0.5, "the better matchup scored {score}");
+    assert!(
+        (eval::score_with(&state, &eval_ctx(), &legacy_weights()) - 0.5).abs() < 1e-9,
+        "the baseline is supposed to be blind to this position"
+    );
+}
+
+/// A kill that every damage branch reaches is worth strictly more than a target
+/// that survives the same attack.
+#[test]
+fn a_guaranteed_kill_beats_a_possible_kill() {
+    // Tackle cannot remove a healthy Snorlax, so only the low-HP position
+    // reaches a kill.
+    let build = |target_hp: Option<u16>| {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, &[PokemonMove::Tackle])],
+            vec![],
+            vec![mon(Species::Snorlax, &[PokemonMove::Tackle])],
+            vec![],
+        );
+        if let Some(hp) = target_hp {
+            state.p2_active_mons[0].hp = hp;
+        }
+        state
+    };
+
+    let healthy = build(None);
+    let doomed = build(Some(1));
+
+    assert_eq!(feature(&healthy, "guaranteed_kill"), 0.0);
+    assert_eq!(feature(&doomed, "guaranteed_kill"), 1.0);
+    assert_eq!(feature(&doomed, "possible_kill"), 1.0);
+    assert!(eval::heuristic(&doomed, &eval_ctx()) > eval::heuristic(&healthy, &eval_ctx()));
+}
+
+/// One Speed stat decides the speed feature, and nothing else in the position
+/// moves.
+#[test]
+fn the_faster_side_scores_higher() {
+    let mut state = battle_state_from_lists(
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+    );
+    assert_eq!(feature(&state, "speed"), 0.0, "a speed tie scores nobody");
+
+    state.p1_active_mons[0].stats[5] += 20;
+    assert_eq!(feature(&state, "speed"), 1.0);
+    assert!(eval::heuristic(&state, &eval_ctx()) > 0.5);
+}
+
+/// Trick Room reverses the comparison, so the same position must change hands.
+#[test]
+fn trick_room_inverts_the_speed_feature() {
+    let mut state = battle_state_from_lists(
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+    );
+    state.p1_active_mons[0].stats[5] += 20;
+    let plain = feature(&state, "speed");
+
+    state
+        .pseudo_weathers
+        .push(crate::state::dex_data::PseudoWeather::TrickRoom);
+    state.pseudo_weather_turns.push(5);
+
+    assert_eq!(plain, 1.0);
+    assert_eq!(feature(&state, "speed"), -1.0);
+    assert!(eval::heuristic(&state, &eval_ctx()) < 0.5);
+}
+
+/// A Tera that a side has already spent is no longer a resource.
+#[test]
+fn an_unused_tera_is_worth_more_than_a_spent_one() {
+    let mut state = battle_state_from_lists(
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam])],
+        vec![],
+    );
+    assert_eq!(feature(&state, "tera"), 0.0, "both sides still hold it");
+
+    state.p2_has_tera = false;
+    assert_eq!(feature(&state, "tera"), 1.0);
+    assert!(eval::heuristic(&state, &eval_ctx()) > 0.5);
+}
+
+/// A Mega resource exists only while a living team member can use it.
+#[test]
+fn the_mega_feature_requires_an_eligible_team_member() {
+    let (pokemon_dex, move_dex) = dexes();
+    let build = |item| {
+        build_pokemon_state(
+            Species::Aerodactyl,
+            pokemon_dex,
+            move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Serious),
+            Some(item),
+            None,
+            Some([0; 6]),
+            Some([31; 6]),
+            false,
+        )
+    };
+    let mut state = battle_state_from_lists(
+        vec![build(Item::Aerodactylite)],
+        vec![],
+        vec![build(Item::None)],
+        vec![],
+    );
+    state.p1_has_mega = true;
+    state.p2_has_mega = true;
+
+    assert_eq!(feature(&state, "mega"), 1.0);
+
+    state.p1_active_mons[0].hp = 0;
+    state.p1_active_mons[0].fainted = true;
+    assert_eq!(feature(&state, "mega"), 0.0);
+}
+
+/// An attack with no PP is not a threat at the search horizon.
+#[test]
+fn the_threat_feature_ignores_an_exhausted_move() {
+    let mut state = battle_state_from_lists(
+        vec![mon(Species::Gyarados, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![],
+    );
+    assert!(feature(&state, "threat") > 0.0);
+
+    state.p1_active_mons[0].move_pp[0] = 0;
+    assert!(feature(&state, "threat") < 0.0);
+}
+
+/// The policy must use the Mega form for a Mega attack estimate.
+#[test]
+fn the_policy_scores_a_mega_attack_with_mega_stats() {
+    let (pokemon_dex, move_dex) = dexes();
+    let attacker = build_pokemon_state(
+        Species::Aerodactyl,
+        pokemon_dex,
+        move_dex,
+        Some(50),
+        Some([Some(PokemonMove::Tackle), None, None, None]),
+        None,
+        Some(Ability::None),
+        Some(Nature::Serious),
+        Some(Item::Aerodactylite),
+        None,
+        Some([0; 6]),
+        Some([31; 6]),
+        false,
+    );
+    let mut state = battle_state_from_lists(
+        vec![attacker],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Tackle])],
+        vec![],
+    );
+    state.p1_has_tera = false;
+    state.p1_has_mega = true;
+
+    let legal = solver_actions::joint_actions(
+        &state,
+        Player::P1,
+        solver_actions::Phase::Normal,
+        move_dex,
+        pokemon_dex,
+        None,
+        false,
+    );
+    let features = |mega_evolve| {
+        let action = legal
+            .actions
+            .iter()
+            .find(|action| {
+                matches!(
+                    action.as_slice(),
+                    [BattleCommand::Attack(attack)]
+                        if attack.move_slot == 0 && attack.mega_evolve == mega_evolve
+                )
+            })
+            .expect("the attack variant must be legal");
+        eval::policy_features(&state, Player::P1, action, &eval_ctx())
+    };
+
+    let base = features(false);
+    let mega = features(true);
+    assert!(mega[0] > base[0], "Mega damage did not increase");
+}
+
+/// The protecting move succeeds with probability `1 / 3^streak`, so the feature
+/// decays with the same rule.
+#[test]
+fn protect_pressure_decays_with_the_stall_counter() {
+    let mut state = battle_state_from_lists(
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::BodySlam, PokemonMove::Protect],
+        )],
+        vec![],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::BodySlam, PokemonMove::Protect],
+        )],
+        vec![],
+    );
+    assert_eq!(feature(&state, "protect"), 0.0, "both sides can still stall");
+
+    state.p1_active_mons[0].stall_counter = 2;
+    let expected = 1.0 / 9.0 - 1.0;
+    assert!((feature(&state, "protect") - expected).abs() < 1e-12);
+    assert!(eval::heuristic(&state, &eval_ctx()) < 0.5);
+}
+
+/// The batch entry point must agree with the scalar evaluator, and it must hand
+/// over to a supplied batch pointer.
+#[test]
+fn score_batch_matches_the_scalar_evaluator() {
+    let first = battle_state_from_lists(
+        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt])],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![],
+    );
+    let mut second = first.clone();
+    second.p2_active_mons[0].hp /= 4;
+    let states = [&first, &second];
+
+    let mut out = vec![7.0; 5];
+    eval::score_batch(&states, &eval_ctx(), eval::heuristic, None, &mut out);
+    assert_eq!(out.len(), 2, "the loop must clear the buffer first");
+    assert_eq!(out[0], eval::heuristic(&first, &eval_ctx()));
+    assert_eq!(out[1], eval::heuristic(&second, &eval_ctx()));
+
+    fn constant(
+        states: &[&crate::state::battle::BattleState],
+        _: &eval::EvalContext<'_>,
+        out: &mut Vec<f64>,
+    ) {
+        out.clear();
+        out.extend(std::iter::repeat_n(0.25, states.len()));
+    }
+    eval::score_batch(
+        &states,
+        &eval_ctx(),
+        eval::heuristic,
+        Some(constant),
+        &mut out,
+    );
+    assert_eq!(out, vec![0.25, 0.25]);
+}
+
+/// Six positions whose health is equal and whose matchup is not.
+///
+/// The exact search at depth 2 gives each one a value. The baseline evaluator
+/// reads no move data, so it answers 0.5 everywhere and cannot order them at
+/// all. The shipped evaluator must beat it on both counts.
+#[test]
+fn calibration_tracks_the_exact_search() {
+    let (pokemon_dex, move_dex) = dexes();
+    let matchups: [(Species, PokemonMove, Species, PokemonMove); 6] = [
+        (
+            Species::Gyarados,
+            PokemonMove::Thunderbolt,
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+        ),
+        (
+            Species::Snorlax,
+            PokemonMove::BodySlam,
+            Species::Snorlax,
+            PokemonMove::BodySlam,
+        ),
+        (
+            Species::Gengar,
+            PokemonMove::ShadowBall,
+            Species::Snorlax,
+            PokemonMove::BodySlam,
+        ),
+        (
+            Species::Pikachu,
+            PokemonMove::Thunderbolt,
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+        ),
+        (
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+            Species::Pikachu,
+            PokemonMove::Thunderbolt,
+        ),
+        (
+            Species::Snorlax,
+            PokemonMove::Crunch,
+            Species::Gengar,
+            PokemonMove::ShadowBall,
+        ),
+    ];
+
+    let config = SolveConfig {
+        depth: 2,
+        ..base_config()
+    };
+    let mut searched = Vec::new();
+    let mut fitted = Vec::new();
+    let mut baseline = Vec::new();
+    for (p1_species, p1_move, p2_species, p2_move) in matchups {
+        let battle = battle_state_from_lists(
+            vec![mon(p1_species, &[p1_move])],
+            vec![],
+            vec![mon(p2_species, &[p2_move])],
+            vec![],
+        );
+        let state = MatchState::BattleState(battle.clone());
+        let result = solve(&state, pokemon_dex, move_dex, &config).expect("a solvable position");
+        searched.push(result.value);
+        fitted.push(eval::fitted(&battle, &eval_ctx()));
+        baseline.push(eval::score_with(&battle, &eval_ctx(), &legacy_weights()));
+    }
+
+    let error = |scores: &[f64]| -> f64 {
+        scores
+            .iter()
+            .zip(searched.iter())
+            .map(|(score, truth)| (score - truth).abs())
+            .sum::<f64>()
+            / searched.len() as f64
+    };
+    // Concordant pairs: how often two positions are ordered as the search
+    // orders them. The baseline ties every pair, so it scores zero.
+    let concordance = |scores: &[f64]| -> i32 {
+        let mut total = 0;
+        for left in 0..scores.len() {
+            for right in (left + 1)..scores.len() {
+                let ours = scores[left].total_cmp(&scores[right]);
+                let theirs = searched[left].total_cmp(&searched[right]);
+                if ours == std::cmp::Ordering::Equal {
+                    continue;
+                }
+                if ours == theirs {
+                    total += 1;
+                } else {
+                    total -= 1;
+                }
+            }
+        }
+        total
+    };
+
+    assert!(
+        error(&fitted) < error(&baseline),
+        "fitted scored {:.4}, the baseline scored {:.4}",
+        error(&fitted),
+        error(&baseline)
+    );
+    assert!(
+        concordance(&fitted) > concordance(&baseline),
+        "fitted ordered {} pairs, the baseline ordered {}",
+        concordance(&fitted),
+        concordance(&baseline)
+    );
+}
+
+/// The shipped weight files must cover every feature that the code names.
+#[test]
+fn the_fitted_weights_parse_and_hold_one_value_for_each_feature() {
+    let values = eval::fitted_weights();
+    assert_eq!(values.len(), eval::FEATURE_COUNT);
+    assert!(values.iter().all(|value| value.is_finite()));
+
+    let policy = eval::fitted_policy_weights();
+    assert_eq!(policy.len(), eval::POLICY_FEATURE_COUNT);
+    assert!(policy.iter().all(|value| value.is_finite()));
+
+    // A name that the file omits keeps its hand-set fallback, which would hide
+    // a training run that never touched it. Read the files directly instead.
+    let value_file: eval::Weights =
+        serde_json::from_str(include_str!("../../weights/eval_v1.json"))
+            .expect("the value weight file parses");
+    for name in eval::FEATURE_NAMES {
+        assert!(value_file.get(name).is_some(), "the file omits {name}");
+    }
+    let policy_file: eval::Weights =
+        serde_json::from_str(include_str!("../../weights/policy_v1.json"))
+            .expect("the policy weight file parses");
+    for name in eval::POLICY_FEATURE_NAMES {
+        assert!(policy_file.get(name).is_some(), "the file omits {name}");
+    }
+}
+
+/// The policy must put a killing move above a weak one.
+#[test]
+fn the_policy_ranks_a_killing_move_first() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut battle = battle_state_from_lists(
+        vec![mon(
+            Species::Gyarados,
+            &[PokemonMove::Splash, PokemonMove::Thunderbolt],
+        )],
+        vec![],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![],
+    );
+    battle.p2_active_mons[0].hp = 1;
+
+    let legal = solver_actions::joint_actions(
+        &battle,
+        Player::P1,
+        solver_actions::Phase::Normal,
+        move_dex,
+        pokemon_dex,
+        None,
+        false,
+    );
+    let scores = eval::policy_scores(
+        &battle,
+        Player::P1,
+        &legal.actions,
+        &eval_ctx(),
+        eval::fitted_policy_weights(),
+    );
+    let best = crate::solver::train::argmax(&scores).expect("a nonempty action list");
+
+    let BattleCommand::Attack(attack) = &legal.actions[best][0] else {
+        panic!("the policy chose a command that is not an attack");
+    };
+    assert_eq!(
+        battle.p1_active_mons[0].moves[attack.move_slot],
+        Some(PokemonMove::Thunderbolt),
+        "the policy did not rank the killing move first"
+    );
+}
+
+/// The policy must agree with the exact search more often than the coverage
+/// order does.
+///
+/// The coverage order is the ordering that progressive widening uses without a
+/// policy, so it is the baseline that the flag has to beat.
+#[test]
+fn policy_agreement_with_the_exact_search() {
+    let (pokemon_dex, move_dex) = dexes();
+    let matchups: [(Species, [PokemonMove; 2], Species, PokemonMove); 8] = [
+        (
+            Species::Gyarados,
+            [PokemonMove::Splash, PokemonMove::Thunderbolt],
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+        ),
+        (
+            Species::Snorlax,
+            [PokemonMove::Splash, PokemonMove::BodySlam],
+            Species::Gengar,
+            PokemonMove::ShadowBall,
+        ),
+        (
+            Species::Pikachu,
+            [PokemonMove::Splash, PokemonMove::Thunderbolt],
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+        ),
+        (
+            Species::Gengar,
+            [PokemonMove::Splash, PokemonMove::ShadowBall],
+            Species::Gengar,
+            PokemonMove::ShadowBall,
+        ),
+        (
+            Species::Gyarados,
+            [PokemonMove::Splash, PokemonMove::Waterfall],
+            Species::Snorlax,
+            PokemonMove::BodySlam,
+        ),
+        (
+            Species::Snorlax,
+            [PokemonMove::Splash, PokemonMove::Crunch],
+            Species::Gengar,
+            PokemonMove::ShadowBall,
+        ),
+        (
+            Species::Pikachu,
+            [PokemonMove::Splash, PokemonMove::QuickAttack],
+            Species::Pikachu,
+            PokemonMove::Thunderbolt,
+        ),
+        (
+            Species::Gengar,
+            [PokemonMove::Splash, PokemonMove::SludgeBomb],
+            Species::Gyarados,
+            PokemonMove::Waterfall,
+        ),
+    ];
+
+    let config = SolveConfig {
+        depth: 1,
+        ..base_config()
+    };
+    let mut policy_hits = 0;
+    let mut coverage_hits = 0;
+
+    for (p1_species, p1_moves, p2_species, p2_move) in matchups {
+        let mut battle = battle_state_from_lists(
+            vec![mon(p1_species, &p1_moves)],
+            vec![],
+            vec![mon(p2_species, &[p2_move])],
+            vec![],
+        );
+        battle.p2_active_mons[0].hp = 1;
+        // Terastallization duplicates every attack command. Both copies kill a
+        // one-HP target, so the pair would tie and the comparison would measure
+        // a tie break instead of a ranking.
+        battle.p1_has_tera = false;
+        battle.p2_has_tera = false;
+
+        let legal = solver_actions::joint_actions(
+            &battle,
+            Player::P1,
+            solver_actions::Phase::Normal,
+            move_dex,
+            pokemon_dex,
+            None,
+            false,
+        );
+        let state = MatchState::BattleState(battle.clone());
+        let result = solve(&state, pokemon_dex, move_dex, &config).expect("a solvable position");
+        let Some(searched) = result.most_likely_action(Player::P1) else {
+            continue;
+        };
+
+        let scores = eval::policy_scores(
+            &battle,
+            Player::P1,
+            &legal.actions,
+            &eval_ctx(),
+            eval::fitted_policy_weights(),
+        );
+        let policy_best = crate::solver::train::argmax(&scores).expect("a nonempty action list");
+        if legal.actions[policy_best] == searched.commands {
+            policy_hits += 1;
+        }
+
+        let order = solver_actions::coverage_order(&legal.actions);
+        if legal.actions[order[0]] == searched.commands {
+            coverage_hits += 1;
+        }
+    }
+
+    assert!(
+        policy_hits > coverage_hits,
+        "the policy agreed {policy_hits} times, the coverage order agreed {coverage_hits}"
+    );
+}
+

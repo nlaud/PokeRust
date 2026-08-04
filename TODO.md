@@ -79,12 +79,23 @@ Neither lowers the error of the reported value.
 
 ### Evaluation
 
-- [ ] Calibrate or replace `solver::eval::heuristic`.
-  - [ ] Train value and policy models from deeper search or self-play.
-  - [ ] Include speed control, damage, KO ranges, Protect pressure, and targeting.
-  - [ ] Include field effects, status, boosts, bench resources, Tera, and Mega.
-  - [ ] Test calibration, side-swap symmetry, slot-order symmetry, and policy agreement.
-  - [ ] Add an evaluator API that supports batches and belief context.
+- [ ] Train the evaluator on a larger corpus.
+  - [ ] Raise the corpus above 400 positions and the label depth above 2.
+  - [ ] Replace the linear model when a larger corpus stops improving it.
+  - [ ] Give `guaranteed_kill` and `possible_kill` a corpus that separates them.
+  - [ ] Re-record the full `solver_speed` sweep against the new evaluator.
+
+`solver::eval` scores a position from a named feature vector and a weight
+vector.
+Each feature is a P1 quantity minus the matching P2 quantity, so side-swap
+symmetry holds for every weight vector.
+`weights/eval_v1.json` and `weights/policy_v1.json` hold the fitted vectors, and
+`bin/train_eval` produces both.
+
+One roll of the threat feature cannot separate a certain kill from a likely one,
+so the current corpus leaves both kill weights near zero.
+A larger corpus needs more damage rolls, or a corpus with more decided
+positions.
 
 ## Fog-of-war solver
 

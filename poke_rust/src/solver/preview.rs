@@ -75,11 +75,12 @@ use crate::information::unknowns::UnknownTeamPreviewState;
 use crate::meta::MetaDex;
 use crate::simulator::simulate_turn;
 use crate::state::battle::{
-    MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
+    BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
 };
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::chance::ChanceMode;
+use super::eval::EvalContext;
 use super::matrix::{self, EPS, OracleLimits, OracleSeed};
 use super::{SolveConfig, SolveWarning, solve};
 
@@ -1029,7 +1030,7 @@ impl<'a> PreviewContext<'a> {
         };
 
         if expired {
-            return (self.config.battle.eval)(battle);
+            return self.score(battle);
         }
 
         match solve(child, self.pokemon_dex, self.move_dex, &self.config.battle) {
@@ -1044,8 +1045,16 @@ impl<'a> PreviewContext<'a> {
             }
             // A finished battle arrives as a game-over state, and a preview state
             // cannot reach this line. Score the position instead of failing.
-            Err(_) => (self.config.battle.eval)(battle),
+            Err(_) => self.score(battle),
         }
+    }
+
+    /// Scores one position with the configured leaf evaluator.
+    ///
+    /// The evaluator reads the move dex, so every call site builds the same
+    /// context here instead of assembling one of its own.
+    fn score(&self, battle: &BattleState) -> f64 {
+        (self.config.battle.eval)(battle, &EvalContext::new(self.pokemon_dex, self.move_dex))
     }
 
     /// Checks the deadline and saves the result for the solve warning.
