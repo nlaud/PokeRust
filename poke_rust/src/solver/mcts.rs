@@ -54,6 +54,46 @@
 //! unbiased, because each chokepoint picks a branch in proportion to its weight,
 //! and this mode discards no outcome mass.
 //!
+//! # Stratified batches
+//!
+//! A chance node is one position, one P1 action, and one P2 action. The search
+//! visits that node once for every iteration that reaches it, and each visit
+//! resolves the same turn again.
+//!
+//! [`TransitionMode::Generative`] can spread those visits over a stratified
+//! batch. The `batch` field holds the member count.
+//!
+//! The search keeps one cursor for each chance node. The cursor names the plan
+//! seed of the current batch and the members that the node already used. A visit
+//! builds the plan, installs its member, and resolves the turn. The cursor draws
+//! a new seed after the last member, so the next group of visits forms a new
+//! batch.
+//!
+//! The batch therefore covers each random dimension of the turn across the unit
+//! interval instead of clustering by chance. Read
+//! [`simulator::stratify`](crate::simulator::stratify) for the construction and
+//! for the proof that one member keeps the law of one independent draw.
+//!
+//! The cursor key holds both action indexes, so every member of one batch
+//! resolves one position under one command pair. The engine gives one dimension
+//! to each chokepoint of more than one branch, so the dimension of a chokepoint
+//! stays the same across the batch. A cursor keyed by the position alone would
+//! mix members of different command pairs and lose that alignment.
+//!
+//! The search rebuilds the plan on each visit instead of storing it. A stored
+//! plan costs [`STRATIFIED_DIMENSIONS`] times the member count in indexes for
+//! every chance node. The rebuild costs that many permutations, which is small
+//! beside one `simulate_turn` call.
+//!
+//! [`STRATIFIED_DIMENSIONS`]:
+//!     crate::simulator::stratify::STRATIFIED_DIMENSIONS
+//!
+//! The search limits the batch to its iteration count. A larger plan has members
+//! that the search cannot use.
+//!
+//! A `batch` of one or zero installs no plan, so the search keeps the
+//! independent draw.
+//!
 //! # Progressive widening
 //!
 //! [`MctsConfig::widening`] limits a node to a prefix of its action list.
@@ -97,8 +137,9 @@ use rand::Rng;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::simulator::generative::{TransitionConfig, sample_transition};
+use crate::simulator::generative::{TransitionConfig, TransitionSample, sample_transition};
 use crate::simulator::helpers::sample_one_branch;
+use crate::simulator::stratify::StratifiedPlan;
 use crate::simulator::{scoped_sample_rng, simulate_turn, with_sample_rng};
 use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
@@ -183,7 +224,18 @@ pub enum TransitionMode {
     ///
     /// The engine never builds the outcome list, so a node costs one trajectory
     /// instead of one distribution. This mode discards no outcome mass.
-    Generative,
+    Generative {
+        /// Members of the stratified batch that one chance node draws.
+        ///
+        /// The search spreads one batch over consecutive visits of the node, so
+        /// this field costs no extra turn resolution. A value of one or zero
+        /// keeps the independent draw.
+        ///
+        /// A larger batch covers each random dimension more evenly, and it also
+        /// delays the point at which the node starts a fresh batch.
+        /// The search limits this value to [`MctsConfig::iterations`].
+        batch: usize,
+    },
 }
 
 /// The growth rule of progressive widening.
@@ -271,7 +323,10 @@ pub struct MctsSamplingError {
     pub mean: f64,
     /// The standard error of `mean`.
     /// This is the sample standard deviation divided by the square root of
-    /// `iterations`. One iteration gives `None`.
+    /// `iterations`.
+    ///
+    /// One iteration gives `None`. A stratified search also gives `None` because
+    /// its visits are dependent.
     pub standard_error: Option<f64>,
 }
 
@@ -340,13 +395,16 @@ pub fn search(
     // mean nothing. One turn is the minimum.
     let depth = config.depth.max(1);
     let iterations = config.iterations.max(1);
+    let batch = effective_batch(config.transition, iterations);
 
     let mut ctx = MctsContext {
         pokemon_dex,
         move_dex,
         cfg: config,
         exploration: config.exploration.clamp(MIN_EXPLORATION, 1.0),
+        batch,
         tree: HashMap::new(),
+        chance_cursors: BatchCursors::default(),
         stats: MctsStats::default(),
         max_discarded: 0.0,
         action_truncations: [None, None],
@@ -439,7 +497,10 @@ pub fn search(
         sampling: MctsSamplingError {
             iterations: values.count,
             mean: value,
-            standard_error: values.standard_error(),
+            standard_error: match batch {
+                Some(2..) => None,
+                _ => values.standard_error(),
+            },
         },
         stats,
         warnings,
@@ -634,6 +695,52 @@ impl Learner {
 /// and can never index outside a list.
 type NodeKey = (u64, u8, u8);
 
+/// One chance node: a decision point and one joint action of each player.
+///
+/// The two indexes address the action lists of the node that [`NodeKey`] names,
+/// so one key stands for one turn under one command pair.
+type ChanceKey = (NodeKey, usize, usize);
+
+/// Where one chance node stands in its stratified batch.
+struct BatchCursor {
+    /// The seed of the plan of the current batch.
+    seed: u64,
+    /// The members that this node already resolved, from zero.
+    used: usize,
+}
+
+/// The batch position of every chance node that the search reached.
+///
+/// The enumerated transition mode leaves this empty.
+#[derive(Default)]
+struct BatchCursors(HashMap<ChanceKey, BatchCursor>);
+
+impl BatchCursors {
+    /// The plan seed and the member index that this visit of `key` uses.
+    ///
+    /// The cursor advances by one member for each call. A cursor that used every
+    /// member of its batch draws a new seed. The next group of visits then covers
+    /// the dimensions again from a fresh plan.
+    ///
+    /// Each seed comes from the seeded stream of the search, so one search seed
+    /// still gives one result.
+    fn next_member(&mut self, key: ChanceKey, batch: usize) -> (u64, usize) {
+        let cursor = self.0.entry(key).or_insert_with(|| BatchCursor {
+            seed: draw_seed(),
+            used: 0,
+        });
+        let member = (cursor.seed, cursor.used);
+        cursor.used += 1;
+        // The last member closes the batch. A `batch` of zero cannot reach this
+        // type, because the caller keeps the independent draw below two members.
+        if cursor.used >= batch {
+            cursor.used = 0;
+            cursor.seed = draw_seed();
+        }
+        member
+    }
+}
+
 /// One decision point, with one learner for each player.
 struct Node {
     p1: Learner,
@@ -652,7 +759,10 @@ struct MctsContext<'a> {
     cfg: &'a MctsConfig,
     /// The exploration rate after the zero check.
     exploration: f64,
+    /// The stratified batch after the iteration-count limit.
+    batch: Option<usize>,
     tree: HashMap<NodeKey, Node>,
+    chance_cursors: BatchCursors,
     stats: MctsStats,
     /// Largest fraction of outcome probability dropped at any one chance node.
     max_discarded: f64,
@@ -716,7 +826,7 @@ impl MctsContext<'_> {
             )
         };
 
-        let branches = self.resolve(state, &p1_commands, &p2_commands);
+        let branches = self.resolve(state, (key, p1_index, p2_index), &p1_commands, &p2_commands);
         let value = match draw_successor(branches) {
             Some(child) => {
                 let (child_depth, child_chain) = self.descend(&child, depth, chain);
@@ -824,17 +934,22 @@ impl MctsContext<'_> {
 
     /// Resolve one joint action into the successors that the configured
     /// [`TransitionMode`] offers the draw.
+    ///
+    /// `chance_key` names the chance node of this resolution. Only the generative
+    /// mode reads it, and it uses the key to place the resolution in a batch.
     fn resolve(
         &mut self,
         state: &MatchState,
+        chance_key: ChanceKey,
         p1_commands: &[BattleCommand],
         p2_commands: &[BattleCommand],
     ) -> Vec<(MatchState, f64)> {
         self.stats.turns_simulated += 1;
         let chance = match self.cfg.transition {
             TransitionMode::Enumerated(chance) => chance,
-            TransitionMode::Generative => {
-                return self.resolve_generative(state, p1_commands, p2_commands);
+            TransitionMode::Generative { .. } => {
+                let batch = self.batch.expect("the generative mode sets a batch");
+                return self.resolve_generative(state, chance_key, batch, p1_commands, p2_commands);
             }
         };
         let raw: Vec<(MatchState, f64)> = simulate_turn(
@@ -885,13 +1000,39 @@ impl MctsContext<'_> {
     /// The engine draws from the seeded RNG of the search, so one seed still
     /// gives one result. The successor sort of the enumerated mode is unneeded
     /// here, because no `HashMap` drain decides the order of a single branch.
+    ///
+    /// A `batch` above one places the resolution in the stratified batch of
+    /// `chance_key`. One member keeps the law of one independent draw, so the
+    /// single returned branch keeps its weight of one.
     fn resolve_generative(
+        &mut self,
+        state: &MatchState,
+        chance_key: ChanceKey,
+        batch: usize,
+        p1_commands: &[BattleCommand],
+        p2_commands: &[BattleCommand],
+    ) -> Vec<(MatchState, f64)> {
+        let sample = if batch > 1 {
+            let (seed, member) = self.chance_cursors.next_member(chance_key, batch);
+            let plan = StratifiedPlan::new(batch, seed);
+            // The guard must outlive the resolution, and it restores the
+            // previous stream when this scope ends.
+            let _stream = plan.install(member);
+            self.sample_one(state, p1_commands, p2_commands)
+        } else {
+            self.sample_one(state, p1_commands, p2_commands)
+        };
+        vec![(sample.state, 1.0)]
+    }
+
+    /// Resolve one turn with the generative model, under the installed stream.
+    fn sample_one(
         &self,
         state: &MatchState,
         p1_commands: &[BattleCommand],
         p2_commands: &[BattleCommand],
-    ) -> Vec<(MatchState, f64)> {
-        let sample = sample_transition(
+    ) -> TransitionSample {
+        sample_transition(
             state,
             &PlayerCommand::Battle(p1_commands.to_vec()),
             &PlayerCommand::Battle(p2_commands.to_vec()),
@@ -903,8 +1044,7 @@ impl MctsContext<'_> {
                 // The search reads no events, and tracking them would cost time.
                 observe: false,
             },
-        );
-        vec![(sample.state, 1.0)]
+        )
     }
 
     /// The depth and forced-chain counter that a successor uses.
@@ -984,6 +1124,22 @@ fn draw_index(strategy: &[f64]) -> usize {
         }
     }
     strategy.len().saturating_sub(1)
+}
+
+/// Draw one plan seed from the seeded stream of the search.
+fn draw_seed() -> u64 {
+    with_sample_rng(|rng| rng.r#gen::<u64>())
+}
+
+/// Get the batch that the search can use.
+///
+/// No chance node can have more visits than the complete search. This limit
+/// prevents plans from allocating members that no visit can use.
+fn effective_batch(transition: TransitionMode, iterations: u32) -> Option<usize> {
+    match transition {
+        TransitionMode::Enumerated(_) => None,
+        TransitionMode::Generative { batch } => Some(batch.min(iterations as usize)),
+    }
 }
 
 /// Draw one successor by weight, and drop the rest.
@@ -1074,6 +1230,59 @@ mod tests {
         // The sample standard deviation of that stream is 0.57735.
         let error = stats.standard_error().expect("four samples");
         assert!((error - 0.288675).abs() < 1e-6, "{error}");
+    }
+
+    #[test]
+    fn a_batch_cannot_exceed_the_iteration_count() {
+        assert_eq!(
+            effective_batch(TransitionMode::Generative { batch: usize::MAX }, 7),
+            Some(7)
+        );
+        assert_eq!(
+            effective_batch(TransitionMode::Generative { batch: 0 }, 7),
+            Some(0)
+        );
+        assert_eq!(
+            effective_batch(TransitionMode::Enumerated(ChanceMode::Enumerate), 7),
+            None
+        );
+    }
+
+    /// One batch spans consecutive visits of one chance node. Every member must
+    /// therefore read the same plan. The visit after the last member must start
+    /// a new plan.
+    #[test]
+    fn a_chance_cursor_walks_one_batch_before_it_reseeds() {
+        let _guard = scoped_sample_rng(5);
+        let mut cursors = BatchCursors::default();
+        let key = ((7, 1, 0), 0, 0);
+
+        let batch: Vec<(u64, usize)> = (0..3).map(|_| cursors.next_member(key, 3)).collect();
+        let members: Vec<usize> = batch.iter().map(|(_, member)| *member).collect();
+        assert_eq!(members, vec![0, 1, 2]);
+        assert!(
+            batch.iter().all(|(seed, _)| *seed == batch[0].0),
+            "one batch used two plans: {batch:?}"
+        );
+
+        let next = cursors.next_member(key, 3);
+        assert_eq!(next.1, 0, "the fourth visit must open a new batch");
+        assert_ne!(next.0, batch[0].0, "the new batch must use a new plan");
+    }
+
+    /// The dimension of a chokepoint depends on the command pair, so two command
+    /// pairs of one position must not share a batch.
+    #[test]
+    fn two_action_pairs_hold_two_cursors() {
+        let _guard = scoped_sample_rng(5);
+        let mut cursors = BatchCursors::default();
+        let position = (7, 1, 0);
+
+        let left = cursors.next_member((position, 0, 0), 4);
+        let right = cursors.next_member((position, 0, 1), 4);
+
+        assert_eq!((left.1, right.1), (0, 0), "both pairs start their own batch");
+        assert_ne!(left.0, right.0, "both pairs drew one plan seed");
     }
 
     #[test]

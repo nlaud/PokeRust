@@ -2182,9 +2182,10 @@ fn mcts_sparse_chance_reports_discarded_mass() {
 }
 
 /// The generative transition mode with the same lookahead as [`mcts_config`].
+/// A batch of one keeps the independent draw of each visit.
 fn generative_mcts_config() -> MctsConfig {
     MctsConfig {
-        transition: TransitionMode::Generative,
+        transition: TransitionMode::Generative { batch: 1 },
         ..mcts_config()
     }
 }
@@ -2812,3 +2813,175 @@ fn mcts_widening_warning_does_not_count_the_next_prefix() {
     }
 }
 
+// ── The stratified batch ────────────────────────────────────────────────────
+
+/// A position where each player holds exactly one joint action.
+///
+/// Action selection then adds no noise, so the transition is the only source of
+/// sampling error. Both moves always hit and carry no secondary effect, so the
+/// damage roll of each attack is the only chokepoint of the turn. Neither attack
+/// comes close to a knockout, so every roll leaves a different position for the
+/// evaluator to score.
+///
+/// Both sides have spent their Tera, because a Tera of the one move would be a
+/// second joint action.
+fn single_action_position() -> MatchState {
+    let mut battle = battle_state_from_lists(
+        vec![mon(Species::Blastoise, &[PokemonMove::Surf])],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Earthquake])],
+        vec![],
+    );
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+    battle.p1_has_mega = false;
+    battle.p2_has_mega = false;
+    MatchState::BattleState(battle)
+}
+
+/// One turn, sixteen damage rolls, and a generative transition of `batch`
+/// members.
+fn stratified_config(batch: usize) -> MctsConfig {
+    MctsConfig {
+        iterations: 32,
+        depth: 1,
+        damage_rolls: 16,
+        consider_crit: false,
+        transition: TransitionMode::Generative { batch },
+        ..MctsConfig::default()
+    }
+}
+
+/// The exact value of `single_action_position` under [`stratified_config`].
+fn single_action_exact_value() -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        depth: 1,
+        damage_rolls: 16,
+        consider_crit: false,
+        chance: ChanceMode::Enumerate,
+        ..SolveConfig::default()
+    };
+    solve(&single_action_position(), pokemon_dex, move_dex, &config)
+        .expect("the position is playable")
+        .value
+}
+
+/// The root-mean-square error of the search against `exact`, over `seeds`.
+fn single_action_rmse(seeds: &[u64], batch: usize, exact: f64) -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = stratified_config(batch);
+    let squares: f64 = seeds
+        .iter()
+        .map(|&seed| {
+            let value = mcts::search(
+                seed,
+                &single_action_position(),
+                pokemon_dex,
+                move_dex,
+                &config,
+            )
+            .expect("the position is playable")
+            .value;
+            (value - exact).powi(2)
+        })
+        .sum();
+    (squares / seeds.len() as f64).sqrt()
+}
+
+/// One batch member keeps the law of one independent draw, so the batched search
+/// must still reach the value that backward induction computes.
+///
+/// The tolerance matches `generative_mcts_agrees_with_the_exact_search`, because
+/// explicit exploration biases the mean by more than the sampling error alone.
+#[test]
+fn mcts_stratified_batch_matches_the_exact_value() {
+    let exact = exact_value();
+    let config = MctsConfig {
+        transition: TransitionMode::Generative { batch: 16 },
+        ..generative_mcts_config()
+    };
+
+    let result = run_mcts(3, &config);
+
+    assert!(
+        (result.value - exact).abs() < 0.08,
+        "the batched search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert!(result.stats.turns_simulated > 0);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// A batch adds a plan seed and a cursor for every chance node. Both must come
+/// from the seeded stream of the search, so one seed still gives one answer.
+#[test]
+fn mcts_stratified_batch_repeats_under_one_seed() {
+    let config = MctsConfig {
+        iterations: 120,
+        transition: TransitionMode::Generative { batch: 8 },
+        ..generative_mcts_config()
+    };
+
+    let first = run_mcts(77, &config);
+    let second = run_mcts(77, &config);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.p1_strategy.len(), second.p1_strategy.len());
+    for (left, right) in first.p1_strategy.iter().zip(&second.p1_strategy) {
+        assert_eq!(left.probability, right.probability);
+    }
+    assert_eq!(first.stats.turns_simulated, second.stats.turns_simulated);
+}
+
+/// Stratified visits are dependent. The independent-sample formula does not
+/// give a valid standard error for this search.
+#[test]
+fn mcts_stratified_batch_omits_the_standard_error() {
+    let config = MctsConfig {
+        iterations: 32,
+        transition: TransitionMode::Generative { batch: 8 },
+        ..generative_mcts_config()
+    };
+
+    let result = run_mcts(77, &config);
+
+    assert_eq!(result.sampling.iterations, 32);
+    assert_eq!(result.sampling.standard_error, None);
+}
+
+/// The point of the batch: it must beat the independent sampler on the same
+/// budget.
+///
+/// The iteration count is a multiple of the batch size, and the batch size
+/// equals the damage-roll count. Each batch therefore covers every roll of each
+/// attack exactly once. The test states a margin instead of an exact bound,
+/// because a Latin hypercube pins the marginal of each dimension and not the
+/// joint pair.
+#[test]
+fn mcts_stratified_batch_lowers_the_sampling_error() {
+    let position = single_action_position();
+    for player in [Player::P1, Player::P2] {
+        assert_eq!(
+            complete_actions(&position, player).len(),
+            1,
+            "{player:?} needs exactly one joint action for this test"
+        );
+    }
+
+    let exact = single_action_exact_value();
+    let seeds: Vec<u64> = (1..=8).collect();
+
+    let independent = single_action_rmse(&seeds, 1, exact);
+    let batched = single_action_rmse(&seeds, 16, exact);
+
+    assert!(
+        independent > 0.0,
+        "the independent sampler hit the exact value on every seed"
+    );
+    assert!(
+        batched < independent * 0.75,
+        "the batch scored {batched}, the independent sampler scored {independent}"
+    );
+}
