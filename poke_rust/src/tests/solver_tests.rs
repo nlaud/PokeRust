@@ -3312,6 +3312,9 @@ fn side_swap_symmetry() {
     for (name, score) in [
         ("heuristic", eval::heuristic as eval::LeafEvaluator),
         ("fitted", eval::fitted as eval::LeafEvaluator),
+        // The network keeps this property only because neither layer carries a
+        // bias term and its activation is odd.
+        ("fitted_mlp", eval::fitted_mlp as eval::LeafEvaluator),
     ] {
         let original = score(&state, &eval_ctx());
         let swapped = score(&flipped, &eval_ctx());
@@ -3768,6 +3771,22 @@ fn the_fitted_weights_parse_and_hold_one_value_for_each_feature() {
     for name in eval::POLICY_FEATURE_NAMES {
         assert!(policy_file.get(name).is_some(), "the file omits {name}");
     }
+
+    // The network file names its own columns, so a feature-order change cannot
+    // silently reassign one.
+    let network_file: eval::MlpRecord =
+        serde_json::from_str(include_str!("../../weights/eval_mlp_v1.json"))
+            .expect("the network weight file parses");
+    for name in eval::FEATURE_NAMES {
+        assert!(
+            network_file.features.iter().any(|stored| stored == name),
+            "the network file omits {name}"
+        );
+    }
+    assert!(
+        eval::fitted_network().is_some(),
+        "the shipped network must load"
+    );
 }
 
 /// The policy must put a killing move above a weak one.

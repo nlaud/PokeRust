@@ -313,3 +313,96 @@ The sweep table of 2026-07-28 was not re-recorded in this session.
   two measures disagree on 400 positions.
 - `MctsConfig::policy_prior` therefore stays `false`. The flag changes only the
   widening prefix.
+
+## 2026-08-04: Champions doubles training
+
+`src/solver/TRAINING.md` holds the rerun procedure.
+
+### The corpus format changed
+
+The run of 2026-08-04 used the defaults of `bin/train_eval`, which were one
+active Pokemon and three brought.
+That setting is Champions singles.
+`team_preview_state_from_team_strings` also applies `BattleMechanics::default()`,
+which enables Terastallization.
+Pokemon Champions has none.
+The `tera` weight of that run therefore came from illegal positions.
+
+The defaults now describe Champions doubles.
+
+| Setting | Before | After |
+|---|---|---|
+| Active per side | 1 | 2 |
+| Brought per side | 3 | 4 |
+| Roster size | 3 | 6 |
+| Terastallization | on | off |
+| Mega Evolution | on | on |
+| Usage table | Singles | Doubles |
+
+### The label is approximate
+
+An exact depth-2 doubles label did not finish in ten minutes.
+A doubles side offers hundreds of joint actions, so the payoff matrix holds tens
+of thousands of cells, and each cell costs one `simulate_turn`.
+
+The label search now uses `ChanceMode::TopK(1)`, an action cap of 24, and
+dominated-action pruning.
+Each of the three makes the label approximate.
+An approximate depth-2 label still searches deeper than the leaf that it teaches.
+
+Measured on the release build with 20 workers:
+
+| Positions | Median | Max | Mean | Rate |
+|---|---|---|---|---|
+| 60 | 23.1 s | 78.3 s | 26.8 s | 0.58 labels/s |
+
+The rate divides the kept label count by the labeling stage wall time.
+An earlier version summed the per-label times and multiplied by the worker
+count, which overstated the rate by about two times.
+Calibrate with more positions than workers.
+A sample that fits in one wave measures the slowest label, not the rate.
+
+Corpus collection is cheap against the labels.
+24000 distinct positions cost 9.9 seconds.
+
+### The evaluator uses 16 damage rolls
+
+`EVAL_DAMAGE_ROLLS` rose from 1 to 16.
+
+One roll made the kill mass zero or one, so `possible_kill` equalled
+`guaranteed_kill` on every move that cannot miss.
+The two features were collinear, and no corpus could weight them apart.
+Both weights sat near zero after the 2026-08-04 run.
+
+The damage function computes every multiplier once and then loops the rolls, so
+the extra rolls add cheap steps rather than whole calculations.
+
+| Evaluator | One leaf, 1 roll | One leaf, 16 rolls |
+|---|---|---|
+| `even` | 2 ns | 2 ns |
+| legacy weights | 3255 ns | 5829 ns |
+| `heuristic` | 3339 ns | 5891 ns |
+| `fitted` | 3353 ns | 5935 ns |
+| `fitted_mlp` | — | 5886 ns |
+
+The leaf stays far below one turn resolution, which costs about 50 microseconds.
+
+`fitted_mlp` reads the same feature vector as `fitted`.
+The feature vector is the whole cost, so the network adds nothing measurable.
+
+### The network model
+
+`eval::Mlp` holds one hidden layer with a `tanh` activation and no bias term.
+The score is `logistic(output . tanh(hidden . features))`.
+
+`tanh` is an odd function, and neither layer carries a bias term.
+A mirrored position therefore negates the hidden vector and the output, and the
+logistic map returns one minus the original score.
+Side-swap symmetry holds for every weight matrix.
+Do not add a bias term.
+
+`Mlp::seed` starts a fit near its linear input model.
+The trainer uses the newly fitted linear weights for this input.
+
+`eval::fitted_mlp` takes the default evaluator slot only when it beats the
+linear fit on the held-out split by 0.002 mean absolute error.

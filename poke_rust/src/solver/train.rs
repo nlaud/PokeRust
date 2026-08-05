@@ -1,6 +1,6 @@
-//! Fits the linear weight vectors of [`eval`](super::eval).
+//! Fits the weights of [`eval`](super::eval).
 //!
-//! Two models share this module.
+//! Three models share this module.
 //!
 //! The value model maps a position feature vector onto P1's win probability.
 //! It minimizes the logistic loss against a labeled value.
@@ -8,9 +8,13 @@
 //! The policy model maps an action feature vector onto a selection probability.
 //! It minimizes the cross entropy against a labeled mixture.
 //!
-//! Both fits use batch gradient descent, a fixed learning rate, and L2
+//! The network model reads the same feature vector through one hidden layer.
+//! [`fit_mlp`] answers the question that [`learning_curve`] asks: a flat curve
+//! shows that more positions no longer help the linear model.
+//!
+//! Every fit uses batch gradient descent, a fixed learning rate, and L2
 //! regularization.
-//! Neither fit needs a machine-learning dependency.
+//! No fit needs a machine-learning dependency.
 //!
 //! `bin/train_eval` builds the labeled sets and writes the results.
 //! This module holds the loss, the gradient, the descent loop, and the
@@ -18,7 +22,7 @@
 //!
 //! `cargo test` never runs the corpus binary. A corpus costs minutes.
 
-use super::eval::{LOGISTIC_SCALE, logistic, softmax};
+use super::eval::{LOGISTIC_SCALE, Mlp, logistic, softmax};
 
 /// One labeled position.
 #[derive(Debug, Clone)]
@@ -184,6 +188,240 @@ pub fn fit_value<const N: usize>(
         weights = next;
     }
     weights
+}
+
+// ── The network model ───────────────────────────────────────────────────────
+
+/// The mean logistic loss of one network, without the penalty.
+pub fn mlp_loss<const N: usize, const H: usize>(
+    samples: &[ValueSample<N>],
+    network: &Mlp<N, H>,
+) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = samples
+        .iter()
+        .map(|sample| {
+            let prediction = network.predict(&sample.features).clamp(1e-12, 1.0 - 1e-12);
+            -(sample.label * prediction.ln() + (1.0 - sample.label) * (1.0 - prediction).ln())
+        })
+        .sum();
+    total / samples.len() as f64
+}
+
+/// The mean absolute error of one network.
+pub fn mlp_mean_absolute_error<const N: usize, const H: usize>(
+    samples: &[ValueSample<N>],
+    network: &Mlp<N, H>,
+) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = samples
+        .iter()
+        .map(|sample| (network.predict(&sample.features) - sample.label).abs())
+        .sum();
+    total / samples.len() as f64
+}
+
+/// The gradient of [`mlp_loss`] plus the L2 penalty.
+///
+/// The output layer takes the same residual as the linear model.
+/// Each hidden row takes that residual through its own output weight and the
+/// derivative of `tanh`, which is `1 - tanh(z)^2`.
+pub fn mlp_gradient<const N: usize, const H: usize>(
+    samples: &[ValueSample<N>],
+    network: &Mlp<N, H>,
+    l2: f64,
+) -> Mlp<N, H> {
+    let mut gradient = Mlp {
+        hidden: [[0.0; N]; H],
+        output: [0.0; H],
+    };
+    if samples.is_empty() {
+        return gradient;
+    }
+    for sample in samples {
+        let activations = network.activations(&sample.features);
+        let prediction = logistic(
+            activations
+                .iter()
+                .zip(network.output.iter())
+                .map(|(activation, weight)| activation * weight)
+                .sum(),
+        );
+        let residual = (prediction - sample.label) * LOGISTIC_SCALE;
+        for (unit, activation) in activations.iter().enumerate() {
+            gradient.output[unit] += residual * activation;
+            let inner = residual * network.output[unit] * (1.0 - activation.powi(2));
+            for (slot, feature) in gradient.hidden[unit]
+                .iter_mut()
+                .zip(sample.features.iter())
+            {
+                *slot += inner * feature;
+            }
+        }
+    }
+
+    let count = samples.len() as f64;
+    for unit in 0..H {
+        gradient.output[unit] = gradient.output[unit] / count + l2 * network.output[unit];
+        for feature in 0..N {
+            gradient.hidden[unit][feature] =
+                gradient.hidden[unit][feature] / count + l2 * network.hidden[unit][feature];
+        }
+    }
+    gradient
+}
+
+/// Fits the network, starting from `start`.
+///
+/// A step that produces a nonfinite weight is discarded, and the fit returns the
+/// last finite network, exactly as [`fit_value`] does.
+pub fn fit_mlp<const N: usize, const H: usize>(
+    samples: &[ValueSample<N>],
+    start: &Mlp<N, H>,
+    config: &TrainConfig,
+) -> Mlp<N, H> {
+    let mut network = *start;
+    for _ in 0..config.steps {
+        let gradient = mlp_gradient(samples, &network, config.l2);
+        let mut next = network;
+        for unit in 0..H {
+            next.output[unit] -= config.learning_rate * gradient.output[unit];
+            for feature in 0..N {
+                next.hidden[unit][feature] -=
+                    config.learning_rate * gradient.hidden[unit][feature];
+            }
+        }
+        if !next.is_finite() {
+            return network;
+        }
+        network = next;
+    }
+    network
+}
+
+// ── Corpus reports ──────────────────────────────────────────────────────────
+
+/// One point of a learning curve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvePoint {
+    /// The fraction of the training set that this point used.
+    pub fraction: f64,
+    /// How many samples that fraction held.
+    pub samples: usize,
+    /// The held-out mean absolute error of the fit.
+    pub holdout_error: f64,
+}
+
+/// A deterministic subset that spreads its picks through `items`.
+///
+/// A prefix would take one part of the corpus, and the corpus is ordered by
+/// generated matchup. A spread subset keeps every matchup represented.
+pub fn subset<T: Clone>(items: &[T], fraction: f64) -> Vec<T> {
+    if !fraction.is_finite() || fraction <= 0.0 || items.is_empty() {
+        return Vec::new();
+    }
+    if fraction >= 1.0 {
+        return items.to_vec();
+    }
+    let wanted = ((items.len() as f64 * fraction).round() as usize).clamp(1, items.len());
+    (0..items.len())
+        .filter(|index| {
+            (index + 1) * wanted / items.len() > index * wanted / items.len()
+        })
+        .map(|index| items[index].clone())
+        .collect()
+}
+
+/// Fits the linear model on each fraction of the training set.
+///
+/// A curve that stops falling shows that more positions no longer help the
+/// linear model. That is the evidence the model-class question needs.
+pub fn learning_curve<const N: usize>(
+    train_set: &[ValueSample<N>],
+    test_set: &[ValueSample<N>],
+    start: &[f64; N],
+    config: &TrainConfig,
+    fractions: &[f64],
+) -> Vec<CurvePoint> {
+    fractions
+        .iter()
+        .map(|fraction| {
+            let part = subset(train_set, *fraction);
+            let weights = fit_value(&part, start, config);
+            CurvePoint {
+                fraction: *fraction,
+                samples: part.len(),
+                holdout_error: value_mean_absolute_error(test_set, &weights),
+            }
+        })
+        .collect()
+}
+
+/// The variance of each feature across a labeled set.
+///
+/// A feature with zero variance does not explain differences between samples.
+pub fn feature_variance<const N: usize>(samples: &[ValueSample<N>]) -> [f64; N] {
+    let mut out = [0.0; N];
+    if samples.is_empty() {
+        return out;
+    }
+    let count = samples.len() as f64;
+    for (index, slot) in out.iter_mut().enumerate() {
+        let mean: f64 = samples
+            .iter()
+            .map(|sample| sample.features[index])
+            .sum::<f64>()
+            / count;
+        *slot = samples
+            .iter()
+            .map(|sample| (sample.features[index] - mean).powi(2))
+            .sum::<f64>()
+            / count;
+    }
+    out
+}
+
+/// The Pearson correlation of two features across a labeled set.
+///
+/// Returns zero when either feature is constant, because a constant feature has
+/// no correlation to report.
+pub fn feature_correlation<const N: usize>(
+    samples: &[ValueSample<N>],
+    left: usize,
+    right: usize,
+) -> f64 {
+    if samples.is_empty() || left >= N || right >= N {
+        return 0.0;
+    }
+    let count = samples.len() as f64;
+    let mean = |index: usize| {
+        samples
+            .iter()
+            .map(|sample| sample.features[index])
+            .sum::<f64>()
+            / count
+    };
+    let left_mean = mean(left);
+    let right_mean = mean(right);
+
+    let mut covariance = 0.0;
+    let mut left_spread = 0.0;
+    let mut right_spread = 0.0;
+    for sample in samples {
+        let left_delta = sample.features[left] - left_mean;
+        let right_delta = sample.features[right] - right_mean;
+        covariance += left_delta * right_delta;
+        left_spread += left_delta * left_delta;
+        right_spread += right_delta * right_delta;
+    }
+    if left_spread <= 0.0 || right_spread <= 0.0 {
+        return 0.0;
+    }
+    covariance / (left_spread * right_spread).sqrt()
 }
 
 // ── The policy model ────────────────────────────────────────────────────────
@@ -429,5 +667,183 @@ mod tests {
         let (train, test) = split(&items, 0.0);
         assert_eq!(train.len(), 7);
         assert!(test.is_empty());
+    }
+
+    // ── The network model ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_network_forward_pass_matches_a_hand_calculation() {
+        let network = Mlp::<2, 2> {
+            hidden: [[1.0, 0.0], [0.0, 2.0]],
+            output: [0.5, -1.0],
+        };
+        let features = [0.5, 0.25];
+        // Both units see 0.5, so the advantage is (0.5 - 1.0) * tanh(0.5).
+        let advantage = -0.5 * 0.5f64.tanh();
+        assert!((network.advantage(&features) - advantage).abs() < 1e-12);
+        let expected = 1.0 / (1.0 + (-LOGISTIC_SCALE * advantage).exp());
+        assert!((network.predict(&features) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_network_gradient_matches_a_finite_difference() {
+        let samples = separable();
+        let network = Mlp::<2, 3> {
+            hidden: [[0.4, -0.2], [0.1, 0.3], [-0.5, 0.25]],
+            output: [0.7, -0.4, 0.2],
+        };
+        let analytic = mlp_gradient(&samples, &network, 0.0);
+        let step = 1e-6;
+
+        for unit in 0..3 {
+            let mut up = network;
+            let mut down = network;
+            up.output[unit] += step;
+            down.output[unit] -= step;
+            let numeric = (mlp_loss(&samples, &up) - mlp_loss(&samples, &down)) / (2.0 * step);
+            assert!(
+                (numeric - analytic.output[unit]).abs() < 1e-6,
+                "output {unit}: {numeric} vs {}",
+                analytic.output[unit]
+            );
+
+            for feature in 0..2 {
+                let mut up = network;
+                let mut down = network;
+                up.hidden[unit][feature] += step;
+                down.hidden[unit][feature] -= step;
+                let numeric = (mlp_loss(&samples, &up) - mlp_loss(&samples, &down)) / (2.0 * step);
+                assert!(
+                    (numeric - analytic.hidden[unit][feature]).abs() < 1e-6,
+                    "hidden {unit},{feature}: {numeric} vs {}",
+                    analytic.hidden[unit][feature]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_network_fit_lowers_the_loss_on_a_separable_set() {
+        let samples = separable();
+        let start = Mlp::<2, 2>::seed(&[0.0, 0.0]);
+        // A seed from zero weights has no output layer, so the fit must build one
+        // from the hidden layer that the seed does supply.
+        let start = Mlp::<2, 2> {
+            hidden: start.hidden,
+            output: [0.1, -0.1],
+        };
+        let before = mlp_loss(&samples, &start);
+        let config = TrainConfig {
+            steps: 500,
+            learning_rate: 1.0,
+            l2: 0.0,
+        };
+        let fitted = fit_mlp(&samples, &start, &config);
+        let after = mlp_loss(&samples, &fitted);
+        assert!(after < before, "loss rose: {before} -> {after}");
+        assert!(fitted.is_finite());
+    }
+
+    #[test]
+    fn the_seed_network_starts_at_the_linear_model() {
+        let weights = [0.6, -0.3];
+        let network = Mlp::<2, 2>::seed(&weights);
+        // tanh is close to the identity near zero, so a small feature vector
+        // reads almost the same as it does through the linear model.
+        let features = [0.05, -0.05];
+        let linear = value_prediction(&features, &weights);
+        assert!((network.predict(&features) - linear).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_wide_seed_does_not_multiply_the_linear_weights() {
+        let weights = [0.6, -0.3];
+        let network = Mlp::<2, 5>::seed(&weights);
+        let features = [0.05, -0.05];
+        let linear = value_prediction(&features, &weights);
+        assert!((network.predict(&features) - linear).abs() < 1e-3);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one unit per feature")]
+    fn a_seed_rejects_a_hidden_layer_that_cannot_cover_the_features() {
+        let _ = Mlp::<2, 1>::seed(&[0.6, -0.3]);
+    }
+
+    // ── Corpus reports ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_learning_curve_returns_one_point_for_each_fraction() {
+        let samples = separable();
+        let (train_set, test_set) = split(&samples, 0.2);
+        let fractions = [0.25, 0.5, 0.75, 1.0];
+        let curve = learning_curve(
+            &train_set,
+            &test_set,
+            &[0.0, 0.0],
+            &TrainConfig::default(),
+            &fractions,
+        );
+        assert_eq!(curve.len(), fractions.len());
+        for (point, fraction) in curve.iter().zip(fractions.iter()) {
+            assert_eq!(point.fraction, *fraction);
+            assert!(point.samples > 0);
+            assert!(point.holdout_error.is_finite());
+        }
+        assert!(curve[3].samples > curve[0].samples);
+    }
+
+    #[test]
+    fn a_subset_spreads_its_picks_and_keeps_the_requested_count() {
+        let items: Vec<usize> = (0..20).collect();
+        let half = subset(&items, 0.5);
+        assert_eq!(half.len(), 10);
+        assert!(half.contains(&0) || half.contains(&1));
+        assert!(half.iter().any(|value| *value >= 15), "the tail was dropped");
+        assert_eq!(subset(&items, 1.0).len(), 20);
+        assert!(subset(&items, 0.0).is_empty());
+    }
+
+    #[test]
+    fn the_variance_of_a_constant_feature_is_zero() {
+        let samples: Vec<ValueSample<2>> = (0..10)
+            .map(|index| ValueSample {
+                features: [index as f64, 3.0],
+                label: 0.5,
+            })
+            .collect();
+        let variance = feature_variance(&samples);
+        assert!(variance[0] > 0.0);
+        assert!(variance[1].abs() < 1e-12, "a constant feature varied");
+    }
+
+    #[test]
+    fn the_correlation_matches_a_hand_calculation() {
+        // The second feature is twice the first, so the correlation is exactly 1.
+        let doubled: Vec<ValueSample<2>> = (0..5)
+            .map(|index| ValueSample {
+                features: [index as f64, 2.0 * index as f64],
+                label: 0.5,
+            })
+            .collect();
+        assert!((feature_correlation(&doubled, 0, 1) - 1.0).abs() < 1e-12);
+
+        // A negated feature gives exactly -1.
+        let negated: Vec<ValueSample<2>> = (0..5)
+            .map(|index| ValueSample {
+                features: [index as f64, -(index as f64)],
+                label: 0.5,
+            })
+            .collect();
+        assert!((feature_correlation(&negated, 0, 1) + 1.0).abs() < 1e-12);
+
+        // A constant feature reports zero instead of a division by zero.
+        let constant: Vec<ValueSample<2>> = (0..5)
+            .map(|index| ValueSample {
+                features: [index as f64, 1.0],
+                label: 0.5,
+            })
+            .collect();
+        assert_eq!(feature_correlation(&constant, 0, 1), 0.0);
     }
 }

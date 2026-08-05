@@ -12,6 +12,7 @@ Use strict mode unless the user requests another mode.
 - `poke_rust/src/information/README.md` explains fog-of-war inference.
 - `meta_scraper/README.md` explains the usage-data cache.
 - `poke_rust/benches/RESULTS.md` records benchmark results.
+- `poke_rust/src/solver/TRAINING.md` explains how to retrain the evaluator.
 
 ## Project state
 

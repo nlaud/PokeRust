@@ -80,22 +80,26 @@ Neither lowers the error of the reported value.
 ### Evaluation
 
 - [ ] Train the evaluator on a larger corpus.
-  - [ ] Raise the corpus above 400 positions and the label depth above 2.
-  - [ ] Replace the linear model when a larger corpus stops improving it.
-  - [ ] Give `guaranteed_kill` and `possible_kill` a corpus that separates them.
+  - [x] Move the corpus to Champions doubles with Terastallization off.
+  - [x] Give `guaranteed_kill` and `possible_kill` a corpus that separates them.
+  - [x] Add the network model, the learning curve, and the corpus reports.
+  - [ ] Run the overnight job and commit the three weight files.
   - [ ] Re-record the full `solver_speed` sweep against the new evaluator.
 
 `solver::eval` scores a position from a named feature vector and a weight
 vector.
 Each feature is a P1 quantity minus the matching P2 quantity, so side-swap
 symmetry holds for every weight vector.
-`weights/eval_v1.json` and `weights/policy_v1.json` hold the fitted vectors, and
-`bin/train_eval` produces both.
+`weights/eval_v1.json`, `weights/eval_mlp_v1.json`, and `weights/policy_v1.json`
+hold the fitted weights, and `bin/train_eval` produces all three.
 
-One roll of the threat feature cannot separate a certain kill from a likely one,
-so the current corpus leaves both kill weights near zero.
-A larger corpus needs more damage rolls, or a corpus with more decided
-positions.
+`src/solver/TRAINING.md` holds the rerun procedure.
+Read it before the next run.
+
+An exact doubles label above depth 2 costs more than any usable budget, so the
+label search caps its action set and its chance branches.
+Read the depth histogram and the learning curve of the run before you change
+the model class.
 
 ## Fog-of-war solver
 

@@ -17,11 +17,17 @@
 //! The logistic map then returns one minus the original score.
 //! Side-swap symmetry therefore holds for every weight vector.
 //!
-//! # Two weight vectors
+//! # Three scorers
 //!
 //! [`heuristic`] uses the hand-set weights in [`HAND_WEIGHTS`].
-//! [`fitted`] uses the weights that `bin/train_eval` produced.
-//! `weights/eval_v1.json` holds the fitted vector.
+//! [`fitted`] uses the linear weights that `bin/train_eval` produced.
+//! [`fitted_mlp`] uses the network that the same binary produced.
+//! `weights/eval_v1.json` and `weights/eval_mlp_v1.json` hold the two fits.
+//!
+//! [`Mlp`] carries no bias term, and its activation is odd, so the network keeps
+//! side-swap symmetry for every weight matrix.
+//!
+//! `src/solver/TRAINING.md` holds the rerun procedure.
 //! Record a weight change in `benches/RESULTS.md`.
 //!
 //! # The context
@@ -187,13 +193,24 @@ const HAZARD_WEIGHT: f64 = 0.12;
 /// this factor.
 pub const LOGISTIC_SCALE: f64 = 0.8;
 
+/// Damage rolls of the threat features.
+///
+/// One roll makes the kill mass zero or one, so `possible_kill` equals
+/// `guaranteed_kill` on every move that cannot miss. The two features are then
+/// collinear, and no corpus can weight them apart.
+///
+/// The damage function computes every multiplier once and then loops the rolls,
+/// so the extra rolls add cheap steps rather than whole calculations.
+/// `cargo bench --bench solver_speed -- --leaf-cost` measures the result.
+pub const EVAL_DAMAGE_ROLLS: u8 = 16;
+
 /// The damage settings of the threat features.
 ///
-/// One roll keeps a leaf cheap. The critical-hit branch stays out, because the
-/// evaluator compares a matchup instead of two moves of one slot.
+/// The critical-hit branch stays out, because the evaluator compares a matchup
+/// instead of two moves of one slot.
 const EVAL_DAMAGE_CONFIG: DamageConfig = DamageConfig {
     consider_crit: false,
-    damage_rolls: 1,
+    damage_rolls: EVAL_DAMAGE_ROLLS,
     sample: false,
 };
 
@@ -621,6 +638,188 @@ fn resolve<const N: usize>(json: &str, names: &[&str; N], fallback: &[f64; N]) -
     out
 }
 
+// ── The network model ───────────────────────────────────────────────────────
+
+/// Hidden units of [`Mlp`].
+///
+/// The default network uses one unit per feature.
+pub const MLP_HIDDEN: usize = FEATURE_COUNT;
+
+/// Feature scale of the seed network.
+///
+/// `tanh(x)` is close to `x` for a small `x`, so a diagonal hidden layer at this
+/// scale, paired with a scaled output layer, starts the network near its linear
+/// input model.
+const MLP_SEED_SCALE: f64 = 0.25;
+
+/// One hidden layer with a `tanh` activation and no bias term.
+///
+/// The score is `logistic(output . tanh(hidden . features))`.
+///
+/// # Side-swap symmetry
+///
+/// A mirrored position negates every feature, and `tanh` is an odd function.
+/// The hidden vector therefore negates, the output negates, and the logistic map
+/// returns one minus the original score.
+/// Symmetry holds for every weight matrix, exactly as it does for the linear
+/// model, and only because neither layer carries a bias term.
+/// Do not add one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mlp<const N: usize, const H: usize> {
+    /// One row of feature weights for each hidden unit.
+    pub hidden: [[f64; N]; H],
+    /// One weight for each hidden unit.
+    pub output: [f64; H],
+}
+
+impl<const N: usize, const H: usize> Mlp<N, H> {
+    /// Builds the network that starts a fit.
+    ///
+    /// Each feature gets at least one hidden unit.
+    /// The output weights divide each linear weight between duplicate units.
+    /// The `tanh` function makes this seed close to its linear input model.
+    /// Training can fill each off-diagonal entry.
+    pub fn seed(weights: &[f64; N]) -> Mlp<N, H> {
+        assert!(N > 0, "a network must have at least one feature");
+        assert!(H >= N, "a seed network needs at least one unit per feature");
+        let mut hidden = [[0.0; N]; H];
+        let mut output = [0.0; H];
+        for unit in 0..H {
+            let feature = unit % N;
+            let copies = (H - 1 - feature) / N + 1;
+            hidden[unit][feature] = MLP_SEED_SCALE;
+            output[unit] = weights[feature] / (MLP_SEED_SCALE * copies as f64);
+        }
+        Mlp { hidden, output }
+    }
+
+    /// The activation of each hidden unit.
+    pub fn activations(&self, features: &[f64; N]) -> [f64; H] {
+        let mut out = [0.0; H];
+        for (activation, row) in out.iter_mut().zip(self.hidden.iter()) {
+            let sum: f64 = row
+                .iter()
+                .zip(features.iter())
+                .map(|(weight, value)| weight * value)
+                .sum();
+            *activation = sum.tanh();
+        }
+        out
+    }
+
+    /// The signed advantage of one position, before the logistic map.
+    pub fn advantage(&self, features: &[f64; N]) -> f64 {
+        self.activations(features)
+            .iter()
+            .zip(self.output.iter())
+            .map(|(activation, weight)| activation * weight)
+            .sum()
+    }
+
+    /// P1's predicted win probability.
+    pub fn predict(&self, features: &[f64; N]) -> f64 {
+        logistic(self.advantage(features))
+    }
+
+    /// Whether every weight is a finite number.
+    pub fn is_finite(&self) -> bool {
+        self.hidden
+            .iter()
+            .flatten()
+            .chain(self.output.iter())
+            .all(|value| value.is_finite())
+    }
+}
+
+/// The value network, as `bin/train_eval` writes it.
+///
+/// The feature names travel with the matrix, so a feature-order change cannot
+/// silently reassign a column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlpRecord {
+    /// Feature names, in the column order of `hidden`.
+    pub features: Vec<String>,
+    /// One row of feature weights for each hidden unit.
+    pub hidden: Vec<Vec<f64>>,
+    /// One weight for each hidden unit.
+    pub output: Vec<f64>,
+}
+
+impl MlpRecord {
+    /// Builds a record from a network and a name list.
+    pub fn from_network<const N: usize, const H: usize>(
+        names: &[&str; N],
+        network: &Mlp<N, H>,
+    ) -> MlpRecord {
+        MlpRecord {
+            features: names.iter().map(|name| name.to_string()).collect(),
+            hidden: network.hidden.iter().map(|row| row.to_vec()).collect(),
+            output: network.output.to_vec(),
+        }
+    }
+
+    /// Reads the record back into a network.
+    ///
+    /// Returns `None` when a shape disagrees, when a name is missing, or when a
+    /// value is not finite. A caller then keeps its fallback evaluator.
+    pub fn to_network<const N: usize, const H: usize>(
+        &self,
+        names: &[&str; N],
+    ) -> Option<Mlp<N, H>> {
+        if self.hidden.len() != H || self.output.len() != H {
+            return None;
+        }
+        let columns: Vec<usize> = names
+            .iter()
+            .map(|name| self.features.iter().position(|stored| stored == name))
+            .collect::<Option<Vec<usize>>>()?;
+
+        let mut network = Mlp {
+            hidden: [[0.0; N]; H],
+            output: [0.0; H],
+        };
+        for (unit, row) in self.hidden.iter().enumerate() {
+            if row.len() != self.features.len() {
+                return None;
+            }
+            for (feature, column) in columns.iter().enumerate() {
+                network.hidden[unit][feature] = *row.get(*column)?;
+            }
+            network.output[unit] = self.output[unit];
+        }
+        network.is_finite().then_some(network)
+    }
+}
+
+/// The trained value network, as JSON.
+const EVAL_MLP_JSON: &str = include_str!("../../weights/eval_mlp_v1.json");
+
+/// Returns the trained value network.
+///
+/// Parsing runs once. A file that fails to parse returns `None`, because a leaf
+/// evaluator must not panic mid-search.
+pub fn fitted_network() -> Option<&'static Mlp<FEATURE_COUNT, MLP_HIDDEN>> {
+    static CACHE: OnceLock<Option<Mlp<FEATURE_COUNT, MLP_HIDDEN>>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            serde_json::from_str::<MlpRecord>(EVAL_MLP_JSON)
+                .ok()
+                .and_then(|record| record.to_network(&FEATURE_NAMES))
+        })
+        .as_ref()
+}
+
+/// Scores a position with the trained network.
+///
+/// `weights/eval_mlp_v1.json` supplies the weights.
+/// A file that fails to parse falls back to [`HAND_WEIGHTS`].
+pub fn fitted_mlp(state: &BattleState, ctx: &EvalContext<'_>) -> f64 {
+    match fitted_network() {
+        Some(network) => network.predict(&features(state, ctx)),
+        None => score_with(state, ctx, &HAND_WEIGHTS),
+    }
+}
+
 // ── The action policy ───────────────────────────────────────────────────────
 
 /// How many features the policy model holds.
@@ -1035,6 +1234,95 @@ mod tests {
         let score = heuristic(&state, &ctx());
         assert!((0.0..=1.0).contains(&score), "out of range: {score}");
         assert!(score > 0.8, "a wipe should read as winning: {score}");
+    }
+
+    /// Indexes of `guaranteed_kill` and `possible_kill` in [`FEATURE_NAMES`].
+    const GUARANTEED: usize = 6;
+    const POSSIBLE: usize = 7;
+
+    #[test]
+    fn a_certain_kill_reads_both_kill_features_at_one() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+        );
+        // Tackle never misses, and one point of HP dies to every roll.
+        state.p2_active_mons[0].hp = 1;
+        let values = features(&state, &ctx());
+        assert_eq!(values[GUARANTEED], 1.0);
+        assert!((values[POSSIBLE] - 1.0).abs() < 1e-9);
+    }
+
+    /// Sixteen rolls must separate a certain kill from a likely one.
+    ///
+    /// One roll made the kill mass zero or one, so `possible_kill` equalled
+    /// `guaranteed_kill` on every move that cannot miss. The two features were
+    /// then collinear, and no corpus could weight them apart.
+    #[test]
+    fn a_partial_kill_reads_possible_kill_between_zero_and_one() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let build = |target_hp: u16| {
+            let mut state = battle_state_from_lists(
+                vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+                vec![],
+                vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+                vec![],
+            );
+            state.p2_active_mons[0].hp = target_hp;
+            features(&state, &ctx())
+        };
+
+        // Damage numbers change with the dex, so the test searches for the HP
+        // band where the rolls disagree instead of naming one.
+        let partial = (1..=60u16)
+            .map(build)
+            .find(|values| values[POSSIBLE] > 0.0 && values[POSSIBLE] < 1.0);
+        let values = partial.expect("some HP total must split the damage rolls");
+        assert_eq!(
+            values[GUARANTEED], 0.0,
+            "a roll that fails to kill must clear the guaranteed flag"
+        );
+    }
+
+    #[test]
+    fn the_network_returns_one_minus_its_own_score_for_a_mirrored_position() {
+        let network = Mlp::<FEATURE_COUNT, MLP_HIDDEN>::seed(&HAND_WEIGHTS);
+        let mut values = [0.0; FEATURE_COUNT];
+        for (index, slot) in values.iter_mut().enumerate() {
+            *slot = 0.3 * (index as f64) - 1.1;
+        }
+        let mirrored: Features = std::array::from_fn(|index| -values[index]);
+        let score = network.predict(&values);
+        assert!((network.predict(&mirrored) + score - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_shipped_network_round_trips_through_its_record() {
+        let network = fitted_network().expect("the shipped network must parse");
+        let record = MlpRecord::from_network(&FEATURE_NAMES, network);
+        let restored: Mlp<FEATURE_COUNT, MLP_HIDDEN> = record
+            .to_network(&FEATURE_NAMES)
+            .expect("a written record must read back");
+        assert_eq!(&restored, network);
+    }
+
+    #[test]
+    fn a_damaged_network_file_falls_back_to_the_hand_weights() {
+        for text in [
+            "not json",
+            r#"{"features":["health"],"hidden":[[1.0]],"output":[1.0]}"#,
+            r#"{"features":[],"hidden":[],"output":[]}"#,
+        ] {
+            let restored = serde_json::from_str::<MlpRecord>(text)
+                .ok()
+                .and_then(|record| record.to_network::<FEATURE_COUNT, MLP_HIDDEN>(&FEATURE_NAMES));
+            assert!(restored.is_none(), "accepted a damaged record: {text}");
+        }
     }
 
     #[test]

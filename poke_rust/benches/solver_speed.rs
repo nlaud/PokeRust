@@ -297,6 +297,12 @@ fn print_leaf_cost(
         ("legacy", legacy as poke_rust::solver::eval::LeafEvaluator),
         ("heuristic", eval::heuristic as poke_rust::solver::eval::LeafEvaluator),
         ("fitted", eval::fitted as poke_rust::solver::eval::LeafEvaluator),
+        // The network reads the same feature vector, so its extra cost is one
+        // matrix product against the dot product of the linear model.
+        (
+            "fitted_mlp",
+            eval::fitted_mlp as poke_rust::solver::eval::LeafEvaluator,
+        ),
     ] {
         // One untimed call warms the weight cache and the branch predictor.
         let mut sink = evaluator(&battle, &ctx);
