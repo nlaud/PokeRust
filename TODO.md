@@ -77,30 +77,6 @@ Each action pair uses the same seed for the same resolution index.
 Both controls lower the exploitability gap of the learned strategy.
 Neither lowers the error of the reported value.
 
-### Evaluation
-
-- [ ] Train the evaluator on a larger corpus.
-  - [x] Move the corpus to Champions doubles with Terastallization off.
-  - [x] Give `guaranteed_kill` and `possible_kill` a corpus that separates them.
-  - [x] Add the network model, the learning curve, and the corpus reports.
-  - [ ] Run the overnight job and commit the three weight files.
-  - [ ] Re-record the full `solver_speed` sweep against the new evaluator.
-
-`solver::eval` scores a position from a named feature vector and a weight
-vector.
-Each feature is a P1 quantity minus the matching P2 quantity, so side-swap
-symmetry holds for every weight vector.
-`weights/eval_v1.json`, `weights/eval_mlp_v1.json`, and `weights/policy_v1.json`
-hold the fitted weights, and `bin/train_eval` produces all three.
-
-`src/solver/TRAINING.md` holds the rerun procedure.
-Read it before the next run.
-
-An exact doubles label above depth 2 costs more than any usable budget, so the
-label search caps its action set and its chance branches.
-Read the depth histogram and the learning curve of the run before you change
-the model class.
-
 ## Fog-of-war solver
 
 Do not average strategies from independent determinized worlds as the main method.
