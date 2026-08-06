@@ -86,6 +86,13 @@
 //! public belief at the depth limit, which a later public-belief solve reads as
 //! its leaf input.
 //!
+//! [`mccfr::search_with_leaves`] reads supplied information-set values at the
+//! depth limit instead of the leaf evaluator.
+//! [`mccfr::MccfrConfig::horizon_worlds`] keeps the worlds of each public belief
+//! at that limit. The continual solver retains their private histories.
+//! [`mccfr::continual_solve`] runs both halves: it solves each public belief of
+//! a first pass, and it then solves the root again against those values.
+//!
 //! # Exploitability
 //!
 //! [`MctsConfig::widening`](mcts::MctsConfig::widening) lets a node play a

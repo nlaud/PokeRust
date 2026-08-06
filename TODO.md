@@ -90,12 +90,10 @@ effective sample-size checks, resampling, and the observation key.
 `solver::mccfr` is the outcome-sampling equilibrium baseline.
 It also reports the counterfactual value of each public belief at the depth limit.
 
-- [ ] Extend the outcome-sampling MCCFR baseline.
-  - [ ] Test public-belief continual solving on the horizon values.
-  - [ ] Compare MCCFR with extensive-form double oracle.
-
-  Use `mask_events_for` and the event log as the observation model.
-  Do not group hidden worlds only by `MatchState` hash.
+`mccfr::search_with_leaves` reads supplied information-set values at the depth limit.
+`MccfrConfig::horizon_worlds` keeps the worlds of each public belief at that limit.
+`mccfr::continual_solve` retains private histories and solves each public belief.
+It then solves the root against the information-set values.
 
 - [ ] Add opponent exploitation as a separate mode.
   - [ ] Keep Nash as the default.

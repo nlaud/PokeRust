@@ -68,8 +68,39 @@
 //! `mask_events_public` builds the public stream, and the key chains it.
 //!
 //! Each entry holds a counterfactual value sum, a reach sum, and a visit count.
-//! Two hidden worlds with one public stream share one key. A later public-belief
-//! solve reads [`HorizonValue::counterfactual_value`] as its leaf input.
+//! Two hidden worlds share a key only when the traverser cannot distinguish
+//! them. A later public-belief solve reads the counterfactual value as input.
+//!
+//! # The leaf oracle
+//!
+//! [`search_with_leaves`] takes a [`HorizonLeaves`] map. At the depth limit, the
+//! search reads the value for the public stream and the traverser's information
+//! set. It reads the configured evaluator when the map holds no such key.
+//!
+//! [`MccfrResult::leaf_lookups`] counts each hit and each miss. A terminal leaf
+//! keeps its exact value, because the oracle covers the depth limit alone.
+//!
+//! # The continuation belief
+//!
+//! [`MccfrConfig::horizon_worlds`] is the number of worlds that the search keeps
+//! for each public belief at the depth limit.
+//! [`MccfrResult::horizon_beliefs`] holds those worlds. Each world carries the
+//! importance weight of its path.
+//!
+//! The set is a sample of the continuation belief, not a complete posterior. The
+//! field defaults to zero, so a normal search stores nothing.
+//!
+//! # Continual solving
+//!
+//! [`continual_solve`] runs three passes:
+//!
+//! 1. It solves the root subgame with no oracle. This pass finds the public
+//!    beliefs at the depth limit.
+//! 2. It solves each of those public beliefs as a continuation subgame.
+//! 3. It solves the root subgame again, with the values of pass 2 as the oracle.
+//!
+//! Pass 2 runs in the sorted order of the raw public key. One seed therefore
+//! gives one result.
 //!
 //! # The reported value
 //!
@@ -97,12 +128,12 @@ use crate::information::determinize::{DeterminizeConfig, DeterminizeWarning};
 use crate::information::unknowns::UnknownBattleState;
 use crate::meta::MetaDex;
 use crate::simulator::generative::{TransitionConfig, sample_transition};
-use crate::simulator::scoped_sample_rng;
+use crate::simulator::{scoped_sample_rng, with_sample_rng};
 use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
-use super::belief::{BeliefError, ObservationKey, ParticleBelief};
+use super::belief::{BeliefError, ObservationKey, Particle, ParticleBelief};
 use super::eval::EvalContext;
 use super::infoset::{InfoKey, InfoNode, root_strategy};
 use super::mcts::{
@@ -110,6 +141,8 @@ use super::mcts::{
     WIN, draw_index, terminal_value,
 };
 use super::{JointActionProb, SolveError, SolveWarning};
+
+use rand::Rng;
 
 /// Everything the equilibrium search needs beyond the belief itself.
 ///
@@ -139,6 +172,12 @@ pub struct MccfrConfig {
     /// Zero never resamples. The search resamples one time, before the first
     /// iteration.
     pub resample_threshold: f64,
+    /// Worlds that the search keeps for each public belief at the depth limit.
+    ///
+    /// Zero keeps nothing, and [`MccfrResult::horizon_beliefs`] is then empty. A
+    /// continual solve needs a positive count, because it solves each of those
+    /// beliefs as a continuation subgame.
+    pub horizon_worlds: usize,
 }
 
 /// The uniform mix that the traverser samples with.
@@ -159,6 +198,7 @@ impl Default for MccfrConfig {
             },
             particles: 16,
             resample_threshold: 0.5,
+            horizon_worlds: 0,
         }
     }
 }
@@ -199,6 +239,52 @@ impl HorizonValue {
     }
 }
 
+/// One continuation value for each information set at the depth limit.
+///
+/// The value is the win probability of [`HorizonKey::player`].
+///
+/// [`search_with_leaves`] converts a P2 value to a P1 value before the search
+/// returns it from a leaf.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HorizonLeaves(HashMap<HorizonKey, f64>);
+
+impl HorizonLeaves {
+    /// An empty map. Every lookup then falls back to the leaf evaluator.
+    pub fn new() -> Self {
+        HorizonLeaves(HashMap::new())
+    }
+
+    /// Set the value of one information set, and return the earlier value.
+    ///
+    /// `player_value` is the key player's win probability. The search clamps it
+    /// to `[0, 1]`.
+    pub fn insert(&mut self, key: HorizonKey, player_value: f64) -> Option<f64> {
+        self.0.insert(key, player_value)
+    }
+
+    /// The value of one information set, or `None` when the map has no entry.
+    pub fn get(&self, key: HorizonKey) -> Option<f64> {
+        self.0.get(&key).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// How often the depth limit read a supplied continuation value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeafLookups {
+    /// Depth-limit leaves that found their public belief in the oracle.
+    pub hits: u64,
+    /// Depth-limit leaves that fell back to the configured leaf evaluator.
+    pub misses: u64,
+}
+
 /// An average strategy pair for one fog-of-war position.
 #[derive(Debug, Clone)]
 pub struct MccfrResult {
@@ -219,6 +305,19 @@ pub struct MccfrResult {
     pub sampling: MctsSamplingError,
     /// The counterfactual value of each public belief at the horizon.
     pub horizon: HashMap<HorizonKey, HorizonValue>,
+    /// The worlds that each public belief at the horizon reached.
+    ///
+    /// [`MccfrConfig::horizon_worlds`] bounds the world count of one entry. A
+    /// count of zero leaves this map empty.
+    ///
+    /// This field exposes the states and weights for inspection. It does not
+    /// expose the private histories that [`continual_solve`] retains.
+    pub horizon_beliefs: HashMap<ObservationKey, ParticleBelief>,
+    /// How often the depth limit read the supplied oracle.
+    ///
+    /// A search with no oracle reports zero hits and one miss for each
+    /// depth-limit leaf.
+    pub leaf_lookups: LeafLookups,
     /// The effective sample size of the belief that the search used.
     pub effective_sample_size: f64,
     /// The particle count of that belief.
@@ -229,6 +328,138 @@ pub struct MccfrResult {
     /// What the determinizer reported while it drew the worlds.
     /// Each distinct warning appears one time.
     pub draw_warnings: Vec<DeterminizeWarning>,
+    /// The histories of the sampled horizon worlds.
+    ///
+    /// A continuation solve uses these histories to keep private information
+    /// sets separate. The public particle view above does not expose them.
+    horizon_roots: HashMap<ObservationKey, Vec<RootWorld>>,
+    /// The counterfactual root values of a continuation search.
+    root_values: HashMap<HorizonKey, HorizonValue>,
+}
+
+/// One sampled world and the information-set histories that reached it.
+#[derive(Debug, Clone)]
+struct RootWorld {
+    state: MatchState,
+    histories: [ObservationKey; 2],
+    weight: f64,
+}
+
+/// A weighted search root that keeps each world's private history.
+#[derive(Debug, Clone)]
+struct RootBelief {
+    worlds: Vec<RootWorld>,
+}
+
+impl RootBelief {
+    fn from_particles(belief: &ParticleBelief) -> Result<Self, BeliefError> {
+        if belief.is_empty() {
+            return Err(BeliefError::NoParticles);
+        }
+        let worlds = belief
+            .particles()
+            .iter()
+            .map(|particle| {
+                let histories = match &particle.state {
+                    MatchState::BattleState(battle) => [
+                        ObservationKey::for_player(battle, Player::P1),
+                        ObservationKey::for_player(battle, Player::P2),
+                    ],
+                    _ => [ObservationKey::ROOT; 2],
+                };
+                RootWorld {
+                    state: particle.state.clone(),
+                    histories,
+                    weight: particle.weight,
+                }
+            })
+            .collect();
+        let mut belief = RootBelief { worlds };
+        belief.normalize();
+        Ok(belief)
+    }
+
+    fn from_horizon(worlds: &[RootWorld]) -> Result<Self, BeliefError> {
+        if worlds.is_empty() {
+            return Err(BeliefError::NoParticles);
+        }
+        let mut belief = RootBelief {
+            worlds: worlds.to_vec(),
+        };
+        belief.normalize();
+        Ok(belief)
+    }
+
+    fn len(&self) -> usize {
+        self.worlds.len()
+    }
+
+    fn normalize(&mut self) {
+        for world in &mut self.worlds {
+            if !world.weight.is_finite() || world.weight < 0.0 {
+                world.weight = 0.0;
+            }
+        }
+        let total: f64 = self.worlds.iter().map(|world| world.weight).sum();
+        if !total.is_finite() || total <= 0.0 {
+            let uniform = 1.0 / self.worlds.len() as f64;
+            for world in &mut self.worlds {
+                world.weight = uniform;
+            }
+            return;
+        }
+        for world in &mut self.worlds {
+            world.weight /= total;
+        }
+    }
+
+    fn effective_sample_size(&self) -> f64 {
+        let squares: f64 = self
+            .worlds
+            .iter()
+            .map(|world| world.weight * world.weight)
+            .sum();
+        if squares > 0.0 { 1.0 / squares } else { 0.0 }
+    }
+
+    fn resample_if_degenerate(&mut self, threshold: f64) {
+        let floor = threshold.clamp(0.0, 1.0) * self.worlds.len() as f64;
+        if self.worlds.is_empty() || self.effective_sample_size() >= floor {
+            return;
+        }
+        let count = self.worlds.len();
+        let step = 1.0 / count as f64;
+        let start = with_sample_rng(|rng| rng.gen_range(0.0..1.0)) * step;
+        let mut drawn = Vec::with_capacity(count);
+        let mut source = 0usize;
+        let mut cumulative = self.worlds[0].weight;
+        for member in 0..count {
+            let target = start + member as f64 * step;
+            while cumulative < target && source + 1 < count {
+                source += 1;
+                cumulative += self.worlds[source].weight;
+            }
+            let mut world = self.worlds[source].clone();
+            world.weight = step;
+            drawn.push(world);
+        }
+        self.worlds = drawn;
+    }
+
+    fn draw(&self) -> Option<&RootWorld> {
+        if self.worlds.is_empty() {
+            return None;
+        }
+        let roll = with_sample_rng(|rng| rng.gen_range(0.0..1.0));
+        let mut accumulated = 0.0;
+        for world in &self.worlds {
+            accumulated += world.weight;
+            if roll < accumulated {
+                return Some(world);
+            }
+        }
+        self.worlds.last()
+    }
 }
 
 /// Why a fog-of-war position has no answer.
@@ -296,6 +527,9 @@ pub fn search_belief(
 /// The search resamples the set one time when its effective sample size falls
 /// below [`MccfrConfig::resample_threshold`]. It leaves the caller's set alone.
 ///
+/// Every depth-limit leaf reads the configured evaluator.
+/// [`search_with_leaves`] reads a supplied continuation value instead.
+///
 /// Returns an error when a particle is a preview position or a finished battle,
 /// as [`solve`](super::solve) does.
 pub fn search(
@@ -305,11 +539,51 @@ pub fn search(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &MccfrConfig,
 ) -> Result<MccfrResult, MccfrError> {
-    if belief.is_empty() {
-        return Err(BeliefError::NoParticles.into());
-    }
-    for particle in belief.particles() {
-        match &particle.state {
+    search_with_leaves(seed, belief, pokemon_dex, move_dex, config, None)
+}
+
+/// Searches a particle set against a supplied leaf oracle.
+///
+/// `leaves` holds one continuation value for each public belief at the depth
+/// limit. A leaf whose public belief is missing reads the configured evaluator.
+/// `None` gives the behavior of [`search`].
+///
+/// The oracle covers the depth limit alone. A terminal leaf keeps its exact
+/// value.
+pub fn search_with_leaves(
+    seed: u64,
+    belief: &ParticleBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MccfrConfig,
+    leaves: Option<&HorizonLeaves>,
+) -> Result<MccfrResult, MccfrError> {
+    search_root_belief(
+        seed,
+        RootBelief::from_particles(belief)?,
+        pokemon_dex,
+        move_dex,
+        config,
+        leaves,
+        None,
+        belief.warnings().to_vec(),
+    )
+}
+
+/// Search worlds that already hold their information-set histories.
+#[allow(clippy::too_many_arguments)]
+fn search_root_belief(
+    seed: u64,
+    mut worlds: RootBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MccfrConfig,
+    leaves: Option<&HorizonLeaves>,
+    root_public: Option<ObservationKey>,
+    draw_warnings: Vec<DeterminizeWarning>,
+) -> Result<MccfrResult, MccfrError> {
+    for world in &worlds.worlds {
+        match &world.state {
             MatchState::TeamPreviewState(_) => {
                 return Err(SolveError::TeamPreviewUnsupported.into());
             }
@@ -331,8 +605,7 @@ pub fn search(
     let depth = config.search.depth.max(1);
     let iterations = config.search.iterations.max(1);
 
-    // The search owns its copy, so a resample never changes the caller's set.
-    let mut worlds = belief.clone();
+    // The search owns this set, so a resample does not change the caller's set.
     worlds.resample_if_degenerate(config.resample_threshold);
 
     let mut ctx = MccfrContext {
@@ -340,23 +613,22 @@ pub fn search(
         move_dex,
         cfg: config,
         exploration: config.search.exploration.clamp(MIN_EXPLORATION, 1.0),
+        leaves,
         trees: [HashMap::new(), HashMap::new()],
         root_keys: [Vec::new(), Vec::new()],
         horizon: HashMap::new(),
+        horizon_worlds: HashMap::new(),
+        root_values: HashMap::new(),
+        leaf_lookups: LeafLookups::default(),
         stats: MctsStats::default(),
         action_truncations: [None, None],
     };
 
     let mut values = RunningStats::default();
     for iteration in 0..iterations {
-        let state = worlds.draw().expect("the set is not empty").state.clone();
-        let MatchState::BattleState(battle) = &state else {
-            unreachable!("the search rejected each non-battle state");
-        };
-        let histories = [
-            ObservationKey::for_player(battle, Player::P1),
-            ObservationKey::for_player(battle, Player::P2),
-        ];
+        let root = worlds.draw().expect("the set is not empty").clone();
+        let state = root.state;
+        let histories = root.histories;
         for (keys, &history) in ctx.root_keys.iter_mut().zip(&histories) {
             let key = (history, depth, 0);
             if !keys.contains(&key) {
@@ -372,6 +644,9 @@ pub fn search(
             sample_reach: 1.0,
         };
         let descent = ctx.iterate(&state, depth, 0, histories, ObservationKey::ROOT, walk);
+        if let Some(public) = root_public {
+            ctx.record_root_value(public, histories, walk.traverser, &descent);
+        }
         values.push(descent.p1_value * descent.importance_weight);
     }
 
@@ -397,6 +672,24 @@ pub fn search(
     stats.iterations = values.count;
     stats.elapsed = started.elapsed();
 
+    // Each list has at least one world, so the builder accepts each one.
+    let horizon_beliefs = ctx
+        .horizon_worlds
+        .iter()
+        .filter_map(|(&public, worlds)| {
+            let particles = worlds
+                .iter()
+                .map(|world| Particle {
+                    state: world.state.clone(),
+                    weight: world.weight,
+                })
+                .collect();
+            ParticleBelief::from_particles(particles)
+                .ok()
+                .map(|set| (public, set))
+        })
+        .collect();
+
     Ok(MccfrResult {
         value,
         p1_win_odds: value,
@@ -409,11 +702,155 @@ pub fn search(
             standard_error: None,
         },
         horizon: ctx.horizon,
+        horizon_beliefs,
+        leaf_lookups: ctx.leaf_lookups,
         effective_sample_size: worlds.effective_sample_size(),
         particles: worlds.len(),
         stats,
         warnings,
-        draw_warnings: worlds.warnings().to_vec(),
+        draw_warnings,
+        horizon_roots: ctx.horizon_worlds,
+        root_values: ctx.root_values,
+    })
+}
+
+// ── Continual solving ───────────────────────────────────────────────────────
+
+/// The two searches of one continual solve.
+#[derive(Debug, Clone, Copy)]
+pub struct ContinualConfig {
+    /// The search of the root subgame. Both root passes use it.
+    ///
+    /// [`continual_solve`] raises [`MccfrConfig::horizon_worlds`] to one for the
+    /// first pass. A first pass that keeps no world has no continuation belief
+    /// to solve.
+    pub root: MccfrConfig,
+    /// The search of each continuation subgame.
+    pub continuation: MccfrConfig,
+    /// The largest number of continuation subgames to solve.
+    ///
+    /// `None` solves every public belief of the first pass. A cap keeps the
+    /// first beliefs of the sorted key order.
+    pub max_subgames: Option<usize>,
+}
+
+impl Default for ContinualConfig {
+    fn default() -> Self {
+        ContinualConfig {
+            root: MccfrConfig {
+                horizon_worlds: 4,
+                ..MccfrConfig::default()
+            },
+            continuation: MccfrConfig::default(),
+            max_subgames: Some(16),
+        }
+    }
+}
+
+/// One solved continuation subgame.
+#[derive(Debug, Clone)]
+pub struct ContinualStep {
+    /// The public belief that this step solved.
+    pub public: ObservationKey,
+    /// Worlds of the continuation belief.
+    pub worlds: usize,
+    /// P1's win probability of the subgame.
+    pub value: f64,
+    /// What the subgame solve cost.
+    pub stats: MctsStats,
+    /// Why the value of the subgame is approximate.
+    pub warnings: Vec<SolveWarning>,
+}
+
+/// What one continual solve produced.
+#[derive(Debug, Clone)]
+pub struct ContinualResult {
+    /// The first pass, which used the configured leaf evaluator.
+    pub root: MccfrResult,
+    /// The last pass, which used the values of the continuation subgames.
+    ///
+    /// This pass is the answer of the continual solve.
+    pub composed: MccfrResult,
+    /// One entry for each continuation subgame, in sorted public-key order.
+    pub steps: Vec<ContinualStep>,
+    /// The information-set oracle that pass 2 built and pass 3 read.
+    pub leaves: HorizonLeaves,
+}
+
+/// Solves the root subgame, its continuation subgames, and then the root again.
+///
+/// The first pass finds the public beliefs at the depth limit. Pass 2 solves
+/// each of those beliefs, and pass 3 reads their information-set values. The
+/// last pass therefore looks one subgame deeper than one search at that depth.
+///
+/// A continuation belief holds the sampled worlds of one public stream, not a
+/// complete posterior. The value of a subgame is an estimate for that reason.
+///
+/// Returns an error when a particle is a preview position or a finished battle,
+/// as [`search`] does.
+pub fn continual_solve(
+    seed: u64,
+    belief: &ParticleBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &ContinualConfig,
+) -> Result<ContinualResult, MccfrError> {
+    let first = MccfrConfig {
+        horizon_worlds: config.root.horizon_worlds.max(1),
+        ..config.root
+    };
+    let root = search(seed, belief, pokemon_dex, move_dex, &first)?;
+
+    // The raw key order is stable across runs, so the seed of each subgame and
+    // the order of the steps are stable too.
+    let mut publics: Vec<ObservationKey> = root.horizon_beliefs.keys().copied().collect();
+    publics.sort_by_key(|public| public.raw());
+    if let Some(cap) = config.max_subgames {
+        publics.truncate(cap);
+    }
+
+    let mut leaves = HorizonLeaves::new();
+    let mut steps = Vec::with_capacity(publics.len());
+    for (index, public) in publics.into_iter().enumerate() {
+        let worlds = &root.horizon_roots[&public];
+        let subgame = search_root_belief(
+            seed.wrapping_add(index as u64 + 1),
+            RootBelief::from_horizon(worlds)?,
+            pokemon_dex,
+            move_dex,
+            &config.continuation,
+            None,
+            Some(public),
+            root.draw_warnings.clone(),
+        )?;
+        for (&key, value) in &subgame.root_values {
+            if let Some(player_value) = value.counterfactual_value() {
+                leaves.insert(key, player_value);
+            }
+        }
+        steps.push(ContinualStep {
+            public,
+            worlds: worlds.len(),
+            value: subgame.value,
+            stats: subgame.stats,
+            warnings: subgame.warnings,
+        });
+    }
+
+    let composed = search_with_leaves(
+        seed.wrapping_add(steps.len() as u64 + 1),
+        belief,
+        pokemon_dex,
+        move_dex,
+        &config.root,
+        Some(&leaves),
+    )?;
+
+    Ok(ContinualResult {
+        root,
+        composed,
+        steps,
+        leaves,
     })
 }
 
@@ -495,12 +932,20 @@ struct MccfrContext<'a> {
     cfg: &'a MccfrConfig,
     /// The exploration rate after the zero check.
     exploration: f64,
+    /// The continuation value of each public belief at the depth limit.
+    leaves: Option<&'a HorizonLeaves>,
     /// The tree of P1 and the tree of P2, in that order.
     trees: [HashMap<InfoKey, InfoNode>; 2],
     /// Root information sets in first-visit order.
     root_keys: [Vec<InfoKey>; 2],
     /// The counterfactual value of each public belief at a leaf.
     horizon: HashMap<HorizonKey, HorizonValue>,
+    /// The worlds that each public belief at the depth limit reached.
+    horizon_worlds: HashMap<ObservationKey, Vec<RootWorld>>,
+    /// The values at the root of a continuation search.
+    root_values: HashMap<HorizonKey, HorizonValue>,
+    /// How often the depth limit read the oracle.
+    leaf_lookups: LeafLookups,
     stats: MctsStats,
     /// Largest action-set truncation for each player anywhere in the trees.
     action_truncations: [Option<(usize, usize)>; 2],
@@ -535,7 +980,8 @@ impl MccfrContext<'_> {
             MatchState::BattleState(battle) => battle,
         };
         if depth == 0 {
-            let value = self.score(battle);
+            let value = self.horizon_leaf_value(battle, public, histories, walk.traverser);
+            self.record_horizon_world(public, state, histories, walk);
             return self.leaf(value, histories, public, walk);
         }
 
@@ -620,6 +1066,104 @@ impl MccfrContext<'_> {
             p1_value: below.p1_value,
             importance_weight: below.importance_weight,
         }
+    }
+
+    /// The value of one depth-limit leaf, as P1's win probability.
+    ///
+    /// The oracle wins over the configured evaluator. A utility is a win
+    /// probability, so an oracle value clamps to `[0, 1]`.
+    fn horizon_leaf_value(
+        &mut self,
+        battle: &BattleState,
+        public: ObservationKey,
+        histories: [ObservationKey; 2],
+        traverser: usize,
+    ) -> f64 {
+        let key = HorizonKey {
+            public,
+            infoset: histories[traverser],
+            player: player_of(traverser),
+        };
+        match self.leaves.and_then(|leaves| leaves.get(key)) {
+            Some(value) => {
+                self.leaf_lookups.hits += 1;
+                let player_value = if value.is_finite() {
+                    value.clamp(LOSS, WIN)
+                } else {
+                    0.5
+                };
+                if traverser == 0 {
+                    player_value
+                } else {
+                    WIN - player_value
+                }
+            }
+            None => {
+                self.leaf_lookups.misses += 1;
+                self.score(battle)
+            }
+        }
+    }
+
+    /// Keep one world of the continuation belief of `public`.
+    ///
+    /// The search keeps the first [`MccfrConfig::horizon_worlds`] worlds that
+    /// reach the key, so one seed gives one set. The weight of a world is the
+    /// importance weight of the path that reached it.
+    fn record_horizon_world(
+        &mut self,
+        public: ObservationKey,
+        state: &MatchState,
+        histories: [ObservationKey; 2],
+        walk: Walk,
+    ) {
+        let capacity = self.cfg.horizon_worlds;
+        if capacity == 0 {
+            return;
+        }
+        // A weight of zero carries no belief mass, and the normalization of the
+        // set would drop it anyway.
+        let weight = walk.importance_weight();
+        if !weight.is_finite() || weight <= 0.0 {
+            return;
+        }
+        let worlds = self.horizon_worlds.entry(public).or_default();
+        if worlds.len() >= capacity {
+            return;
+        }
+        worlds.push(RootWorld {
+            state: state.clone(),
+            histories,
+            weight,
+        });
+    }
+
+    /// Record one continuation value at its preserved root information set.
+    fn record_root_value(
+        &mut self,
+        public: ObservationKey,
+        histories: [ObservationKey; 2],
+        traverser: usize,
+        descent: &Descent,
+    ) {
+        let utility = if traverser == 0 {
+            descent.p1_value
+        } else {
+            WIN - descent.p1_value
+        };
+        let reach = descent.importance_weight;
+        if !reach.is_finite() || reach <= 0.0 || !utility.is_finite() {
+            return;
+        }
+        let key = HorizonKey {
+            public,
+            infoset: histories[traverser],
+            player: player_of(traverser),
+        };
+        let entry = self.root_values.entry(key).or_default();
+        entry.value_sum += reach * utility;
+        entry.reach_sum += reach;
+        entry.visits += 1;
     }
 
     /// Record one leaf and start the return path.

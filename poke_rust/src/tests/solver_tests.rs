@@ -31,7 +31,7 @@ use crate::solver::chance::ChanceMode;
 use crate::solver::exploit::exploitability;
 use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
-use crate::solver::mccfr::{self, MccfrConfig};
+use crate::solver::mccfr::{self, ContinualConfig, MccfrConfig};
 use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
@@ -4715,6 +4715,246 @@ fn mccfr_reports_horizon_counterfactual_values() {
     };
     assert_eq!(keys_of(Player::P1), 1, "P1 cannot tell the worlds apart");
     assert_eq!(keys_of(Player::P2), 2, "P2 knows its own Special Defense");
+}
+
+/// An oracle over every reached public belief must replace the leaf evaluator.
+/// A value of one at every leaf therefore pushes the root value to one.
+#[test]
+fn mccfr_reads_a_supplied_leaf_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = small_contest();
+    let belief = belief_of_worlds(vec![battle]);
+    let config = mccfr_config(1_000, 1);
+
+    // The first search reports the public beliefs that the position reaches.
+    let plain = mccfr::search(41, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+    let mut leaves = mccfr::HorizonLeaves::new();
+    for key in plain.horizon.keys() {
+        let player_value = if key.player == Player::P1 { 1.0 } else { 0.0 };
+        leaves.insert(*key, player_value);
+    }
+    assert!(!leaves.is_empty(), "the search reached no public belief");
+
+    let oracle = mccfr::search_with_leaves(
+        41,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&leaves),
+    )
+    .expect("the position is playable");
+
+    assert_eq!(oracle.leaf_lookups.misses, 0, "a public belief was missing");
+    assert_eq!(
+        oracle.leaf_lookups.hits, 1_000,
+        "each iteration reaches one leaf"
+    );
+    assert!(
+        oracle.value > 0.9,
+        "the oracle gave {}, the evaluator gave {}",
+        oracle.value,
+        plain.value
+    );
+    assert!(oracle.value > plain.value + 0.2);
+}
+
+/// A continuation value must use the private information set of each player.
+/// One public belief can contain more than one private information set.
+#[test]
+fn continual_solve_keeps_private_horizon_information() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut hidden = certain_world();
+    hidden.p2_active_mons[0].stats[4] += 20;
+    let belief = belief_of_worlds(vec![certain_world(), hidden]);
+    let config = ContinualConfig {
+        root: MccfrConfig {
+            horizon_worlds: 64,
+            ..mccfr_config(256, 1)
+        },
+        continuation: mccfr_config(256, 1),
+        max_subgames: None,
+    };
+
+    let result = mccfr::continual_solve(47, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    assert_eq!(result.steps.len(), 1, "the worlds have one public stream");
+    let p1_keys = result
+        .root
+        .horizon
+        .keys()
+        .filter(|key| key.player == Player::P1)
+        .count();
+    let p2_keys = result
+        .root
+        .horizon
+        .keys()
+        .filter(|key| key.player == Player::P2)
+        .count();
+    assert_eq!(p1_keys, 1, "P1 cannot distinguish the hidden worlds");
+    assert_eq!(p2_keys, 2, "P2 knows its private Special Defense");
+    for key in result.root.horizon.keys() {
+        assert!(
+            result.leaves.get(*key).is_some(),
+            "the continuation omitted {key:?}"
+        );
+    }
+    assert_eq!(result.composed.leaf_lookups.misses, 0);
+}
+
+/// A missing public belief must fall back to the configured evaluator. An empty
+/// oracle must therefore give the result of a plain search.
+#[test]
+fn mccfr_falls_back_to_the_evaluator_on_a_missing_leaf() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![small_contest()]);
+    let config = mccfr_config(64, 1);
+    let empty = mccfr::HorizonLeaves::new();
+
+    let plain = mccfr::search(43, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+    let fallback =
+        mccfr::search_with_leaves(43, &belief, pokemon_dex, move_dex, &config, Some(&empty))
+            .expect("the position is playable");
+
+    assert_eq!(fallback.value, plain.value);
+    assert_eq!(fallback.leaf_lookups.hits, 0);
+    assert_eq!(fallback.leaf_lookups.misses, 64);
+    assert_eq!(plain.leaf_lookups.hits, 0);
+    assert_eq!(plain.leaf_lookups.misses, 64);
+}
+
+/// The point of a continual solve: a root of depth one that reads solved
+/// continuation values must land near a single search of depth two.
+#[test]
+fn mccfr_horizon_values_support_a_continual_solve() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![small_contest()]);
+    let config = ContinualConfig {
+        root: MccfrConfig {
+            horizon_worlds: 2,
+            ..mccfr_config(3_000, 1)
+        },
+        continuation: mccfr_config(600, 1),
+        max_subgames: Some(8),
+    };
+
+    let result = mccfr::continual_solve(53, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    assert!(!result.steps.is_empty(), "no continuation subgame ran");
+    assert_eq!(
+        result.leaves.len(),
+        result.steps.len() * 2,
+        "each public belief needs one value for each player"
+    );
+    for step in &result.steps {
+        assert!(step.worlds > 0, "{step:?} holds no world");
+        assert!((0.0..=1.0).contains(&step.value), "{step:?}");
+    }
+    assert!(
+        result.composed.leaf_lookups.hits > 0,
+        "the last pass read no continuation value"
+    );
+
+    // Two turns of one search are the reference for a root turn that reads the
+    // value of the turn below it.
+    let deep = MccfrConfig {
+        search: MctsConfig {
+            depth: 2,
+            ..mccfr_config(3_000, 1).search
+        },
+        ..mccfr_config(3_000, 1)
+    };
+    let one_shot = mccfr::search(53, &belief, pokemon_dex, move_dex, &deep)
+        .expect("the position is playable");
+
+    assert!(
+        (result.composed.value - one_shot.value).abs() < 0.1,
+        "the continual solve gave {}, the depth-two search gave {}",
+        result.composed.value,
+        one_shot.value
+    );
+}
+
+/// One seed and one configuration must give one continual solve.
+#[test]
+fn continual_solve_is_reproducible() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![small_contest()]);
+    let config = ContinualConfig {
+        root: MccfrConfig {
+            horizon_worlds: 2,
+            ..mccfr_config(200, 1)
+        },
+        continuation: mccfr_config(60, 1),
+        max_subgames: Some(4),
+    };
+
+    let first = mccfr::continual_solve(59, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+    let second = mccfr::continual_solve(59, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    assert_eq!(first.composed.value, second.composed.value);
+    assert_eq!(first.root.value, second.root.value);
+    assert_eq!(first.leaves, second.leaves);
+    let values = |result: &mccfr::ContinualResult| -> Vec<(u64, f64)> {
+        result
+            .steps
+            .iter()
+            .map(|step| (step.public.raw(), step.value))
+            .collect()
+    };
+    assert_eq!(values(&first), values(&second));
+}
+
+/// The second half of the baseline comparison: the sampled strategy pair must
+/// give away about as much as the pair of the exact solver does.
+#[test]
+fn mccfr_matches_double_oracle_on_exploitability() {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = small_contest();
+    let state = MatchState::BattleState(battle.clone());
+    let config = base_config();
+
+    let exact = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            algorithm: SolverAlgorithm::DoubleOracle,
+            ..config
+        },
+    )
+    .expect("the position is playable");
+
+    let belief = belief_of_worlds(vec![battle]);
+    let sampled = mccfr::search(61, &belief, pokemon_dex, move_dex, &mccfr_config(3_000, 1))
+        .expect("the position is playable");
+
+    let gap_of = |p1: &[JointActionProb], p2: &[JointActionProb]| -> f64 {
+        exploitability(&state, pokemon_dex, move_dex, &config, p1, p2)
+            .expect("the position is playable")
+            .gap
+    };
+    let exact_gap = gap_of(&exact.p1_strategy, &exact.p2_strategy);
+    let sampled_gap = gap_of(&sampled.p1_strategy, &sampled.p2_strategy);
+    let uniform_gap = gap_of(
+        &uniform_strategy(&complete_actions(&state, Player::P1)),
+        &uniform_strategy(&complete_actions(&state, Player::P2)),
+    );
+
+    assert!(
+        (sampled_gap - exact_gap).abs() < 0.05,
+        "MCCFR gave away {sampled_gap}, double oracle gave away {exact_gap}"
+    );
+    assert!(
+        sampled_gap < uniform_gap && exact_gap < uniform_gap,
+        "uniform play gave away {uniform_gap}"
+    );
 }
 
 /// The equilibrium search refuses the positions that the exact search refuses.
