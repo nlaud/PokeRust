@@ -768,11 +768,43 @@ impl Learner {
     /// of the average falls while other worlds play. This is the price of one
     /// strategy over worlds with different action sets.
     pub(super) fn accumulate_subset(&mut self, allowed: &[usize], strategy: &[f64]) {
+        self.accumulate_subset_scaled(allowed, strategy, 1.0);
+    }
+
+    /// Add one played subset strategy to the average, at a chosen weight.
+    ///
+    /// [`mccfr`](super::mccfr) weights each visit by the counterfactual reach of
+    /// the information set over the sampling probability of the path. A caller
+    /// that gives every visit the same weight uses [`Learner::accumulate_subset`]
+    /// instead.
+    pub(super) fn accumulate_subset_scaled(
+        &mut self,
+        allowed: &[usize],
+        strategy: &[f64],
+        weight: f64,
+    ) {
         for (slot, &action) in allowed.iter().enumerate() {
             if let (Some(sum), Some(probability)) =
                 (self.strategy_sum.get_mut(action), strategy.get(slot))
             {
-                *sum += probability;
+                *sum += weight * probability;
+            }
+        }
+    }
+
+    /// Add one regret to each action of a subset.
+    ///
+    /// Entry `i` of `regrets` belongs to action `allowed[i]`. An index outside
+    /// the learner is a caller error, so this method drops it rather than growing
+    /// the learner behind the caller.
+    ///
+    /// Counterfactual regret minimization computes the complete regret vector of
+    /// a node before it writes anything, so it needs this entry point instead of
+    /// [`Learner::update_subset`].
+    pub(super) fn add_regrets_subset(&mut self, allowed: &[usize], regrets: &[f64]) {
+        for (slot, &action) in allowed.iter().enumerate() {
+            if let (Some(score), Some(regret)) = (self.scores.get_mut(action), regrets.get(slot)) {
+                *score += regret;
             }
         }
     }
@@ -918,6 +950,11 @@ impl Learner {
             return vec![1.0 / actions as f64; actions];
         }
         self.strategy_sum.iter().map(|sum| sum / total).collect()
+    }
+
+    /// The total weight of the strategies in the average.
+    pub(super) fn average_weight(&self) -> f64 {
+        self.strategy_sum.iter().sum()
     }
 }
 

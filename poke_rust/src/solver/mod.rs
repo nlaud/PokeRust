@@ -71,6 +71,20 @@
 //!
 //! [`ismcts::search`] keys its nodes by that type, never by a `MatchState` hash.
 //! Two hidden worlds that one player cannot tell apart therefore share one node.
+//! [`infoset`] holds the node itself, and both fog-of-war searches read it.
+//!
+//! # The equilibrium baseline
+//!
+//! Both ISMCTS trees learn against the same sampled opponent, so the pair
+//! converges to a self-consistent strategy rather than to an equilibrium.
+//!
+//! [`mccfr::search`] runs outcome-sampling counterfactual regret minimization
+//! over the same information sets.
+//! It alternates the traverser, and it returns an average strategy for each
+//! player.
+//! [`mccfr::MccfrResult::horizon`] also holds the counterfactual value of each
+//! public belief at the depth limit, which a later public-belief solve reads as
+//! its leaf input.
 //!
 //! # Exploitability
 //!
@@ -125,8 +139,10 @@ pub mod belief;
 pub mod chance;
 pub mod eval;
 pub mod exploit;
+pub mod infoset;
 pub mod ismcts;
 pub mod matrix;
+pub mod mccfr;
 pub mod mcts;
 pub mod preview;
 pub mod search;

@@ -87,10 +87,11 @@ Use it only as a labeled perfect-information Monte Carlo baseline.
 It has weighted particles, normalized weights, posterior updates,
 effective sample-size checks, resampling, and the observation key.
 `solver::ismcts` is the fast heuristic baseline that reads it.
+`solver::mccfr` is the outcome-sampling equilibrium baseline.
+It also reports the counterfactual value of each public belief at the depth limit.
 
-- [ ] Add outcome-sampling MCCFR as the first equilibrium baseline.
-  - [ ] Build public-belief counterfactual values at depth limits.
-  - [ ] Test public-belief continual solving after the baseline works.
+- [ ] Extend the outcome-sampling MCCFR baseline.
+  - [ ] Test public-belief continual solving on the horizon values.
   - [ ] Compare MCCFR with extensive-form double oracle.
 
   Use `mask_events_for` and the event log as the observation model.

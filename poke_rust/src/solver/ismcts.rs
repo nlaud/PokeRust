@@ -43,7 +43,8 @@
 //! node therefore holds a registry that maps one joint action to one learner
 //! index. A visit plays only the registered actions that its own world permits,
 //! so the learner works as a subset-armed bandit. Read
-//! [`Learner::update_subset`](super::mcts) for that update.
+//! [`infoset`](super::infoset) for the node, and `Learner::update_subset` in
+//! [`mcts`](super::mcts) for that update.
 //!
 //! The reported root strategy covers the union of the actions over all root
 //! information sets. The report weights each information set by its visits.
@@ -91,17 +92,17 @@ use crate::information::unknowns::UnknownBattleState;
 use crate::meta::MetaDex;
 use crate::simulator::generative::{TransitionConfig, sample_transition};
 use crate::simulator::scoped_sample_rng;
-use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
-use super::belief::{BeliefError, JointActionKey, ObservationKey, ParticleBelief};
+use super::belief::{BeliefError, ObservationKey, ParticleBelief};
 use super::eval::EvalContext;
+use super::infoset::{InfoKey, InfoNode, root_strategy};
 use super::mcts::{
-    LOSS, Learner, MIN_EXPLORATION, MctsConfig, MctsResult, MctsSamplingError, MctsStats,
-    RunningStats, WIN, draw_index, terminal_value,
+    LOSS, MIN_EXPLORATION, MctsConfig, MctsResult, MctsSamplingError, MctsStats, RunningStats, WIN,
+    draw_index, terminal_value,
 };
-use super::search::strategy_of;
 use super::{JointActionProb, SolveError, SolveWarning};
 
 /// Everything the fog-of-war search needs beyond the belief itself.
@@ -332,8 +333,8 @@ pub fn search(
         values.push(ctx.iterate(&state, depth, 0, histories));
     }
 
-    let p1_strategy = ctx.root_strategy(0);
-    let p2_strategy = ctx.root_strategy(1);
+    let p1_strategy = root_strategy(&ctx.trees[0], &ctx.root_keys[0]);
+    let p2_strategy = root_strategy(&ctx.trees[1], &ctx.root_keys[1]);
 
     let mut warnings = Vec::new();
     for (player, truncation) in [
@@ -376,55 +377,6 @@ pub fn search(
 }
 
 // ── The trees ───────────────────────────────────────────────────────────────
-
-/// One information set: what a player saw, the depth, and the chain counter.
-type InfoKey = (ObservationKey, u8, u8);
-
-/// One information set of one player.
-struct InfoNode {
-    learner: Learner,
-    /// The learner index of each registered joint action.
-    index_of: HashMap<JointActionKey, usize>,
-    /// The joint action of each learner index, for the report.
-    commands: Vec<Vec<BattleCommand>>,
-    /// Iterations that played an action here.
-    visits: u64,
-}
-
-impl InfoNode {
-    fn new() -> Self {
-        InfoNode {
-            learner: Learner::new(0),
-            index_of: HashMap::new(),
-            commands: Vec::new(),
-            visits: 0,
-        }
-    }
-
-    /// Register `actions`, and return the learner index of each one in order.
-    ///
-    /// An action that a world already offered keeps its index, so the learner
-    /// keeps what it learned about it. A new action gets a new index and a score
-    /// of zero.
-    fn register(&mut self, actions: &[Vec<BattleCommand>]) -> Vec<usize> {
-        let mut indexes = Vec::with_capacity(actions.len());
-        for commands in actions {
-            let key = JointActionKey::new(commands);
-            let index = match self.index_of.get(&key) {
-                Some(&index) => index,
-                None => {
-                    let index = self.commands.len();
-                    self.index_of.insert(key, index);
-                    self.commands.push(commands.clone());
-                    index
-                }
-            };
-            indexes.push(index);
-        }
-        self.learner.grow_to(self.commands.len());
-        indexes
-    }
-}
 
 struct IsmctsContext<'a> {
     pokemon_dex: &'a HashMap<Species, PokemonData>,
@@ -561,7 +513,6 @@ impl IsmctsContext<'_> {
         let Some(node) = self.trees[slot].get_mut(&key) else {
             return;
         };
-        node.visits += 1;
         node.learner.accumulate_subset(&pick.allowed, &pick.strategy);
         node.learner.update_subset(
             policy,
@@ -571,56 +522,6 @@ impl IsmctsContext<'_> {
             reward,
             control_variate,
         );
-    }
-
-    /// The average strategy over every root information set of one player.
-    ///
-    /// Each set contributes its average strategy, weighted by its visits. A
-    /// player with one root set therefore reports that set alone. Read the
-    /// module documentation for what the mixture of several sets means.
-    ///
-    /// An empty vector means that no iteration reached a root node. Only a
-    /// belief of finished battles can do that, and the entry check refuses one.
-    fn root_strategy(&self, slot: usize) -> Vec<JointActionProb> {
-        let mut index_of: HashMap<JointActionKey, usize> = HashMap::new();
-        let mut actions: Vec<Vec<BattleCommand>> = Vec::new();
-        let mut sums: Vec<f64> = Vec::new();
-
-        for key in &self.root_keys[slot] {
-            let Some(node) = self.trees[slot].get(key) else {
-                continue;
-            };
-            let strategy = node.learner.average_strategy();
-            for (commands, probability) in node.commands.iter().zip(strategy) {
-                let action_key = JointActionKey::new(commands);
-                let index = match index_of.get(&action_key) {
-                    Some(&index) => index,
-                    None => {
-                        let index = actions.len();
-                        index_of.insert(action_key, index);
-                        actions.push(commands.clone());
-                        sums.push(0.0);
-                        index
-                    }
-                };
-                sums[index] += probability * node.visits as f64;
-            }
-        }
-
-        let joint = JointActions {
-            total: actions.len(),
-            actions,
-        };
-        let total: f64 = sums.iter().sum();
-        if total > 0.0 {
-            for probability in &mut sums {
-                *probability /= total;
-            }
-        }
-        // A zero floor, not `EPS`: explicit exploration gives every action a
-        // real probability, and a large action set can push that probability
-        // below `EPS`.
-        strategy_of(&joint, &sums, 0.0)
     }
 
     /// The legal joint actions of one player, with any truncation recorded.
@@ -668,48 +569,5 @@ impl IsmctsContext<'_> {
             }
             _ => (depth.saturating_sub(1), 0),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::solver::mcts::SelectionPolicy;
-
-    /// A node must give one index to one joint action, whatever world offered
-    /// it. Two worlds that share an action must therefore share its learner
-    /// entry.
-    #[test]
-    fn a_registry_reuses_the_index_of_a_known_action() {
-        let mut node = InfoNode::new();
-        let pass = vec![vec![BattleCommand::Pass]];
-        let both = vec![
-            vec![BattleCommand::Pass],
-            vec![BattleCommand::Struggle { target: None }],
-        ];
-
-        assert_eq!(node.register(&pass), vec![0]);
-        assert_eq!(node.register(&both), vec![0, 1]);
-        assert_eq!(node.register(&pass), vec![0]);
-        assert_eq!(node.commands.len(), 2);
-        assert_eq!(node.learner.average_strategy().len(), 2);
-    }
-
-    /// A world that offers one of two registered actions must play that one.
-    #[test]
-    fn a_subset_strategy_covers_only_the_world_actions() {
-        let mut node = InfoNode::new();
-        node.register(&[
-            vec![BattleCommand::Pass],
-            vec![BattleCommand::Struggle { target: None }],
-        ]);
-        let allowed = node.register(&[vec![BattleCommand::Struggle { target: None }]]);
-
-        assert_eq!(allowed, vec![1]);
-        let strategy = node
-            .learner
-            .strategy_subset(SelectionPolicy::RegretMatching, 0.1, &allowed);
-        assert_eq!(strategy.len(), 1);
-        assert!((strategy[0] - 1.0).abs() < 1e-12, "{strategy:?}");
     }
 }

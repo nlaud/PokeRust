@@ -31,6 +31,7 @@ use crate::solver::chance::ChanceMode;
 use crate::solver::exploit::exploitability;
 use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
+use crate::solver::mccfr::{self, MccfrConfig};
 use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
@@ -4487,4 +4488,264 @@ fn species_only_belief() -> UnknownBattleState {
         round_used_this_turn: false,
         predicates: vec![],
     }
+}
+
+// ── Fog-of-war MCCFR ────────────────────────────────────────────────────────
+
+/// One Pokemon a side, two moves each, and no bench.
+///
+/// Both moves always hit and neither has a secondary effect, so one damage roll
+/// makes every matrix cell deterministic. The exact solver therefore supplies an
+/// oracle value for the same position.
+fn small_contest() -> BattleState {
+    let mut battle = battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::WaterGun, PokemonMove::Strength],
+        )],
+        vec![],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::WaterGun, PokemonMove::Strength],
+        )],
+        vec![],
+    );
+    // A Tera or a Mega choice would double each action set.
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+    battle.p1_has_mega = false;
+    battle.p2_has_mega = false;
+    battle
+}
+
+fn mccfr_config(iterations: u32, particles: usize) -> MccfrConfig {
+    // The default exploration rate belongs to the estimator, so the helper keeps
+    // it and narrows only the cost axes.
+    let base = MccfrConfig::default();
+    MccfrConfig {
+        search: MctsConfig {
+            iterations,
+            depth: 1,
+            damage_rolls: 1,
+            consider_crit: false,
+            ..base.search
+        },
+        particles,
+        ..base
+    }
+}
+
+/// A belief that hides nothing is a perfect-information position. The search
+/// must then return what the exact search returns.
+#[test]
+fn mccfr_matches_the_exact_value_without_hidden_data() {
+    let (pokemon_dex, move_dex) = dexes();
+    let world = certain_world();
+    let exact = solve(
+        &MatchState::BattleState(world.clone()),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            algorithm: SolverAlgorithm::BackwardInduction,
+            ..base_config()
+        },
+    )
+    .expect("the position is playable")
+    .value;
+
+    let belief = belief_of_worlds(vec![world]);
+    let result = mccfr::search(5, &belief, pokemon_dex, move_dex, &mccfr_config(16, 1))
+        .expect("the position is playable");
+
+    assert!(
+        (result.value - exact).abs() < 1e-9,
+        "the search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert_eq!(result.p1_strategy.len(), 1);
+    assert_eq!(result.p2_strategy.len(), 1);
+    assert_eq!(result.particles, 1);
+    assert_eq!(result.stats.turns_simulated, 16);
+    assert_eq!(result.sampling.standard_error, None);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// One seed and one configuration must give one result.
+#[test]
+fn mccfr_is_reproducible() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![
+        world_with_opponent_speed(1),
+        world_with_opponent_speed(200),
+    ]);
+    let config = mccfr_config(24, 2);
+
+    let first = mccfr::search(11, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+    let second = mccfr::search(11, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.stats.nodes_created, second.stats.nodes_created);
+    assert_eq!(first.horizon.len(), second.horizon.len());
+    let probabilities = |result: &mccfr::MccfrResult| -> Vec<f64> {
+        result
+            .p1_strategy
+            .iter()
+            .chain(&result.p2_strategy)
+            .map(|action| action.probability)
+            .collect()
+    };
+    assert_eq!(probabilities(&first), probabilities(&second));
+}
+
+/// The point of an equilibrium baseline: the returned pair must give away less
+/// than uniform play does. `exploit::exploitability` answers both pairs over the
+/// complete action set of the same position.
+#[test]
+fn mccfr_beats_uniform_play_on_exploitability() {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = small_contest();
+    let state = MatchState::BattleState(battle.clone());
+    let config = base_config();
+
+    let belief = belief_of_worlds(vec![battle.clone()]);
+    let result = mccfr::search(23, &belief, pokemon_dex, move_dex, &mccfr_config(3_000, 1))
+        .expect("the position is playable");
+
+    let gap_of = |p1: &[JointActionProb], p2: &[JointActionProb]| -> f64 {
+        exploitability(&state, pokemon_dex, move_dex, &config, p1, p2)
+            .expect("the position is playable")
+            .gap
+    };
+    let uniform = gap_of(
+        &uniform_strategy(&complete_actions(&state, Player::P1)),
+        &uniform_strategy(&complete_actions(&state, Player::P2)),
+    );
+    let learned = gap_of(&result.p1_strategy, &result.p2_strategy);
+
+    assert!(
+        learned < uniform,
+        "MCCFR gave away {learned}, uniform play gave away {uniform}"
+    );
+}
+
+/// The sampled value must sit near the value that the exact solver computes for
+/// the same position, depth, and leaf evaluator.
+#[test]
+fn mccfr_agrees_with_double_oracle_on_a_small_position() {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = small_contest();
+    let exact = solve(
+        &MatchState::BattleState(battle.clone()),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            algorithm: SolverAlgorithm::DoubleOracle,
+            ..base_config()
+        },
+    )
+    .expect("the position is playable")
+    .value;
+
+    let belief = belief_of_worlds(vec![battle]);
+    let result = mccfr::search(31, &belief, pokemon_dex, move_dex, &mccfr_config(3_000, 1))
+        .expect("the position is playable");
+
+    assert!(
+        (result.value - exact).abs() < 0.05,
+        "MCCFR returned {}, double oracle returned {exact}",
+        result.value
+    );
+}
+
+/// P1 cannot see the Speed of P2, but P2 knows its own Speed. Thus, P1 must use
+/// one root information set and P2 must use two root information sets.
+#[test]
+fn mccfr_keeps_each_players_private_root_information() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![
+        world_with_opponent_speed(1),
+        world_with_opponent_speed(200),
+    ]);
+
+    let result = mccfr::search(21, &belief, pokemon_dex, move_dex, &mccfr_config(24, 2))
+        .expect("the position is playable");
+
+    // P1 has one root. P2 has one root for each known private Speed.
+    assert_eq!(
+        result.stats.nodes_created, 3,
+        "the search merged private information"
+    );
+}
+
+/// The horizon map is the leaf input of a later public-belief solve. Two hidden
+/// worlds with one public stream must therefore share one key.
+#[test]
+fn mccfr_reports_horizon_counterfactual_values() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut hidden = certain_world();
+    // Tackle is physical, so a different Special Defense changes no event of the
+    // turn. The two worlds give one public stream and one P1 information set.
+    hidden.p2_active_mons[0].stats[4] += 20;
+    let belief = belief_of_worlds(vec![certain_world(), hidden]);
+
+    let result = mccfr::search(13, &belief, pokemon_dex, move_dex, &mccfr_config(32, 2))
+        .expect("the position is playable");
+
+    assert!(!result.horizon.is_empty(), "the horizon holds nothing");
+    for (key, value) in &result.horizon {
+        assert!(value.visits > 0, "{key:?} holds {value:?}");
+        assert!(value.reach_sum > 0.0, "{key:?} holds {value:?}");
+        let counterfactual = value
+            .counterfactual_value()
+            .expect("a positive reach gives a value");
+        assert!(
+            (0.0..=1.0).contains(&counterfactual),
+            "{key:?} holds {counterfactual}"
+        );
+    }
+
+    let keys_of = |player: Player| -> usize {
+        result
+            .horizon
+            .keys()
+            .filter(|key| key.player == player)
+            .count()
+    };
+    assert_eq!(keys_of(Player::P1), 1, "P1 cannot tell the worlds apart");
+    assert_eq!(keys_of(Player::P2), 2, "P2 knows its own Special Defense");
+}
+
+/// The equilibrium search refuses the positions that the exact search refuses.
+#[test]
+fn mccfr_refuses_a_preview_and_a_finished_battle() {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = mccfr_config(4, 1);
+
+    let preview = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::TeamPreviewState(small_preview()),
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        mccfr::search(1, &preview, pokemon_dex, move_dex, &config).unwrap_err(),
+        mccfr::MccfrError::Position(SolveError::TeamPreviewUnsupported)
+    );
+
+    let finished = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::GameOverState {
+            winner: Player::P1,
+            pending_events: Vec::new(),
+            final_state: Box::new(certain_world()),
+        },
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        mccfr::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
+        mccfr::MccfrError::Position(SolveError::GameAlreadyOver {
+            winner: Player::P1
+        })
+    );
 }
