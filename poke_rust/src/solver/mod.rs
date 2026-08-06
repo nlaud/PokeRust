@@ -55,6 +55,23 @@
 //! [`SolverAlgorithm`] variant.
 //! The exact search stays the oracle of the sampling tests.
 //!
+//! # Fog of war
+//!
+//! [`solve`] and [`mcts::search`] both need a concrete `MatchState`.
+//! [`ismcts::search_belief`] takes an `UnknownBattleState` instead.
+//! It is the fast heuristic baseline of the fog-of-war solver.
+//!
+//! [`belief::ParticleBelief`] holds the worlds that the belief permits, one
+//! weight for each world, the posterior update, the effective sample-size check,
+//! and the resampling step.
+//! [`belief::ObservationKey`] is the observation model. It hashes one player's
+//! private Pokemon state, commands, and the masked event stream that
+//! [`mask_events_for`](crate::information::information::mask_events_for) built
+//! for that player.
+//!
+//! [`ismcts::search`] keys its nodes by that type, never by a `MatchState` hash.
+//! Two hidden worlds that one player cannot tell apart therefore share one node.
+//!
 //! # Exploitability
 //!
 //! [`MctsConfig::widening`](mcts::MctsConfig::widening) lets a node play a
@@ -104,9 +121,11 @@
 //! ```
 
 pub mod actions;
+pub mod belief;
 pub mod chance;
 pub mod eval;
 pub mod exploit;
+pub mod ismcts;
 pub mod matrix;
 pub mod mcts;
 pub mod preview;

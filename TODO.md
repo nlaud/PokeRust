@@ -83,25 +83,20 @@ Do not average strategies from independent determinized worlds as the main metho
 That method lets the solver choose a different action for each hidden world.
 Use it only as a labeled perfect-information Monte Carlo baseline.
 
-- [ ] Add ISMCTS as a fast heuristic baseline.
-  - [ ] Add outcome-sampling MCCFR as the first equilibrium baseline.
+`solver::belief` holds the particle filter.
+It has weighted particles, normalized weights, posterior updates,
+effective sample-size checks, resampling, and the observation key.
+`solver::ismcts` is the fast heuristic baseline that reads it.
+
+- [ ] Add outcome-sampling MCCFR as the first equilibrium baseline.
+  - [ ] Build public-belief counterfactual values at depth limits.
   - [ ] Test public-belief continual solving after the baseline works.
   - [ ] Compare MCCFR with extensive-form double oracle.
 
-  Build these data structures first:
-  
-  - Weighted beliefs over both players' private data.
-  - Normalized particle weights.
-  - Posterior updates.
-  - Effective sample-size checks.
-  - Particle resampling.
-  - Observation-based state grouping.
-  - Public-belief counterfactual values at depth limits.
-
   Use `mask_events_for` and the event log as the observation model.
   Do not group hidden worlds only by `MatchState` hash.
-  
-  - [ ] Add opponent exploitation as a separate mode.
+
+- [ ] Add opponent exploitation as a separate mode.
   - [ ] Keep Nash as the default.
   - [ ] Show the exploitability budget for safe exploitation.
 

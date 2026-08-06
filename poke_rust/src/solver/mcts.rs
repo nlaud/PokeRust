@@ -206,8 +206,8 @@ use super::search::strategy_of;
 use super::{JointActionProb, SolveError, SolveWarning};
 
 /// P1's utility when P1 loses, and when P1 wins.
-const LOSS: f64 = 0.0;
-const WIN: f64 = 1.0;
+pub(super) const LOSS: f64 = 0.0;
+pub(super) const WIN: f64 = 1.0;
 
 /// Selects the learner that each node uses.
 ///
@@ -399,7 +399,7 @@ impl Default for MctsConfig {
 
 /// The smallest exploration rate that the search accepts.
 /// A rate of zero would divide by zero in a learner update.
-const MIN_EXPLORATION: f64 = 1e-6;
+pub(super) const MIN_EXPLORATION: f64 = 1e-6;
 
 /// How far the reported value can move between two runs of the same size.
 #[derive(Debug, Clone)]
@@ -674,7 +674,12 @@ pub fn learn_matrix_game(
 // ── The learners ────────────────────────────────────────────────────────────
 
 /// One player's independent learner at one node.
-struct Learner {
+///
+/// [`ismcts`](super::ismcts) reuses this type. A fog-of-war node registers the
+/// actions of every world that reached it, and one visit sees only the actions
+/// that its own world permits. The `_subset` methods take that index list, so
+/// one learner covers the union while each visit plays a subset.
+pub(super) struct Learner {
     /// Regret matching holds the cumulative regret of each action.
     /// Exp3 holds the cumulative reward estimate of each action.
     scores: Vec<f64>,
@@ -689,13 +694,28 @@ struct Learner {
 }
 
 impl Learner {
-    fn new(actions: usize) -> Self {
+    pub(super) fn new(actions: usize) -> Self {
         Learner {
             scores: vec![0.0; actions],
             strategy_sum: vec![0.0; actions],
             baselines: vec![0.0; actions],
             baseline_counts: vec![0; actions],
         }
+    }
+
+    /// Add entries until the learner holds `actions` of them.
+    ///
+    /// A new entry starts at a score of zero, so it starts level with the
+    /// entries that the learner already played. A fog-of-war node calls this
+    /// when a new world offers an action that no earlier world offered.
+    pub(super) fn grow_to(&mut self, actions: usize) {
+        if actions <= self.scores.len() {
+            return;
+        }
+        self.scores.resize(actions, 0.0);
+        self.strategy_sum.resize(actions, 0.0);
+        self.baselines.resize(actions, 0.0);
+        self.baseline_counts.resize(actions, 0);
     }
 
     /// The strategy to play now, mixed with the uniform strategy.
@@ -708,40 +728,52 @@ impl Learner {
         if actions == 0 {
             return Vec::new();
         }
-        let uniform = 1.0 / actions as f64;
-        let scores = &self.scores[..actions];
+        mix_strategy(policy, exploration, &self.scores[..actions])
+    }
 
-        let weights: Vec<f64> = match policy {
-            SelectionPolicy::RegretMatching => scores.iter().map(|r| r.max(0.0)).collect(),
-            SelectionPolicy::Exp3 => {
-                // The learning rate of Exp3 over `actions` arms. The subtracted
-                // maximum keeps the exponential finite, and it cancels in the
-                // normalization below.
-                let rate = exploration / actions as f64;
-                let highest = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                scores.iter().map(|s| (rate * (s - highest)).exp()).collect()
-            }
-        };
-
-        let total: f64 = weights.iter().sum();
-        // Regret matching plays uniformly while every regret stays at or below
-        // zero. Exp3 weights are always positive, so only regret matching
-        // reaches this branch.
-        let base: Vec<f64> = if total > EPS {
-            weights.iter().map(|w| w / total).collect()
-        } else {
-            vec![uniform; actions]
-        };
-
-        base.iter()
-            .map(|p| (1.0 - exploration) * p + exploration * uniform)
-            .collect()
+    /// The strategy over one subset of the actions.
+    ///
+    /// Entry `i` of the result is the probability of action `allowed[i]`. The
+    /// subset is a bandit of its own, so the probabilities total one over the
+    /// subset and the explicit exploration bounds each one from below.
+    ///
+    /// An index outside the learner is a caller error, so this method drops it
+    /// rather than growing the learner behind the caller.
+    pub(super) fn strategy_subset(
+        &self,
+        policy: SelectionPolicy,
+        exploration: f64,
+        allowed: &[usize],
+    ) -> Vec<f64> {
+        let scores: Vec<f64> = allowed
+            .iter()
+            .filter_map(|&action| self.scores.get(action).copied())
+            .collect();
+        if scores.is_empty() {
+            return Vec::new();
+        }
+        mix_strategy(policy, exploration, &scores)
     }
 
     /// Add one played strategy to the average.
     fn accumulate(&mut self, strategy: &[f64]) {
         for (sum, probability) in self.strategy_sum.iter_mut().zip(strategy) {
             *sum += probability;
+        }
+    }
+
+    /// Add one played subset strategy to the average.
+    ///
+    /// An action that the current world did not offer adds nothing, so its share
+    /// of the average falls while other worlds play. This is the price of one
+    /// strategy over worlds with different action sets.
+    pub(super) fn accumulate_subset(&mut self, allowed: &[usize], strategy: &[f64]) {
+        for (slot, &action) in allowed.iter().enumerate() {
+            if let (Some(sum), Some(probability)) =
+                (self.strategy_sum.get_mut(action), strategy.get(slot))
+            {
+                *sum += probability;
+            }
         }
     }
 
@@ -770,11 +802,50 @@ impl Learner {
         if played >= actions {
             return;
         }
+        // The complete prefix is the identity subset, so this call runs the same
+        // arithmetic in the same order that this method ran before the subset
+        // form existed.
+        let allowed: Vec<usize> = (0..actions).collect();
+        self.update_subset(
+            policy,
+            played,
+            &allowed,
+            &strategy[..actions],
+            reward,
+            control_variate,
+        );
+    }
+
+    /// Learn from the payoff of the played action, over one action subset.
+    ///
+    /// `allowed` names the actions that this visit could play, and `strategy`
+    /// holds their probabilities in the same order. `played` is the position in
+    /// `allowed` of the action that the visit played.
+    ///
+    /// An action outside `allowed` keeps its score, so it starts level with the
+    /// played actions the next time a world offers it.
+    ///
+    /// Read [`Learner::update`] for the estimator itself. The two methods run
+    /// the same arithmetic, and this one reads every score through `allowed`.
+    pub(super) fn update_subset(
+        &mut self,
+        policy: SelectionPolicy,
+        played: usize,
+        allowed: &[usize],
+        strategy: &[f64],
+        reward: f64,
+        control_variate: bool,
+    ) {
+        let actions = strategy.len().min(allowed.len());
+        if played >= actions || allowed.iter().any(|&action| action >= self.scores.len()) {
+            return;
+        }
+        let played_action = allowed[played];
         // The baseline of the played action, read before this sample enters it.
         // A baseline that held the current sample would correlate with it and
         // would bias the estimate.
         let baseline = if control_variate {
-            self.baselines[played]
+            self.baselines[played_action]
         } else {
             0.0
         };
@@ -786,19 +857,19 @@ impl Learner {
         // the whole payoff.
         let values: Vec<f64> = if control_variate {
             (0..actions)
-                .map(|action| {
-                    if action == played {
+                .map(|slot| {
+                    if slot == played {
                         played_value
                     } else {
-                        self.baselines[action]
+                        self.baselines[allowed[slot]]
                     }
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let value_of = |action: usize| match (control_variate, action == played) {
-            (true, _) => values[action],
+        let value_of = |slot: usize| match (control_variate, slot == played) {
+            (true, _) => values[slot],
             (false, true) => played_value,
             (false, false) => 0.0,
         };
@@ -809,34 +880,34 @@ impl Learner {
                 // baseline the weighted sum is the reward itself, so this branch
                 // keeps the arithmetic that the search already used.
                 let node_value: f64 = if control_variate {
-                    (0..actions).map(|action| values[action] * strategy[action]).sum()
+                    (0..actions).map(|slot| values[slot] * strategy[slot]).sum()
                 } else {
                     reward
                 };
-                for (action, score) in self.scores[..actions].iter_mut().enumerate() {
-                    *score += value_of(action) - node_value;
+                for (slot, &action) in allowed[..actions].iter().enumerate() {
+                    self.scores[action] += value_of(slot) - node_value;
                 }
             }
             // Without a baseline every unplayed action adds zero, so this policy
             // only has to touch the played action.
-            SelectionPolicy::Exp3 if !control_variate => self.scores[played] += played_value,
+            SelectionPolicy::Exp3 if !control_variate => self.scores[played_action] += played_value,
             SelectionPolicy::Exp3 => {
-                for (action, score) in self.scores[..actions].iter_mut().enumerate() {
-                    *score += value_of(action);
+                for (slot, &action) in allowed[..actions].iter().enumerate() {
+                    self.scores[action] += value_of(slot);
                 }
             }
         }
 
         if control_variate {
             // The next visit reads this sample as part of the baseline.
-            self.baseline_counts[played] += 1;
-            let count = self.baseline_counts[played] as f64;
-            self.baselines[played] += (reward - self.baselines[played]) / count;
+            self.baseline_counts[played_action] += 1;
+            let count = self.baseline_counts[played_action] as f64;
+            self.baselines[played_action] += (reward - self.baselines[played_action]) / count;
         }
     }
 
     /// The strategy that the node played on average.
-    fn average_strategy(&self) -> Vec<f64> {
+    pub(super) fn average_strategy(&self) -> Vec<f64> {
         let actions = self.strategy_sum.len();
         if actions == 0 {
             return Vec::new();
@@ -848,6 +919,45 @@ impl Learner {
         }
         self.strategy_sum.iter().map(|sum| sum / total).collect()
     }
+}
+
+/// Turn one score list into a strategy, mixed with the uniform strategy.
+///
+/// The result holds one probability for each score, and the probabilities total
+/// one. The explicit exploration bounds every probability from below, which the
+/// importance-weighted updates divide by.
+fn mix_strategy(policy: SelectionPolicy, exploration: f64, scores: &[f64]) -> Vec<f64> {
+    let actions = scores.len();
+    if actions == 0 {
+        return Vec::new();
+    }
+    let uniform = 1.0 / actions as f64;
+
+    let weights: Vec<f64> = match policy {
+        SelectionPolicy::RegretMatching => scores.iter().map(|r| r.max(0.0)).collect(),
+        SelectionPolicy::Exp3 => {
+            // The learning rate of Exp3 over `actions` arms. The subtracted
+            // maximum keeps the exponential finite, and it cancels in the
+            // normalization below.
+            let rate = exploration / actions as f64;
+            let highest = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            scores.iter().map(|s| (rate * (s - highest)).exp()).collect()
+        }
+    };
+
+    let total: f64 = weights.iter().sum();
+    // Regret matching plays uniformly while every regret stays at or below
+    // zero. Exp3 weights are always positive, so only regret matching reaches
+    // this branch.
+    let base: Vec<f64> = if total > EPS {
+        weights.iter().map(|w| w / total).collect()
+    } else {
+        vec![uniform; actions]
+    };
+
+    base.iter()
+        .map(|p| (1.0 - exploration) * p + exploration * uniform)
+        .collect()
 }
 
 // ── The tree ────────────────────────────────────────────────────────────────
@@ -1341,27 +1451,27 @@ fn apply_order(joint: &mut JointActions, order: &[usize]) {
 /// Welford's method holds three numbers instead of every value, which keeps the
 /// memory constant in the iteration count.
 #[derive(Debug, Clone, Default)]
-struct RunningStats {
-    count: u64,
+pub(super) struct RunningStats {
+    pub(super) count: u64,
     mean: f64,
     sum_of_squares: f64,
 }
 
 impl RunningStats {
-    fn push(&mut self, value: f64) {
+    pub(super) fn push(&mut self, value: f64) {
         self.count += 1;
         let first_delta = value - self.mean;
         self.mean += first_delta / self.count as f64;
         self.sum_of_squares += first_delta * (value - self.mean);
     }
 
-    fn mean(&self) -> f64 {
+    pub(super) fn mean(&self) -> f64 {
         self.mean
     }
 
     /// The standard error of the mean. One sample gives `None`, because the
     /// sample variance divides by the count minus one.
-    fn standard_error(&self) -> Option<f64> {
+    pub(super) fn standard_error(&self) -> Option<f64> {
         (self.count > 1).then(|| {
             let variance = self.sum_of_squares / (self.count - 1) as f64;
             (variance / self.count as f64).sqrt()
@@ -1373,7 +1483,7 @@ impl RunningStats {
 ///
 /// The vector sums to one up to rounding. The final index covers the rounding
 /// remainder.
-fn draw_index(strategy: &[f64]) -> usize {
+pub(super) fn draw_index(strategy: &[f64]) -> usize {
     let roll: f64 = with_sample_rng(|rng| rng.gen_range(0.0..1.0));
     let mut accumulated = 0.0;
     for (index, probability) in strategy.iter().enumerate() {
@@ -1419,7 +1529,7 @@ fn draw_successor(branches: Vec<(MatchState, f64)>) -> Option<MatchState> {
         .map(|(child, _probability)| child)
 }
 
-fn terminal_value(winner: Player) -> f64 {
+pub(super) fn terminal_value(winner: Player) -> f64 {
     match winner {
         Player::P1 => WIN,
         Player::P2 => LOSS,
@@ -1476,6 +1586,67 @@ mod tests {
         assert!(learner.scores[0] > 0.0, "{:?}", learner.scores);
         assert_eq!(learner.scores[2], 0.0);
         assert_eq!(learner.scores[3], 0.0);
+    }
+
+    /// A fog-of-war node registers every action of every world, and one visit
+    /// plays a subset. The actions outside that subset must keep their score,
+    /// so they start level when a later world offers them.
+    #[test]
+    fn a_subset_update_leaves_the_unavailable_scores_alone() {
+        let mut learner = Learner::new(2);
+        learner.grow_to(4);
+        // This world offers actions 1 and 3 only.
+        let allowed = vec![1, 3];
+        let strategy = learner.strategy_subset(SelectionPolicy::RegretMatching, 0.1, &allowed);
+        assert_eq!(strategy.len(), 2);
+
+        learner.update_subset(
+            SelectionPolicy::RegretMatching,
+            0,
+            &allowed,
+            &strategy,
+            1.0,
+            false,
+        );
+
+        assert_eq!(learner.scores[0], 0.0, "{:?}", learner.scores);
+        assert_eq!(learner.scores[2], 0.0, "{:?}", learner.scores);
+        assert!(learner.scores[1] > 0.0, "{:?}", learner.scores);
+        assert!(learner.scores[3] < 0.0, "{:?}", learner.scores);
+    }
+
+    /// `grow_to` must keep what the learner already learned, and it must start
+    /// each new entry level with the others.
+    #[test]
+    fn growing_a_learner_keeps_the_earlier_scores() {
+        let mut learner = Learner::new(2);
+        learner.scores = vec![3.0, -1.0];
+        learner.strategy_sum = vec![5.0, 2.0];
+        learner.grow_to(4);
+
+        assert_eq!(learner.scores, vec![3.0, -1.0, 0.0, 0.0]);
+        assert_eq!(learner.strategy_sum, vec![5.0, 2.0, 0.0, 0.0]);
+        // A smaller request must never shrink the learner.
+        learner.grow_to(1);
+        assert_eq!(learner.scores.len(), 4);
+    }
+
+    /// The subset form and the complete form must agree on the identity subset.
+    /// The complete form calls the subset form, and this test holds that
+    /// contract.
+    #[test]
+    fn a_complete_subset_matches_the_plain_update() {
+        let strategy = vec![0.25, 0.75];
+        for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
+            for control_variate in [false, true] {
+                let mut plain = Learner::new(2);
+                let mut subset = Learner::new(2);
+                plain.update(policy, 1, &strategy, 0.5, control_variate);
+                subset.update_subset(policy, 1, &[0, 1], &strategy, 0.5, control_variate);
+                assert_eq!(plain.scores, subset.scores, "{policy:?} {control_variate}");
+                assert_eq!(plain.baselines, subset.baselines);
+            }
+        }
     }
 
     /// The baseline must hold no part of the sample that it corrects. A learner

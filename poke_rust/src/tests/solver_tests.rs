@@ -16,15 +16,20 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::information::determinize::DeterminizeConfig;
+use crate::information::determinize::{DeterminizeConfig, determinize_seeded};
 use crate::information::inference::InferenceConfig;
 use crate::information::unknowns::{
-    InformationMode, UnknownMatchState, UnknownTeamPreviewState,
+    InformationMode, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+    UnknownTeamPreviewState,
 };
 use crate::meta::{MetaDex, MetaFormat};
+use crate::simulator::generative::{TransitionConfig, sample_transition};
+use crate::simulator::scoped_sample_rng;
 use crate::solver::actions as solver_actions;
+use crate::solver::belief::{BeliefError, Particle, ParticleBelief};
 use crate::solver::chance::ChanceMode;
 use crate::solver::exploit::exploitability;
+use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
 use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
 use crate::solver::preview::{
@@ -36,7 +41,10 @@ use crate::solver::{
     JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval,
     solve, solve_seeded,
 };
-use crate::state::battle::{BattleCommand, BattleMechanics, MatchState, Player, TeamPreviewState};
+use crate::state::battle::{
+    BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
+    TeamPreviewState,
+};
 use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus, parse_move_dex};
 use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
 use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
@@ -3951,3 +3959,532 @@ fn policy_agreement_with_the_exact_search() {
     );
 }
 
+
+// ── Fog-of-war ISMCTS ───────────────────────────────────────────────────────
+
+/// One Pokemon a side, one move each, and no bench.
+///
+/// Both players have exactly one action, Tackle always hits, and Tackle has no
+/// secondary effect. One damage roll therefore makes the turn deterministic, and
+/// the sampling search must return the exact value.
+fn certain_world() -> BattleState {
+    let mut battle = battle_state_from_lists(
+        vec![mon(Species::Pikachu, &[PokemonMove::Tackle])],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Tackle])],
+        vec![],
+    );
+    // A Tera or a Mega choice would give each player a second action.
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+    battle.p1_has_mega = false;
+    battle.p2_has_mega = false;
+    battle
+}
+
+/// [`certain_world`], with a chosen Speed on P2's Pokemon.
+///
+/// P1 cannot see the stats of P2, so two Speeds are two hidden worlds. The two
+/// worlds differ in the order of the turn, which P1 does see.
+fn world_with_opponent_speed(speed: u16) -> BattleState {
+    let mut battle = certain_world();
+    battle.p2_active_mons[0].stats[5] = speed;
+    battle
+}
+
+fn ismcts_config(iterations: u32, particles: usize) -> IsmctsConfig {
+    IsmctsConfig {
+        search: MctsConfig {
+            iterations,
+            depth: 1,
+            damage_rolls: 1,
+            consider_crit: false,
+            ..MctsConfig::default()
+        },
+        particles,
+        resample_threshold: 0.5,
+    }
+}
+
+fn belief_of_worlds(worlds: Vec<BattleState>) -> ParticleBelief {
+    ParticleBelief::from_particles(
+        worlds
+            .into_iter()
+            .map(|state| Particle {
+                state: MatchState::BattleState(state),
+                weight: 1.0,
+            })
+            .collect(),
+    )
+    .expect("the list is not empty")
+}
+
+/// The only legal joint action of one player in `battle`.
+fn only_action(battle: &BattleState, player: Player) -> Vec<BattleCommand> {
+    let (pokemon_dex, move_dex) = dexes();
+    let joint = solver_actions::joint_actions(
+        battle,
+        player,
+        solver_actions::Phase::Normal,
+        move_dex,
+        pokemon_dex,
+        None,
+        false,
+    );
+    assert_eq!(joint.actions.len(), 1, "{player:?} has {:?}", joint.actions);
+    joint.actions[0].clone()
+}
+
+/// A belief that hides nothing is a perfect-information position. The search
+/// must then return what the exact search returns.
+#[test]
+fn ismcts_matches_the_exact_value_without_hidden_data() {
+    let (pokemon_dex, move_dex) = dexes();
+    let world = certain_world();
+    let exact = solve(
+        &MatchState::BattleState(world.clone()),
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            algorithm: SolverAlgorithm::BackwardInduction,
+            ..base_config()
+        },
+    )
+    .expect("the position is playable")
+    .value;
+
+    let belief = belief_of_worlds(vec![world]);
+    let result = ismcts::search(5, &belief, pokemon_dex, move_dex, &ismcts_config(16, 1))
+        .expect("the position is playable");
+
+    assert!(
+        (result.value - exact).abs() < 1e-9,
+        "the search returned {}, the exact value is {exact}",
+        result.value
+    );
+    assert_eq!(result.p1_strategy.len(), 1);
+    assert_eq!(result.p2_strategy.len(), 1);
+    assert_eq!(result.particles, 1);
+    assert!((result.effective_sample_size - 1.0).abs() < 1e-9);
+    assert_eq!(result.stats.turns_simulated, 16);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// One seed and one configuration must give one result.
+#[test]
+fn ismcts_is_reproducible() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![
+        world_with_opponent_speed(1),
+        world_with_opponent_speed(200),
+    ]);
+    let config = ismcts_config(24, 2);
+
+    let first = ismcts::search(11, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+    let second = ismcts::search(11, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.stats.nodes_created, second.stats.nodes_created);
+    let probabilities = |result: &ismcts::IsmctsResult| -> Vec<f64> {
+        result
+            .p1_strategy
+            .iter()
+            .chain(&result.p2_strategy)
+            .map(|action| action.probability)
+            .collect()
+    };
+    assert_eq!(probabilities(&first), probabilities(&second));
+}
+
+/// P1 cannot see the Speed of P2, but P2 knows its own Speed. Thus, P1 must use
+/// one root information set and P2 must use two root information sets.
+#[test]
+fn ismcts_keeps_each_players_private_root_information() {
+    let (pokemon_dex, move_dex) = dexes();
+    let slow = world_with_opponent_speed(1);
+    let fast = world_with_opponent_speed(200);
+    assert_ne!(
+        slow.p2_active_mons[0].stats, fast.p2_active_mons[0].stats,
+        "the two worlds must differ"
+    );
+
+    let belief = belief_of_worlds(vec![slow, fast]);
+    let result = ismcts::search(7, &belief, pokemon_dex, move_dex, &ismcts_config(24, 2))
+        .expect("the position is playable");
+
+    // P1 has one root. P2 has one root for each known private Speed.
+    assert_eq!(
+        result.stats.nodes_created, 3,
+        "the search merged private information"
+    );
+}
+
+/// A dominance test can read hidden target stats. It must not change the action
+/// set of an information-set node.
+#[test]
+fn ismcts_does_not_filter_actions_with_hidden_target_data() {
+    let (pokemon_dex, move_dex) = dexes();
+    let mut physically_weak = battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::WaterGun, PokemonMove::Strength],
+        )],
+        vec![],
+        vec![mon(Species::Snorlax, &[PokemonMove::Splash])],
+        vec![],
+    );
+    physically_weak.p1_has_tera = false;
+    physically_weak.p2_has_tera = false;
+    physically_weak.p1_has_mega = false;
+    physically_weak.p2_has_mega = false;
+    physically_weak.p2_active_mons[0].stats[2] = 1;
+    physically_weak.p2_active_mons[0].stats[4] = 1_000;
+
+    let mut specially_weak = physically_weak.clone();
+    specially_weak.p2_active_mons[0].stats[2] = 1_000;
+    specially_weak.p2_active_mons[0].stats[4] = 1;
+
+    let pruned_slots = |battle: &BattleState| -> Vec<usize> {
+        solver_actions::joint_actions(
+            battle,
+            Player::P1,
+            solver_actions::Phase::Normal,
+            move_dex,
+            pokemon_dex,
+            None,
+            true,
+        )
+        .actions
+        .iter()
+        .filter_map(|commands| match &commands[0] {
+            BattleCommand::Attack(attack) => Some(attack.move_slot),
+            _ => None,
+        })
+        .collect()
+    };
+    assert_eq!(pruned_slots(&physically_weak), vec![1]);
+    assert_eq!(pruned_slots(&specially_weak), vec![0]);
+
+    let belief = belief_of_worlds(vec![physically_weak, specially_weak]);
+    let mut config = ismcts_config(32, 2);
+    config.search.prune_dominated_actions = true;
+    let result = ismcts::search(17, &belief, pokemon_dex, move_dex, &config)
+        .expect("the position is playable");
+
+    let mut reported_slots: Vec<usize> = result
+        .p1_strategy
+        .iter()
+        .filter_map(|action| match &action.commands[0] {
+            BattleCommand::Attack(attack) => Some(attack.move_slot),
+            _ => None,
+        })
+        .collect();
+    reported_slots.sort_unstable();
+    assert_eq!(reported_slots, vec![0, 1]);
+    assert!(!result.warnings.iter().any(|warning| matches!(
+        warning,
+        SolveWarning::ActionsTruncated {
+            player: Player::P1,
+            ..
+        }
+    )));
+}
+
+/// Each reported strategy must be a distribution over the actions that the
+/// worlds offered.
+#[test]
+fn ismcts_root_strategies_are_distributions() {
+    let (pokemon_dex, move_dex) = dexes();
+    let MatchState::BattleState(battle) = contested_position() else {
+        panic!("the fixture builds a battle state");
+    };
+    let belief = belief_of_worlds(vec![battle]);
+
+    let result = ismcts::search(3, &belief, pokemon_dex, move_dex, &ismcts_config(64, 1))
+        .expect("the position is playable");
+
+    for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
+        assert!(!strategy.is_empty(), "{label} played nothing");
+        let total: f64 = strategy.iter().map(|action| action.probability).sum();
+        assert!((total - 1.0).abs() < 1e-9, "{label} sums to {total}");
+        for action in strategy {
+            assert!(
+                (0.0..=1.0).contains(&action.probability),
+                "{label} played {:?} at {}",
+                action.commands,
+                action.probability
+            );
+        }
+    }
+    assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
+    assert!((0.0..=1.0).contains(&result.value));
+    assert!(result.sampling.standard_error.is_some());
+}
+
+/// The fog-of-war search refuses the positions that the exact search refuses.
+#[test]
+fn ismcts_refuses_a_preview_and_a_finished_battle() {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = ismcts_config(4, 1);
+
+    let preview = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::TeamPreviewState(small_preview()),
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        ismcts::search(1, &preview, pokemon_dex, move_dex, &config).unwrap_err(),
+        ismcts::IsmctsError::Position(SolveError::TeamPreviewUnsupported)
+    );
+
+    let finished = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::GameOverState {
+            winner: Player::P1,
+            pending_events: Vec::new(),
+            final_state: Box::new(certain_world()),
+        },
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        ismcts::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
+        ismcts::IsmctsError::Position(SolveError::GameAlreadyOver {
+            winner: Player::P1
+        })
+    );
+}
+
+/// The posterior update must keep the world that explains the observation, and
+/// it must remove the world that does not.
+///
+/// The two worlds differ only in the Speed of P2, so they differ only in the
+/// order of the turn. P1 sees that order.
+#[test]
+fn a_posterior_update_keeps_the_world_that_explains_the_turn() {
+    let (pokemon_dex, move_dex) = dexes();
+    let slow = world_with_opponent_speed(1);
+    let fast = world_with_opponent_speed(200);
+    let p1_cmd = PlayerCommand::Battle(only_action(&fast, Player::P1));
+    let p2_cmd = PlayerCommand::Battle(only_action(&fast, Player::P2));
+    let transition = TransitionConfig {
+        consider_crit: false,
+        damage_rolls: 1,
+        observe: true,
+    };
+
+    // What P1 saw in the fast world.
+    let observed = {
+        let _guard = scoped_sample_rng(1);
+        sample_transition(
+            &MatchState::BattleState(fast.clone()),
+            &p1_cmd,
+            &p2_cmd,
+            move_dex,
+            pokemon_dex,
+            transition,
+        )
+        .observations
+        .expect("the config sets the observe flag")
+        .p1
+    };
+
+    let mut belief = belief_of_worlds(vec![slow, fast]);
+    let _guard = scoped_sample_rng(2);
+    let update = belief
+        .update_with_observation(
+            Player::P1,
+            &observed,
+            &p1_cmd,
+            &p2_cmd,
+            pokemon_dex,
+            move_dex,
+            transition,
+            2,
+            0.0,
+        )
+        .expect("the fast world explains the observation");
+
+    assert_eq!(update.matched, 1);
+    assert_eq!(update.dropped, 1);
+    assert_eq!(belief.len(), 1);
+    assert!((update.effective_sample_size - 1.0).abs() < 1e-9);
+    let MatchState::BattleState(battle) = &belief.particles()[0].state else {
+        panic!("the successor is a battle state");
+    };
+    assert_eq!(
+        battle.p2_active_mons[0].stats[5],
+        200,
+        "the update kept the wrong world"
+    );
+}
+
+/// An observation that no world produces leaves the belief alone and reports the
+/// failure. A silent empty posterior would look like a confident answer.
+#[test]
+fn a_posterior_update_reports_an_impossible_observation() {
+    let (pokemon_dex, move_dex) = dexes();
+    let world = certain_world();
+    let p1_cmd = PlayerCommand::Battle(only_action(&world, Player::P1));
+    let p2_cmd = PlayerCommand::Battle(only_action(&world, Player::P2));
+    let mut belief = belief_of_worlds(vec![world]);
+
+    let _guard = scoped_sample_rng(4);
+    let error = belief
+        .update_with_observation(
+            Player::P1,
+            &[],
+            &p1_cmd,
+            &p2_cmd,
+            pokemon_dex,
+            move_dex,
+            TransitionConfig {
+                consider_crit: false,
+                damage_rolls: 1,
+                observe: true,
+            },
+            2,
+            0.0,
+        )
+        .unwrap_err();
+
+    assert_eq!(error, BeliefError::NoMatch { samples: 2 });
+    assert_eq!(belief.len(), 1);
+}
+
+/// The complete fog-of-war entry point: a belief, the determinizer, and the
+/// search. Only the species of the opponent is known, so every particle invents
+/// a different build.
+#[test]
+fn ismcts_searches_a_species_only_belief() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = species_only_belief();
+    let determinize = open_list_determinize_config();
+
+    let result = ismcts::search_belief(
+        20_260_805,
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &ismcts_config(24, 4),
+        &determinize,
+    )
+    .expect("the belief is well formed");
+
+    assert_eq!(result.particles, 4);
+    assert!((0.0..=1.0).contains(&result.value));
+    assert!(result.effective_sample_size > 0.0);
+    assert!(result.effective_sample_size <= 4.0 + 1e-9);
+    assert!(!result.p1_strategy.is_empty());
+    assert!(!result.p2_strategy.is_empty());
+    // P1 shares one root. P2 can have a separate root for each private build.
+    assert!((2..=5).contains(&result.stats.nodes_created));
+    let total: f64 = result.p1_strategy.iter().map(|a| a.probability).sum();
+    assert!((total - 1.0).abs() < 1e-9, "P1 sums to {total}");
+}
+
+/// The determinizer already samples its target distribution. The particle set
+/// must not apply each sampled draw probability a second time.
+#[test]
+fn determinized_particles_have_equal_empirical_weights() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = species_only_belief();
+    let determinize = open_list_determinize_config();
+    let seed = 20_260_805;
+    let raw: Vec<f64> = (0..4)
+        .map(|world| {
+            determinize_seeded(
+                seed + world,
+                &belief,
+                meta,
+                pokemon_dex,
+                move_dex,
+                &determinize,
+            )
+            .expect("the belief is valid")
+            .probability
+        })
+        .collect();
+    assert!(
+        raw.windows(2).any(|pair| pair[0] != pair[1]),
+        "the fixture needs unequal draw probabilities: {raw:?}"
+    );
+
+    let particles = ParticleBelief::from_belief(
+        seed,
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        4,
+        &determinize,
+    )
+    .expect("the belief is valid");
+    for particle in particles.particles() {
+        assert!((particle.weight - 0.25).abs() < 1e-12, "{particle:?}");
+    }
+}
+
+/// A 1v1 battle belief: P1 is the observer and knows its own Pokemon, and only
+/// the species of the Pokemon of P2 is known.
+///
+/// Mirrors `determinize_tests::belief_1v1`, which is the fixture that the
+/// determinizer tests use.
+fn species_only_belief() -> UnknownBattleState {
+    UnknownBattleState {
+        active_per_side: 1,
+        back_mons_per_side: 0,
+        p1_active_mons: vec![UnknownPokemonState::from_known_pokemon(&mon(
+            Species::Pikachu,
+            &[PokemonMove::Tackle],
+        ))],
+        p2_active_mons: vec![UnknownPokemonState::from_opponent_species(
+            Species::Snorlax,
+            pokemon_dex(),
+            50,
+        )],
+        p1_known_back_mons: vec![],
+        p2_known_back_mons: vec![],
+        p1_possible_back_mons: vec![],
+        p2_possible_back_mons: vec![],
+        p1_fainted_mons: vec![],
+        p2_fainted_mons: vec![],
+        p1_unresolved_zoroark_count: 0,
+        p2_unresolved_zoroark_count: 0,
+        p1_roster_templates: vec![],
+        p2_roster_templates: vec![],
+        turn_number: 1,
+        turn_started: false,
+        turn_ended: false,
+        p1_has_tera: false,
+        p2_has_tera: false,
+        p1_has_mega: false,
+        p2_has_mega: false,
+        weather: None,
+        weather_turns: None,
+        weather_setter_mon_idx: None,
+        pseudo_weathers: vec![],
+        pseudo_weather_turns: vec![],
+        terrain: None,
+        terrain_turns: None,
+        terrain_setter_mon_idx: None,
+        p1_side_conditions: vec![],
+        p1_side_condition_turns: vec![],
+        p1_side_condition_setters: vec![],
+        p2_side_conditions: vec![],
+        p2_side_condition_turns: vec![],
+        p2_side_condition_setters: vec![],
+        p1_slot_conditions: vec![vec![]],
+        p2_slot_conditions: vec![vec![]],
+        self_switch_pending: None,
+        items_consumed_this_turn: vec![],
+        last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
+        predicates: vec![],
+    }
+}
