@@ -3,6 +3,7 @@ import * as api from '../api/client'
 import type {
   BattleCommand,
   BattleView,
+  BotProfileView,
   EventNode,
   LegalCommands,
   PlayerCommand,
@@ -53,6 +54,9 @@ interface BattleStore {
   logP2: TurnLogEntry[]
   /** Log for `currentPlayer`. */
   log: TurnLogEntry[]
+  /** The resolved profile for the planned P2 bot.
+   * `null` means that the battle has no profile. */
+  botP2: BotProfileView | null
   probability: number | null
   error: string | null
   busy: boolean
@@ -206,6 +210,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     logP1: [],
     logP2: [],
     log: [],
+    botP2: null,
     probability: null,
     error: null,
     busy: false,
@@ -230,6 +235,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           logP1: [],
           logP2: [],
           log: [],
+          botP2: response.botP2,
           probability: null,
           currentPlayer: 'p1',
           draftCommands: [],
@@ -256,6 +262,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           logP1: response.log,
           logP2: response.logP2,
           log: pickForPlayer(response.log, response.logP2, 'p1'),
+          botP2: response.botP2,
           currentPlayer: 'p1',
           draftCommands: [],
           p1Commands: null,
@@ -282,6 +289,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         logP1: [],
         logP2: [],
         log: [],
+        botP2: null,
         probability: null,
         error: null,
         currentPlayer: 'p1',

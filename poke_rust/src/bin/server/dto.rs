@@ -555,6 +555,10 @@ pub struct CreateBattleRequest {
     /// The server rejects an unknown slug with HTTP 422.
     #[serde(default)]
     pub legal_items: Vec<String>,
+    /// An optional profile for the planned P2 bot.
+    /// The current battle remains hotseat.
+    /// See `crate::bot` for the fields and their limits.
+    pub bot_p2: Option<crate::bot::BotProfileRequest>,
 }
 
 fn default_true() -> bool {
@@ -586,6 +590,9 @@ pub struct CreateBattleResponse {
     pub state: BattleView,
     /// P2's masked view of the same battle.
     pub state_p2: BattleView,
+    /// The resolved solver profile of P2.
+    /// `None` when the request carried no profile.
+    pub bot_p2: Option<crate::bot::BotProfileView>,
 }
 
 #[derive(Serialize)]
@@ -597,6 +604,9 @@ pub struct GetBattleResponse {
     pub log: Vec<TurnLogEntry>,
     /// Turn events masked for P2.
     pub log_p2: Vec<TurnLogEntry>,
+    /// The resolved solver profile of P2.
+    /// `None` when the battle carried no profile.
+    pub bot_p2: Option<crate::bot::BotProfileView>,
 }
 
 #[derive(Deserialize)]

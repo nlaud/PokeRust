@@ -2,12 +2,13 @@ import { useState } from 'react'
 import ConfirmDialog from '../../components/common/ConfirmDialog'
 import { useBattle } from '../../store/battleStore'
 import Arena from './Arena'
+import BotBadge from './BotBadge'
 import BattleLogSidebar from './BattleLogSidebar'
 import ControlPanel from './ControlPanel'
 import TeamInfoSidebar from './TeamInfoSidebar'
 
 export default function BattleScreen() {
-  const { view, error, clearError, leave } = useBattle()
+  const { view, error, clearError, leave, botP2 } = useBattle()
   const [confirmLeave, setConfirmLeave] = useState(false)
   if (!view) return null
 
@@ -21,6 +22,8 @@ export default function BattleScreen() {
       </div>
 
       <div className="relative order-1 flex min-h-[440px] min-w-0 flex-1 flex-col lg:order-none">
+        {botP2 && <BotBadge profile={botP2} />}
+
         {inBattle ? (
           <Arena />
         ) : (

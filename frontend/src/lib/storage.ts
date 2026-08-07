@@ -1,6 +1,8 @@
 // Stores versioned teams and formats in local storage.
 // After a schema change, increase the key version and add a migration.
 
+import type { BotAlgorithm, BotPreset } from '../api/types'
+
 export interface StoredTeam {
   id: string
   name: string
@@ -139,6 +141,10 @@ export interface BattleSetup {
    * An absent value selects the saved team. */
   team1Source?: 'saved' | 'meta'
   team2Source?: 'saved' | 'meta'
+  /** The profile preset for the planned P2 bot.
+   * `off` and an absent value store no profile. */
+  botPreset?: 'off' | BotPreset
+  botAlgorithm?: BotAlgorithm
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

@@ -239,6 +239,65 @@ export type InformationMode = 'closedSheet' | 'perfect' | 'openSheet' | 'openShe
 /** Selects a pasted team or a team generated from usage data. */
 export type TeamMode = 'sheet' | 'meta'
 
+/** The search that a P2 bot profile configures.
+ * The first three names solve the game exactly to the depth horizon.
+ * The last three names sample, so they return an estimate. */
+export type BotAlgorithm =
+  | 'backwardInduction'
+  | 'serializedBounds'
+  | 'doubleOracle'
+  | 'mcts'
+  | 'ismcts'
+  | 'mccfr'
+
+/** A named group of solver limits. */
+export type BotPreset = 'fast' | 'balanced' | 'strong'
+
+/** The optional solver profile that plays P2.
+ * Every field is optional, and the preset fills each absent field.
+ * The server rejects a limit that the algorithm cannot read. */
+export interface BotProfileRequest {
+  /** Defaults to `doubleOracle`. */
+  algorithm?: BotAlgorithm
+  /** Defaults to `balanced`. */
+  preset?: BotPreset
+  timeMs?: number
+  /** Exact algorithms only. */
+  nodeBudget?: number
+  depth?: number
+  /** The search is serial, so the server accepts only 1. */
+  workers?: number
+  /** Sampling algorithms only. */
+  iterations?: number
+  /** Belief searches only. */
+  particles?: number
+  /** Makes a sampled search reproducible.
+   * The maximum value is `Number.MAX_SAFE_INTEGER`. */
+  seed?: number
+  maxActionsPerPlayer?: number
+}
+
+/** The resolved profile that the server returns. */
+export interface BotProfileView {
+  algorithm: BotAlgorithm
+  preset: BotPreset
+  /** True when the algorithm itself is exact.
+   * A limit can still make the result approximate. */
+  exact: boolean
+  timeMs: number | null
+  nodeBudget: number | null
+  depth: number
+  workers: number
+  iterations: number | null
+  particles: number | null
+  seed: number | null
+  maxActionsPerPlayer: number | null
+  /** Each reason that the result can differ from the exact answer. */
+  approximations: string[]
+  /** Each knob that the server changed away from the preset value. */
+  adjustments: string[]
+}
+
 export interface CreateBattleRequest {
   /** Send an empty string when the matching team mode is `meta`. */
   p1Team: string
@@ -263,6 +322,9 @@ export interface CreateBattleRequest {
   /** Permitted item slugs after format bans.
    * Empty or absent means no item restriction. */
   legalItems?: string[]
+  /** An optional profile for the planned P2 bot.
+   * The current battle remains hotseat. */
+  botP2?: BotProfileRequest
 }
 
 export interface CreateBattleResponse {
@@ -271,6 +333,8 @@ export interface CreateBattleResponse {
   state: BattleView
   /** P2's masked view of the same battle. */
   stateP2: BattleView
+  /** The resolved solver profile of P2, or null for a hotseat battle. */
+  botP2: BotProfileView | null
 }
 
 export interface GetBattleResponse {
@@ -280,6 +344,8 @@ export interface GetBattleResponse {
   log: TurnLogEntry[]
   /** Turn events masked for P2. */
   logP2: TurnLogEntry[]
+  /** The resolved solver profile of P2, or null for a hotseat battle. */
+  botP2: BotProfileView | null
 }
 
 export interface TurnRequest {

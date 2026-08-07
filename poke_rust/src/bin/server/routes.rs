@@ -326,6 +326,16 @@ pub async fn create_battle(
             (Some(belief_p1), Some(belief_p2), Some(config))
         };
 
+    // Resolve the optional P2 bot profile last. A team or item error must still
+    // win the 422. The profile uses the same physics as the battle.
+    let bot_p2 = match &req.bot_p2 {
+        Some(request) => match crate::bot::resolve(request, req.damage_rolls, req.consider_crit) {
+            Ok(profile) => Some(profile),
+            Err(message) => return unprocessable(message),
+        },
+        None => None,
+    };
+
     let session = BattleSession {
         state: poke_rust::state::battle::MatchState::TeamPreviewState(preview),
         config: SessionConfig {
@@ -340,17 +350,20 @@ pub async fn create_battle(
         belief_p1,
         belief_p2,
         inference_config,
+        bot_p2,
     };
 
     let battle_id = Uuid::new_v4().to_string();
     let view = session.view(Player::P1);
     let view_p2 = session.view(Player::P2);
+    let bot_view = session.bot_p2.as_ref().map(|p| p.view.clone());
     lock_sessions(&app).insert(battle_id.clone(), session);
 
     Json(CreateBattleResponse {
         battle_id,
         state: view,
         state_p2: view_p2,
+        bot_p2: bot_view,
     })
     .into_response()
 }
@@ -365,6 +378,7 @@ pub async fn get_battle(State(app): State<AppState>, Path(id): Path<String>) -> 
         state_p2: session.view(Player::P2),
         log: session.log_p1.clone(),
         log_p2: session.log_p2.clone(),
+        bot_p2: session.bot_p2.as_ref().map(|p| p.view.clone()),
     })
     .into_response()
 }
@@ -867,5 +881,45 @@ mod tests {
         }"#;
         let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
         assert_eq!(req.total_per_side, 5);
+    }
+
+    #[test]
+    fn an_absent_bot_profile_stays_absent() {
+        let body = r#"{
+            "p1Team": "",
+            "p2Team": "",
+            "activePerSide": 2,
+            "broughtPerSide": 4
+        }"#;
+        let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
+        assert!(req.bot_p2.is_none());
+    }
+
+    #[test]
+    fn a_sent_bot_profile_resolves_with_the_session_physics() {
+        let body = r#"{
+            "p1Team": "",
+            "p2Team": "",
+            "activePerSide": 2,
+            "broughtPerSide": 4,
+            "damageRolls": 4,
+            "considerCrit": false,
+            "botP2": { "algorithm": "ismcts", "preset": "fast" }
+        }"#;
+        let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
+        let profile = crate::bot::resolve(
+            req.bot_p2.as_ref().unwrap(),
+            req.damage_rolls,
+            req.consider_crit,
+        )
+        .unwrap();
+        assert_eq!(profile.view.algorithm, "ismcts");
+        assert_eq!(profile.view.preset, "fast");
+        assert!(!profile.view.exact);
+        let crate::bot::BotSearchConfig::Ismcts(config) = profile.search else {
+            panic!("ismcts must build an ismcts configuration");
+        };
+        assert_eq!(config.search.damage_rolls, 4);
+        assert!(!config.search.consider_crit);
     }
 }

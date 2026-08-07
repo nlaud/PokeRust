@@ -104,11 +104,6 @@ Nash stays the default of every search.
 
 ## Simulator bot
 
-- [ ] Add an optional P2 solver profile to battle creation.
-  - [ ] Support exact and approximate algorithms.
-  - [ ] Support time, node, depth, worker, sampling, seed, and action limits (with presets).
-  - [ ] Show every approximation and fallback in the interface.
-
 Start P2 analysis after each turn resolves.
 Use an immutable state and belief snapshot.
 Reuse complete checkpoints until P1 submits a command.

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
-import type { InformationMode } from '../../api/types'
+import type { BotAlgorithm, BotPreset, InformationMode } from '../../api/types'
 import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
@@ -16,6 +16,27 @@ const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
   { value: 'perfect', label: 'Perfect Information' },
   { value: 'openSheet', label: 'Open Team Sheet' },
   { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
+]
+
+/** `off` stores no profile for the planned P2 bot. */
+type BotChoice = 'off' | BotPreset
+
+const BOT_OPTIONS: { value: BotChoice; label: string }[] = [
+  { value: 'off', label: 'None' },
+  { value: 'fast', label: 'Fast' },
+  { value: 'balanced', label: 'Balanced' },
+  { value: 'strong', label: 'Strong' },
+]
+
+// The first three algorithms solve the game exactly to the depth horizon.
+// The last three sample, so they return an estimate.
+const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string }[] = [
+  { value: 'doubleOracle', label: 'Double Oracle (exact)' },
+  { value: 'serializedBounds', label: 'Serialized Bounds (exact)' },
+  { value: 'backwardInduction', label: 'Backward Induction (exact)' },
+  { value: 'mcts', label: 'MCTS (sampled)' },
+  { value: 'ismcts', label: 'ISMCTS (sampled belief)' },
+  { value: 'mccfr', label: 'MCCFR (sampled belief)' },
 ]
 
 type TeamSource = 'saved' | 'meta'
@@ -50,10 +71,32 @@ export default function SetupPanel() {
   const [informationMode, setInformationMode] = useState<InformationMode>(
     saved?.informationMode ?? 'closedSheet',
   )
+  const [botPreset, setBotPreset] = useState<BotChoice>(saved?.botPreset ?? 'off')
+  const [botAlgorithm, setBotAlgorithm] = useState<BotAlgorithm>(
+    saved?.botAlgorithm ?? 'doubleOracle',
+  )
 
   useEffect(() => {
-    saveBattleSetup({ formatId, team1Id, team2Id, team1Source, team2Source, informationMode })
-  }, [formatId, team1Id, team2Id, team1Source, team2Source, informationMode])
+    saveBattleSetup({
+      formatId,
+      team1Id,
+      team2Id,
+      team1Source,
+      team2Source,
+      informationMode,
+      botPreset,
+      botAlgorithm,
+    })
+  }, [
+    formatId,
+    team1Id,
+    team2Id,
+    team1Source,
+    team2Source,
+    informationMode,
+    botPreset,
+    botAlgorithm,
+  ])
 
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
@@ -83,6 +126,8 @@ export default function SetupPanel() {
       damageRolls: 16,
       informationMode,
       legalItems: legalItemsFor(format),
+      // The server resolves the preset and returns every limit it applied.
+      botP2: botPreset === 'off' ? undefined : { algorithm: botAlgorithm, preset: botPreset },
     })
   }
 
@@ -138,6 +183,29 @@ export default function SetupPanel() {
             onChange={(v) => setInformationMode(v as InformationMode)}
           />
         </label>
+
+        <div className="mb-6" data-testid="bot-picker">
+          <span className="mb-1 block text-sm font-medium">P2 solver profile</span>
+          <div className="mb-2">
+            <Select
+              value={botPreset}
+              options={BOT_OPTIONS}
+              onChange={(v) => setBotPreset(v as BotChoice)}
+            />
+          </div>
+          {botPreset !== 'off' && (
+            <>
+              <Select
+                value={botAlgorithm}
+                options={BOT_ALGORITHM_OPTIONS}
+                onChange={(v) => setBotAlgorithm(v as BotAlgorithm)}
+              />
+              <p className="mt-1 text-xs text-ink-muted">
+                This stores limits for the planned P2 bot. P2 stays under hotseat control for now.
+              </p>
+            </>
+          )}
+        </div>
 
         {teams.length === 0 && (team1Source === 'saved' || team2Source === 'saved') && (
           <p className="mb-4 text-sm text-warning">

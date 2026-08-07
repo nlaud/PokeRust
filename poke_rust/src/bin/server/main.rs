@@ -2,6 +2,7 @@
 //! startup and exposes battle sessions over JSON — see routes.rs for endpoints.
 //! Run from `poke_rust/` so the default dex paths resolve.
 
+mod bot;
 mod dto;
 mod mapping;
 mod routes;

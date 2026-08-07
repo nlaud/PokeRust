@@ -82,6 +82,10 @@ pub struct BattleSession {
     pub belief_p2: Option<UnknownMatchState>,
     /// Shared inference configuration for both beliefs.
     pub inference_config: Option<InferenceConfig>,
+    /// The resolved profile for the planned P2 bot.
+    /// The current battle remains hotseat.
+    /// `SessionConfig` stays `Copy`, so the profile lives here instead.
+    pub bot_p2: Option<crate::bot::BotProfile>,
 }
 
 impl BattleSession {
