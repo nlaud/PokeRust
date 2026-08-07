@@ -104,6 +104,25 @@
 //! A test of an approximate search compares gaps, never the subset that the
 //! search itself played.
 //!
+//! # Opponent exploitation
+//!
+//! [`solve`] returns a Nash strategy, and that stays the default of every
+//! search.
+//! A Nash strategy holds its value against every opponent, and it takes nothing
+//! extra from a weak opponent.
+//!
+//! [`exploit::respond`] answers a known opponent model instead.
+//! The opponent plays that model with a supplied confidence, and plays freely
+//! with the rest of the mass.
+//! A confidence of zero returns the Nash strategy.
+//! A confidence of one returns a pure best response.
+//!
+//! The answer loses the Nash guarantee, and
+//! [`exploit::ResponseReport::budget_spent`] names that price.
+//! [`exploit::respond_within_budget`] holds the price under a supplied limit.
+//! Neither function changes [`SolveConfig`], and neither one changes the result
+//! of [`solve`].
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.

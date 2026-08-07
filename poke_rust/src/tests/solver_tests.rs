@@ -28,7 +28,7 @@ use crate::simulator::scoped_sample_rng;
 use crate::solver::actions as solver_actions;
 use crate::solver::belief::{BeliefError, Particle, ParticleBelief};
 use crate::solver::chance::ChanceMode;
-use crate::solver::exploit::exploitability;
+use crate::solver::exploit::{ResponseMode, exploitability, respond, respond_within_budget};
 use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
 use crate::solver::mccfr::{self, ContinualConfig, MccfrConfig};
@@ -2634,6 +2634,276 @@ fn exploitability_reports_approximation_and_complete_costs() {
             .warnings
             .iter()
             .any(|warning| matches!(warning, SolveWarning::ChanceMassDiscarded { .. }))
+    );
+}
+
+/// The Nash mode must reproduce the equilibrium of the same position, for both
+/// players. It therefore spends no exploitability budget.
+#[test]
+fn nash_mode_returns_the_equilibrium_value() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..base_config()
+    };
+    let solved = solve(&state, pokemon_dex, move_dex, &config).expect("the position is playable");
+
+    for (exploiter, model) in [
+        (Player::P1, &solved.p2_strategy),
+        (Player::P2, &solved.p1_strategy),
+    ] {
+        let report = respond(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &base_config(),
+            exploiter,
+            model,
+            ResponseMode::Nash,
+        )
+        .expect("the position is playable");
+
+        assert_eq!(report.unmatched, 0, "{exploiter:?} lost a model entry");
+        assert_eq!(report.confidence, 0.0);
+        assert!(
+            (report.nash_value - solved.value).abs() < 1e-6,
+            "{exploiter:?} reported {} against {}",
+            report.nash_value,
+            solved.value
+        );
+        assert!(
+            report.budget_spent.abs() < 1e-6,
+            "{exploiter:?} spent {}",
+            report.budget_spent
+        );
+        assert!(
+            report.stats.nodes_expanded > 0,
+            "the response omitted the root node"
+        );
+        let total: f64 = report.strategy.iter().map(|a| a.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "the strategy sums to {total}");
+    }
+}
+
+/// The response statistics must include the root decision node.
+#[test]
+fn response_stats_include_the_root_node() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let p1 = complete_actions(&state, Player::P1);
+    let p2 = complete_actions(&state, Player::P2);
+    let config = base_config();
+    let baseline = exploitability(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &uniform_strategy(&p1),
+        &uniform_strategy(&p2),
+    )
+    .expect("the position is playable");
+    let response = respond(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        Player::P1,
+        &uniform_strategy(&p2),
+        ResponseMode::Nash,
+    )
+    .expect("the position is playable");
+
+    assert_eq!(
+        response.stats.nodes_expanded,
+        baseline.stats.nodes_expanded + 1
+    );
+}
+
+/// Invalid numeric inputs must not put non-finite values in a response.
+#[test]
+fn response_sanitizes_non_finite_probabilities() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let p1 = complete_actions(&state, Player::P1);
+    let model: Vec<JointActionProb> = p1
+        .iter()
+        .map(|commands| JointActionProb {
+            commands: commands.clone(),
+            probability: f64::INFINITY,
+        })
+        .collect();
+
+    let report = respond(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Player::P2,
+        &model,
+        ResponseMode::Exploit {
+            confidence: f64::NAN,
+        },
+    )
+    .expect("the position is playable");
+
+    assert_eq!(report.confidence, 0.0);
+    assert!(report.nash_value.is_finite());
+    assert!(report.model_value.is_finite());
+    assert!(report.worst_case.is_finite());
+    assert!(report.budget_spent.is_finite());
+    assert!(
+        report
+            .strategy
+            .iter()
+            .all(|action| action.probability.is_finite())
+    );
+
+    let mut huge_model = Vec::new();
+    for commands in &p1 {
+        for _ in 0..2 {
+            huge_model.push(JointActionProb {
+                commands: commands.clone(),
+                probability: f64::MAX,
+            });
+        }
+    }
+    let full_response = |model: &[JointActionProb]| {
+        respond(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &base_config(),
+            Player::P2,
+            model,
+            ResponseMode::Exploit { confidence: 1.0 },
+        )
+        .expect("the position is playable")
+    };
+    let uniform = full_response(&[]);
+    let huge = full_response(&huge_model);
+    assert!((huge.model_value - uniform.model_value).abs() < 1e-9);
+}
+
+/// Full confidence must take more value from a pure model than the Nash
+/// strategy does, and it must pay for that with a positive budget.
+///
+/// P2 reads the model here. P1 holds one action that answers every P2 action of
+/// this position, so a P1 exploiter has nothing left to take, and only P2 shows
+/// the trade. Every value is a P1 win probability, so P2 takes value by moving
+/// the value down.
+#[test]
+fn full_confidence_beats_nash_against_the_model() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let p1 = complete_actions(&state, Player::P1);
+    let model = pure_strategy(&p1[1]);
+
+    let answer = |mode| {
+        respond(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &base_config(),
+            Player::P2,
+            &model,
+            mode,
+        )
+        .expect("the position is playable")
+    };
+
+    let nash = answer(ResponseMode::Nash);
+    let exploit = answer(ResponseMode::Exploit { confidence: 1.0 });
+
+    assert_eq!(exploit.unmatched, 0, "the check lost a model entry");
+    assert!(
+        exploit.model_value < nash.model_value - 0.01,
+        "full confidence held P1 to {} and Nash held P1 to {}",
+        exploit.model_value,
+        nash.model_value
+    );
+    assert!(
+        exploit.budget_spent > 0.0,
+        "the answer spent {}",
+        exploit.budget_spent
+    );
+    assert!(
+        exploit.worst_case > nash.worst_case - 1e-9,
+        "the worst case fell from {} to {}",
+        nash.worst_case,
+        exploit.worst_case
+    );
+}
+
+/// The budget scan must never spend more than its limit, and it must never take
+/// less from the model than the Nash strategy does. P2 reads the model, for the
+/// reason that `full_confidence_beats_nash_against_the_model` gives.
+#[test]
+fn a_budget_limit_bounds_the_worst_case_loss() {
+    let state = contested_position();
+    let (pokemon_dex, move_dex) = dexes();
+    let p1 = complete_actions(&state, Player::P1);
+    let model = pure_strategy(&p1[1]);
+    let limit = 0.05;
+
+    let nash = respond(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Player::P2,
+        &model,
+        ResponseMode::Nash,
+    )
+    .expect("the position is playable");
+
+    let bounded = respond_within_budget(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Player::P2,
+        &model,
+        limit,
+    )
+    .expect("the position is playable");
+
+    assert!(
+        bounded.budget_spent <= limit + 1e-9,
+        "the scan spent {} of {limit}",
+        bounded.budget_spent
+    );
+    assert!(
+        bounded.model_value <= nash.model_value + 1e-9,
+        "the scan held P1 to {} and Nash held P1 to {}",
+        bounded.model_value,
+        nash.model_value
+    );
+    assert!(
+        bounded.confidence > 0.0,
+        "the limit of {limit} bought no confidence"
+    );
+
+    // A budget of zero can buy nothing beyond a free gain, so the answer must
+    // keep the Nash worst case.
+    let none = respond_within_budget(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Player::P2,
+        &model,
+        0.0,
+    )
+    .expect("the position is playable");
+    assert!(
+        none.budget_spent.abs() < 1e-6,
+        "a budget of zero spent {}",
+        none.budget_spent
+    );
+    assert!(
+        none.model_value <= nash.model_value + 1e-9,
+        "the zero budget took less than Nash"
     );
 }
 

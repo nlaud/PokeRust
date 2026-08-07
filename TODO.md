@@ -95,9 +95,12 @@ It also reports the counterfactual value of each public belief at the depth limi
 `mccfr::continual_solve` retains private histories and solves each public belief.
 It then solves the root against the information-set values.
 
-- [ ] Add opponent exploitation as a separate mode.
-  - [ ] Keep Nash as the default.
-  - [ ] Show the exploitability budget for safe exploitation.
+`solver::exploit::respond` answers an opponent model as a restricted Nash response.
+The opponent plays the model with the supplied confidence, and plays freely with the rest of the mass.
+A confidence of zero returns the Nash strategy, and a confidence of one returns a pure best response.
+`ResponseReport::budget_spent` reports the worst-case loss against the Nash value.
+`exploit::respond_within_budget` scans a confidence ladder and holds that loss under a limit.
+Nash stays the default of every search.
 
 ## Simulator bot
 
