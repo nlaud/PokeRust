@@ -87,7 +87,25 @@ review found is one example. A limit that the run left in place is another.
 Never invent a result. If the subagent returns no contract line, do not guess
 the outcome. See the section *A run with no status*.
 
-## 4. Send the push notification
+## 4. Show the screenshots
+
+The subagent ends its report with a `SCREENSHOTS:` block. Read that block.
+
+1. If the block lists one path or more, call `SendUserFile` with every path.
+2. Set `status` to `normal` and `display` to `render`.
+3. Write a one-line caption that names the task.
+4. If the block reads `none`, show nothing.
+
+Pass the paths as a JSON array of strings. Use forward slashes. A Windows
+backslash breaks the argument.
+
+Show the screenshots on every run that captured one. The user never reads the
+subagent report, so an unshown screenshot never reaches the user.
+
+If the report holds no screenshot block, ask the subagent for one with
+`SendMessage`. Never guess a path.
+
+## 5. Send the push notification
 
 Send one push notification for each run. This step is required.
 
@@ -107,11 +125,11 @@ take.
 The tool skips the notification when the user sits at the terminal. That result
 is correct. Send the notification every time, and let the tool decide.
 
-## 5. Resume the loop
+## 6. Resume the loop
 
 A `PAUSED` return ends the turn. The next user message starts the next run.
 
-When that message arrives, repeat sections 1 through 4. Record the new message
+When that message arrives, repeat sections 1 through 5. Record the new message
 text. Start a fresh subagent. The subagent reads `.claude/todo/state.json` and
 continues at the stored stage.
 

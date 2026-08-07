@@ -32,6 +32,18 @@ message. Write the facts that the user needs, and write nothing more.
 Keep the report under 20 lines. Put the substance in the report. Do not tell the
 user to read a file for a fact that belongs in the report.
 
+Put a screenshot block directly before the contract line in every report:
+
+```text
+SCREENSHOTS:
+<absolute path>
+<absolute path>
+```
+
+Write `SCREENSHOTS: none` when the run captured no screenshot. The main thread
+shows each listed file to the user. The screenshot block does not replace the
+contract line. Write both.
+
 ## 1. Resume an active task
 
 Read `.claude/todo/state.json`.
@@ -235,6 +247,9 @@ npm exec playwright -- test <spec-files>
 Use Playwright to inspect each affected page and interaction. Capture a
 screenshot of each affected page. Inspect every screenshot before you report
 success.
+
+Record the absolute path of each screenshot. Write every path in the screenshot
+block of your report. The user sees a screenshot only through that block.
 
 If a command fails, fix the cause and run it again. Never report a pass that you
 did not see.
