@@ -112,14 +112,21 @@ P2 must never read P1's current command.
 Sample one P2 command from the latest complete mixed strategy.
 Resolve both commands together.
 
-- [ ] Add a generation ID to each analysis job.
-  - [ ] Cancel an old job after a state or configuration change.
-  - [ ] Ignore results from an old generation.
-  - [ ] Keep the last complete checkpoint after failure or cancellation.
-  - [ ] Add fast, balanced, strong, and custom bot profiles.
-  - [ ] Show private progress without showing the live P2 strategy.
-  - [ ] Store deterministic replay data.
+- [ ] Finish the P2 analysis job.
+  - [ ] Store deterministic replay data beyond the seed and the profile.
   - [ ] Show the sampled P2 action only after both commands lock.
+  - [ ] Submit the sampled P2 command instead of the hotseat input.
+
+`analysis.rs` holds the generation, the running job, and the last checkpoint.
+`invalidate` cancels a job before its search starts, and the generation check in
+`accept` drops a result that a state change has already made old.
+
+- [ ] Give `solver::search` a cooperative cancel flag.
+  - [ ] Check the flag between cells, successors, and nodes.
+  - [ ] Return the last complete depth after a cancel.
+
+The analysis job can only stop a search that has not started. A long exact
+search therefore runs to its deadline after the position changes.
 
 ## Parallel search
 

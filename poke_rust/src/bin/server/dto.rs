@@ -634,6 +634,51 @@ pub struct ApiError {
     pub message: String,
 }
 
+/// The private progress of the P2 analysis job.
+///
+/// This response is progress alone. It carries no P2 action, no P2 strategy,
+/// and no P2 win odds, because P1 reads the same endpoint. A later item reveals
+/// the sampled P2 action after both commands lock.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisProgressDto {
+    /// The generation of the current position.
+    /// Every state change raises it by one.
+    pub generation: u64,
+    /// One of `idle`, `running`, `complete`, or `failed`.
+    pub phase: String,
+    /// How long the running job has run.
+    /// `None` when no job runs.
+    pub running_ms: Option<u64>,
+    /// The last complete answer.
+    /// A failure and a cancellation both keep it.
+    pub checkpoint: Option<AnalysisCheckpointDto>,
+    /// Why the last job produced no checkpoint.
+    pub error: Option<String>,
+}
+
+/// The cost of one complete analysis job.
+///
+/// The row carries wall-clock cost alone. A node count or a turn-simulation
+/// count divides by P1's own action count to give P2's, so neither appears
+/// here — the same rule that scrubs the action cap out of each warning.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisCheckpointDto {
+    /// The generation of the position that the search read.
+    pub generation: u64,
+    /// True when a later state change made this answer old.
+    pub stale: bool,
+    pub turn_number: u16,
+    /// The depth that the search reached.
+    pub depth_reached: u8,
+    pub elapsed_ms: u64,
+    /// The seed of this search, which makes the result reproducible.
+    pub seed: u64,
+    /// Every reason that the answer is approximate.
+    pub warnings: Vec<String>,
+}
+
 // ── Tracker mode ─────────────────────────────────────────────────────────────
 // Tracker sessions record typed events from a real battle.
 // They do not simulate an opponent or resolve commands.

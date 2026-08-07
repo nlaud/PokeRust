@@ -9,8 +9,8 @@
 //! the search. The wire types live here, so no Serde derive reaches engine
 //! state.
 //!
-//! The profile does not start a search. A later change adds the analysis job
-//! that reads `BotProfile::search`.
+//! The profile does not start a search itself. `analysis.rs` owns the job that
+//! reads `BotProfile::search`.
 
 use std::time::Duration;
 
@@ -127,7 +127,8 @@ struct PresetLimits {
 }
 
 /// The largest integer that JavaScript can represent without precision loss.
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// `analysis::random_seed` draws inside this range for the same reason.
+pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// The limits of each preset.
 ///
@@ -213,9 +214,7 @@ pub struct BotProfileView {
 
 /// The concrete solver configuration of one profile.
 ///
-/// No production caller reads the payload yet, because the analysis job does not
-/// exist. The unit tests read every variant.
-#[allow(dead_code)]
+/// `analysis::run_search` routes each variant to its solver entry point.
 #[derive(Debug, Clone, Copy)]
 pub enum BotSearchConfig {
     Exact(SolveConfig),
@@ -229,9 +228,7 @@ pub enum BotSearchConfig {
 pub struct BotProfile {
     /// The view that both battle endpoints return.
     pub view: BotProfileView,
-    /// The configuration that the analysis job will pass to the solver.
-    /// No caller reads it yet, because the job does not exist.
-    #[allow(dead_code)]
+    /// The configuration that the analysis job passes to the solver.
     pub search: BotSearchConfig,
 }
 

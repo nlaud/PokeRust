@@ -363,6 +363,49 @@ export interface TurnResponse {
   probability: number
 }
 
+/** The phase of the P2 analysis job. */
+export type AnalysisPhase = 'idle' | 'running' | 'complete' | 'failed'
+
+/** The cost of one complete analysis job.
+ *
+ * The row carries wall-clock cost alone. A node count or a turn-simulation
+ * count divides by P1's own action count to give P2's, so the server sends
+ * neither. */
+export interface AnalysisCheckpoint {
+  /** The generation of the position that the search read. */
+  generation: number
+  /** True when a later state change made this answer old. */
+  stale: boolean
+  turnNumber: number
+  /** The depth that the search reached. */
+  depthReached: number
+  elapsedMs: number
+  /** The seed of this search, which makes the result reproducible.
+   * The server draws it below `Number.MAX_SAFE_INTEGER`, so it round-trips. */
+  seed: number
+  /** Every reason that the answer is approximate. */
+  warnings: string[]
+}
+
+/** The private progress of the P2 analysis job.
+ *
+ * `GET /api/battles/{id}/analysis` returns progress alone. It carries no P2
+ * action, no P2 strategy, and no P2 win odds, because P1 reads the same
+ * endpoint during a hotseat battle. */
+export interface AnalysisProgressResponse {
+  /** The generation of the current position.
+   * Every state change raises it by one. */
+  generation: number
+  phase: AnalysisPhase
+  /** How long the running job has run, or null when no job runs. */
+  runningMs: number | null
+  /** The last complete answer.
+   * A failure and a cancellation both keep it. */
+  checkpoint: AnalysisCheckpoint | null
+  /** Why the last job produced no checkpoint. */
+  error: string | null
+}
+
 // ── Benchmarking ────────────────────────────────────────────────────────────
 // Mirrors the benchmark DTOs in `src/bin/server/dto.rs`.
 // `GET /api/benchmark` streams the complete grid through server-sent events.

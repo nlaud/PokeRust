@@ -86,6 +86,10 @@ pub struct BattleSession {
     /// The current battle remains hotseat.
     /// `SessionConfig` stays `Copy`, so the profile lives here instead.
     pub bot_p2: Option<crate::bot::BotProfile>,
+    /// The generation, the running job, and the last complete checkpoint of the
+    /// private P2 analysis. A session with no profile never starts a job, so
+    /// this record then stays at generation zero with no checkpoint.
+    pub analysis: crate::analysis::AnalysisState,
 }
 
 impl BattleSession {
@@ -401,6 +405,10 @@ pub fn resolve_turn(
     session.state = next_state;
     session.belief_p1 = next_belief_p1;
     session.belief_p2 = next_belief_p2;
+    // The position changed, so every running analysis job now answers an old
+    // question. This raises the generation and cancels that job. It keeps the
+    // last complete checkpoint.
+    session.analysis.invalidate();
     session.log_p1.push(TurnLogEntry {
         label: label.clone(),
         events: event_nodes_p1.clone(),

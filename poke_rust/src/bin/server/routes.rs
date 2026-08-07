@@ -351,6 +351,7 @@ pub async fn create_battle(
         belief_p2,
         inference_config,
         bot_p2,
+        analysis: crate::analysis::AnalysisState::default(),
     };
 
     let battle_id = Uuid::new_v4().to_string();
@@ -436,6 +437,17 @@ pub async fn submit_turn(
             Err(message) => return internal_error(message),
         };
 
+    // `resolve_turn` already raised the analysis generation, so this job carries
+    // the new position. The search runs off the lock, and its result reaches the
+    // session only while the generation still matches.
+    crate::analysis::start_job(
+        &id,
+        session,
+        Arc::clone(&app.dexes),
+        Arc::clone(&app.meta),
+        Arc::clone(&app.sessions),
+    );
+
     Json(TurnResponse {
         state: session.view(Player::P1),
         state_p2: session.view(Player::P2),
@@ -444,6 +456,20 @@ pub async fn submit_turn(
         probability,
     })
     .into_response()
+}
+
+/// `GET /api/battles/{id}/analysis` — the private progress of the P2 analysis
+/// job.
+///
+/// The response is progress alone. It never holds a P2 action, a P2 strategy,
+/// or the P2 win odds, because P1 reads the same endpoint during a hotseat
+/// battle. A later item reveals the sampled P2 action after both commands lock.
+pub async fn get_analysis(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+    let sessions = lock_sessions(&app);
+    let Some(session) = sessions.get(&id) else {
+        return not_found();
+    };
+    Json(session.analysis.progress()).into_response()
 }
 
 pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {

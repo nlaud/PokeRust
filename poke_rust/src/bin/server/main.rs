@@ -2,6 +2,7 @@
 //! startup and exposes battle sessions over JSON — see routes.rs for endpoints.
 //! Run from `poke_rust/` so the default dex paths resolve.
 
+mod analysis;
 mod bot;
 mod dto;
 mod mapping;
@@ -110,6 +111,7 @@ async fn main() {
         )
         .route("/api/battles/{id}/commands", get(routes::get_commands))
         .route("/api/battles/{id}/turn", post(routes::submit_turn))
+        .route("/api/battles/{id}/analysis", get(routes::get_analysis))
         .route("/api/tracker", post(tracker::create_tracker))
         .route(
             "/api/tracker/{id}",
