@@ -6,6 +6,7 @@ import type {
   BotProfileView,
   EventNode,
   LegalCommands,
+  P2Reveal,
   PlayerCommand,
   PlayerId,
   TurnLogEntry,
@@ -22,11 +23,7 @@ function preloadBattleSprites(view: BattleView) {
   preloadSprites(mons.flatMap((m) => [m.species, ...megaFormeNames(m.species, m.item)]))
 }
 
-/**
- * Stores commands for the hotseat turn process.
- * P1 selects commands before P2.
- * The store submits both command sets in one turn request.
- */
+/** Stores commands for hotseat battles and P2 bot battles. */
 export interface PendingAttack {
   moveSlot: number
   terastallize: boolean
@@ -54,9 +51,14 @@ interface BattleStore {
   logP2: TurnLogEntry[]
   /** Log for `currentPlayer`. */
   log: TurnLogEntry[]
-  /** The resolved profile for the planned P2 bot.
+  /** The resolved profile for the P2 bot.
    * `null` means that the battle has no profile. */
   botP2: BotProfileView | null
+  /** The command that the server drew for P2 on the last resolved turn.
+   * `null` in a hotseat battle, and at team preview. */
+  p2Reveal: P2Reveal | null
+  /** True while the client waits for the analysis job of the P2 bot. */
+  waitingForBot: boolean
   probability: number | null
   error: string | null
   busy: boolean
@@ -84,6 +86,24 @@ interface BattleStore {
 }
 
 const BATTLE_ID_KEY = 'pokerust.activeBattleId'
+const ANALYSIS_POLL_MS = 100
+
+/** Waits for the current analysis job or its configured time limit. */
+async function waitForBotAnalysis(battleId: string, bot: BotProfileView) {
+  const deadline = Date.now() + Math.max(bot.timeMs ?? 0, 1_000) + 2_000
+  while (Date.now() < deadline) {
+    const progress = await api.getAnalysis(battleId)
+    if (
+      progress.phase === 'complete' &&
+      progress.checkpoint?.generation === progress.generation &&
+      !progress.checkpoint.stale
+    ) {
+      return
+    }
+    if (progress.phase !== 'running') return
+    await new Promise((resolve) => window.setTimeout(resolve, ANALYSIS_POLL_MS))
+  }
+}
 
 function appendLog(log: TurnLogEntry[], label: string, events: EventNode[]): TurnLogEntry[] {
   return [...log, { label, events }]
@@ -104,6 +124,55 @@ function appendDualLog(
 }
 
 export const useBattle = create<BattleStore>((set, get) => {
+  /** Submits one battle command pair and stores the resolved position. */
+  async function submitBattleTurn(
+    battleId: string,
+    p1: PlayerCommand,
+    p2: PlayerCommand | undefined,
+    turnLabel: string,
+  ) {
+    try {
+      const response = await api.submitTurn(battleId, { p1, ...(p2 ? { p2 } : {}) })
+      set((s) => {
+        const { logP1, logP2 } = appendDualLog(
+          s.logP1,
+          s.logP2,
+          turnLabel,
+          response.events,
+          response.eventsP2,
+        )
+        return {
+          viewP1: response.state,
+          viewP2: response.stateP2,
+          view: pickForPlayer(response.state, response.stateP2, 'p1'),
+          probability: response.probability,
+          logP1,
+          logP2,
+          log: pickForPlayer(logP1, logP2, 'p1'),
+          currentPlayer: 'p1' as const,
+          draftCommands: [],
+          p1Commands: null,
+          pendingAttack: null,
+          commands: null,
+          busy: false,
+          // A hotseat turn returns no reveal, so this also clears the last one.
+          p2Reveal: response.p2Reveal ?? null,
+        }
+      })
+      if (response.state.phase !== 'gameOver') {
+        await get().fetchCommands()
+        await autoFillForcedSlots()
+      }
+    } catch (err) {
+      set({
+        error: err instanceof Error ? err.message : String(err),
+        draftCommands: [],
+        pendingAttack: null,
+        busy: false,
+      })
+    }
+  }
+
   /** After both players' commands exist, ship the turn to the server. */
   async function maybeSubmitTurn() {
     const { battleId, view, p1Commands, draftCommands, currentPlayer, commands, busy } = get()
@@ -118,6 +187,16 @@ export const useBattle = create<BattleStore>((set, get) => {
     const playerCommand: PlayerCommand = { kind: 'battle', commands: draftCommands }
 
     if (currentPlayer === 'p1') {
+      const bot = get().botP2
+      if (bot) {
+        // P2 has no hotseat step, so the client waits for the search that
+        // supplies P2's strategy. A timeout leaves the uniform draw in place.
+        set({ busy: true, error: null, waitingForBot: true, p2Reveal: null })
+        await waitForBotAnalysis(battleId, bot).catch(() => undefined)
+        set({ waitingForBot: false })
+        await submitBattleTurn(battleId, playerCommand, undefined, `Turn ${view.turnNumber}`)
+        return
+      }
       // Show P2's view and get P2's legal commands.
       set((s) => ({
         p1Commands: playerCommand,
@@ -135,46 +214,12 @@ export const useBattle = create<BattleStore>((set, get) => {
 
     // Submit the complete turn after P2 selects commands.
     set({ busy: true, error: null })
-    try {
-      const turnLabel = view.phase === 'teamPreview' ? 'Team Preview' : `Turn ${view.turnNumber}`
-      // A session with a P2 bot lets the server draw P2's command, so the
-      // request carries no `p2` field.
-      const response = await api.submitTurn(battleId, {
-        p1: p1Commands ?? { kind: 'pass' },
-        ...(get().botP2 ? {} : { p2: playerCommand }),
-      })
-      set((s) => {
-        const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, turnLabel, response.events, response.eventsP2)
-        return {
-          viewP1: response.state,
-          viewP2: response.stateP2,
-          view: pickForPlayer(response.state, response.stateP2, 'p1'),
-          probability: response.probability,
-          logP1,
-          logP2,
-          log: pickForPlayer(logP1, logP2, 'p1'),
-          currentPlayer: 'p1',
-          draftCommands: [],
-          p1Commands: null,
-          pendingAttack: null,
-          commands: null,
-          busy: false,
-        }
-      })
-      if (response.state.phase !== 'gameOver') {
-        await get().fetchCommands()
-        await autoFillForcedSlots()
-      }
-    } catch (err) {
-      // Reset the invalid player draft.
-      // Keep P1's commands when P2 input fails.
-      set({
-        error: err instanceof Error ? err.message : String(err),
-        draftCommands: [],
-        pendingAttack: null,
-        busy: false,
-      })
-    }
+    await submitBattleTurn(
+      battleId,
+      p1Commands ?? { kind: 'pass' },
+      playerCommand,
+      `Turn ${view.turnNumber}`,
+    )
   }
 
   /**
@@ -213,6 +258,8 @@ export const useBattle = create<BattleStore>((set, get) => {
     logP2: [],
     log: [],
     botP2: null,
+    p2Reveal: null,
+    waitingForBot: false,
     probability: null,
     error: null,
     busy: false,
@@ -238,6 +285,8 @@ export const useBattle = create<BattleStore>((set, get) => {
           logP2: [],
           log: [],
           botP2: response.botP2,
+          p2Reveal: null,
+          waitingForBot: false,
           probability: null,
           currentPlayer: 'p1',
           draftCommands: [],
@@ -265,6 +314,9 @@ export const useBattle = create<BattleStore>((set, get) => {
           logP2: response.logP2,
           log: pickForPlayer(response.log, response.logP2, 'p1'),
           botP2: response.botP2,
+          // A restore reads the session, and the session keeps no past reveal.
+          p2Reveal: null,
+          waitingForBot: false,
           currentPlayer: 'p1',
           draftCommands: [],
           p1Commands: null,
@@ -292,6 +344,8 @@ export const useBattle = create<BattleStore>((set, get) => {
         logP2: [],
         log: [],
         botP2: null,
+        p2Reveal: null,
+        waitingForBot: false,
         probability: null,
         error: null,
         currentPlayer: 'p1',
@@ -384,7 +438,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         backIndices: back,
       }
 
-      if (currentPlayer === 'p1') {
+      if (currentPlayer === 'p1' && !get().botP2) {
         set((s) => ({
           p1Commands: command,
           currentPlayer: 'p2',
@@ -397,10 +451,8 @@ export const useBattle = create<BattleStore>((set, get) => {
 
       set({ busy: true, error: null })
       try {
-        // A session with a P2 bot lets the server draw P2's picks, so the
-        // request carries no `p2` field.
         const response = await api.submitTurn(battleId, {
-          p1: p1Commands ?? { kind: 'pass' },
+          p1: currentPlayer === 'p1' ? command : (p1Commands ?? { kind: 'pass' }),
           ...(get().botP2 ? {} : { p2: command }),
         })
         set((s) => {
@@ -418,6 +470,9 @@ export const useBattle = create<BattleStore>((set, get) => {
             p1Commands: null,
             commands: null,
             busy: false,
+            // The preview reveal carries no command. The leads appear on the
+            // field on their own, and the back picks stay under the fog of war.
+            p2Reveal: null,
           }
         })
         await get().fetchCommands()

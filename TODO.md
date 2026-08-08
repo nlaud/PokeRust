@@ -105,30 +105,15 @@ Nash stays the default of every search.
 
 ## Simulator bot
 
-Start P2 analysis after each turn resolves.
-Use an immutable state and belief snapshot.
-Reuse complete checkpoints until P1 submits a command.
-
-P2 must never read P1's current command.
-Sample one P2 command from the latest complete mixed strategy.
-Resolve both commands together.
-
-- [ ] Finish the P2 analysis job.
-  - [x] Store deterministic replay data beyond the seed and the profile.
-  - [x] Show the sampled P2 action only after both commands lock.
-  - [x] Submit the sampled P2 command instead of the hotseat input.
-  - [ ] Add tooltips to what the sampled and exact profiles mean in the selectionscreen
-  - [ ] Poll the analysis job before the client submits a bot turn.
-  - [ ] Show the reveal panel and the wait line in the battle screen.
-
 `analysis.rs` holds the generation, the running job, and the last checkpoint.
 `invalidate` cancels a job before its search starts, and the generation check in
 `accept` drops a result that a state change has already made old.
 
-The server now draws P2's command and returns it as `p2Reveal`. The client sends
-no `p2` field for a bot session, but it does not yet wait for the job, so the
-draw falls back to the uniform case. The three open items above finish the
-client work.
+The server draws P2's command and returns it as `p2Reveal`. The client sends no
+`p2` field for a bot session. It waits for the current analysis job before it
+submits a battle command. A timeout or a failed job uses the uniform draw.
+`P2RevealPanel` shows the wait line during the search, and the drawn command
+after the turn resolves.
 
 - [ ] Give `solver::search` a cooperative cancel flag.
   - [ ] Check the flag between cells, successors, and nodes.

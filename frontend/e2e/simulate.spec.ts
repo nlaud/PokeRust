@@ -86,6 +86,14 @@ test.describe('Simulate mode', () => {
     await seedTeam(page)
     await page.goto('/simulate')
     await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
+    const turnRequests: Record<string, unknown>[] = []
+    let analysisRequests = 0
+    page.on('request', (request) => {
+      if (request.url().endsWith('/analysis')) analysisRequests += 1
+      if (request.url().endsWith('/turn')) {
+        turnRequests.push(request.postDataJSON() as Record<string, unknown>)
+      }
+    })
 
     // Add a supported API override that the setup panel does not expose.
     // This checks both the resolved adjustment and a subsecond time label.
@@ -106,7 +114,25 @@ test.describe('Simulate mode', () => {
     await openOption('Fast').click()
     await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
     await openOption('ISMCTS (sampled belief)').click()
-    await expect(picker).toContainText('P2 stays under hotseat control for now.')
+    await expect(picker).toContainText('P2 uses this solver profile')
+
+    // The picker explains what the chosen algorithm does, on the page and in a
+    // tooltip on the list-box trigger.
+    const hint = picker.getByTestId('bot-algorithm-hint')
+    await expect(hint).toContainText('Sampled')
+    await expect(hint).toContainText('respects the fog of war')
+    await expect(
+      picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
+    ).toHaveAttribute('title', /Sampled/)
+
+    // An exact algorithm gets its own explanation.
+    await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
+    await openOption('Double Oracle (exact)').click()
+    await expect(hint).toContainText('Exact')
+    await expect(hint).toContainText('sees through the fog of war')
+    await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
+    await openOption('ISMCTS (sampled belief)').click()
+
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
     ).toHaveAttribute('aria-expanded', 'false')
@@ -168,12 +194,99 @@ test.describe('Simulate mode', () => {
     })
     expect(detailOwnsOverlap).toBe(true)
 
-    // A profile does not run the planned bot yet. P2 still gets hotseat input.
+    // The open panel covers the controls below it, so close it before the
+    // battle input starts.
+    await badge.getByRole('button').first().click()
+    await expect(detail).toHaveCount(0)
+    await page.setViewportSize({ width: 1280, height: 800 })
+
+    // P1 locks the preview command. The server draws P2's command immediately.
     const previewMons = page.getByTestId('preview-mon')
     const p1Count = await previewMons.count()
     for (let i = 0; i < p1Count; i++) await previewMons.nth(i).click()
-    await page.getByTestId('preview-confirm').click()
     await expect(page.getByTestId('preview-confirm')).toHaveText('Start Battle')
-    await page.screenshot({ path: testInfo.outputPath('bot-badge.png') })
+    await page.getByTestId('preview-confirm').click()
+    await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
+    expect(turnRequests).toHaveLength(1)
+    expect(turnRequests[0]).not.toHaveProperty('p2')
+    // Team preview draws no command, so the reveal panel stays away.
+    await expect(page.getByTestId('p2-reveal')).toHaveCount(0)
+    await page.screenshot({
+      path: testInfo.outputPath('bot-preview-resolved.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+
+    // P1 locks one move. The client waits for analysis and never asks for P2 input.
+    await page.getByTestId('move-option').first().click()
+    // The turn can end in a replacement, so assert the log, not a move list.
+    await expect(page.getByText('Turn 1', { exact: true })).toBeVisible({ timeout: 15_000 })
+    expect(analysisRequests).toBeGreaterThan(0)
+    expect(turnRequests).toHaveLength(2)
+    expect(turnRequests[1]).not.toHaveProperty('p2')
+
+    // The reveal names P2's one action. It must never show the odds of that
+    // action or P2's win probability.
+    const reveal = page.getByTestId('p2-reveal')
+    await expect(reveal).toBeVisible()
+    await expect(reveal).toContainText('Player 2 played')
+    await reveal.getByRole('button').first().click()
+    const revealDetail = page.getByTestId('p2-reveal-detail')
+    await expect(revealDetail).toContainText('Draw seed')
+    await expect(revealDetail).not.toContainText('%')
+    await expect(revealDetail).not.toContainText(/win/i)
+    await page.screenshot({
+      path: testInfo.outputPath('bot-turn-resolved.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+  })
+
+  test('the reveal names the solver strategy under perfect information', async ({
+    page,
+  }, testInfo) => {
+    await seedTeam(page)
+    await page.goto('/simulate')
+    await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
+    // An exact algorithm reads the true position, so it can only control P2
+    // when the session hides nothing. A fogged session falls back to the
+    // uniform draw.
+    await pickSelectOption(page, 'Information mode', 'Perfect Information')
+
+    const picker = page.getByTestId('bot-picker')
+    const openOption = (name: string) =>
+      picker
+        .locator('div.relative:has(> button[aria-expanded="true"])')
+        .getByRole('option', { name })
+    await picker.getByRole('button', { name: 'None' }).click()
+    await openOption('Fast').click()
+    await expect(picker.getByTestId('bot-algorithm-hint')).toContainText('Exact')
+
+    await page.getByRole('button', { name: 'Start Battle' }).click()
+    const previewMons = page.getByTestId('preview-mon')
+    await expect(previewMons.first()).toBeVisible({ timeout: 10_000 })
+    const count = await previewMons.count()
+    for (let i = 0; i < count; i++) await previewMons.nth(i).click()
+    await page.getByTestId('preview-confirm').click()
+
+    // The wait line replaces the reveal while the search runs.
+    await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
+    await page.getByTestId('move-option').first().click()
+    await expect(page.getByText('Turn 1', { exact: true })).toBeVisible({ timeout: 20_000 })
+
+    const reveal = page.getByTestId('p2-reveal')
+    await expect(reveal).toContainText('from the solver strategy')
+    await reveal.getByRole('button').first().click()
+    const detail = page.getByTestId('p2-reveal-detail')
+    await expect(detail).toContainText('doubleOracle')
+    await expect(detail).toContainText('turn 1')
+    // The reveal carries one action. It must show no odds and no win rate.
+    await expect(detail).not.toContainText('%')
+    await expect(detail).not.toContainText(/win/i)
+    await page.screenshot({
+      path: testInfo.outputPath('bot-reveal-strategy.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
   })
 })

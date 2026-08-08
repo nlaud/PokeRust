@@ -18,25 +18,57 @@ const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
   { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
 ]
 
-/** `off` stores no profile for the planned P2 bot. */
+/** `off` creates a hotseat battle. */
 type BotChoice = 'off' | BotPreset
 
-const BOT_OPTIONS: { value: BotChoice; label: string }[] = [
-  { value: 'off', label: 'None' },
-  { value: 'fast', label: 'Fast' },
-  { value: 'balanced', label: 'Balanced' },
-  { value: 'strong', label: 'Strong' },
+const BOT_OPTIONS: { value: BotChoice; label: string; hint: string }[] = [
+  { value: 'off', label: 'None', hint: 'Both players use hotseat input.' },
+  { value: 'fast', label: 'Fast', hint: 'The shortest search. P2 answers in about a second.' },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    hint: 'A longer search than Fast. P2 takes a few seconds each turn.',
+  },
+  {
+    value: 'strong',
+    label: 'Strong',
+    hint: 'The longest search. P2 can take tens of seconds each turn.',
+  },
 ]
 
 // The first three algorithms solve the game exactly to the depth horizon.
 // The last three sample, so they return an estimate.
-const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string }[] = [
-  { value: 'doubleOracle', label: 'Double Oracle (exact)' },
-  { value: 'serializedBounds', label: 'Serialized Bounds (exact)' },
-  { value: 'backwardInduction', label: 'Backward Induction (exact)' },
-  { value: 'mcts', label: 'MCTS (sampled)' },
-  { value: 'ismcts', label: 'ISMCTS (sampled belief)' },
-  { value: 'mccfr', label: 'MCCFR (sampled belief)' },
+const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
+  {
+    value: 'doubleOracle',
+    label: 'Double Oracle (exact)',
+    hint: 'Exact: it solves every turn to the depth horizon and returns the true mixed strategy of that horizon. It reads the true position, so it sees through the fog of war.',
+  },
+  {
+    value: 'serializedBounds',
+    label: 'Serialized Bounds (exact)',
+    hint: 'Exact: the same answer as Double Oracle through alpha-beta bounds. It reads the true position, so it sees through the fog of war.',
+  },
+  {
+    value: 'backwardInduction',
+    label: 'Backward Induction (exact)',
+    hint: 'Exact: it builds the whole payoff matrix of every turn. The slowest exact algorithm. It reads the true position, so it sees through the fog of war.',
+  },
+  {
+    value: 'mcts',
+    label: 'MCTS (sampled)',
+    hint: 'Sampled: it plays random lines and keeps the best. The answer is an estimate. It reads the true position, so it sees through the fog of war.',
+  },
+  {
+    value: 'ismcts',
+    label: 'ISMCTS (sampled belief)',
+    hint: 'Sampled: it draws a possible version of your team from the belief, then searches. The answer is an estimate, and it respects the fog of war.',
+  },
+  {
+    value: 'mccfr',
+    label: 'MCCFR (sampled belief)',
+    hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief. The answer is an estimate, and it respects the fog of war.',
+  },
 ]
 
 type TeamSource = 'saved' | 'meta'
@@ -131,6 +163,7 @@ export default function SetupPanel() {
     })
   }
 
+  const algorithmHint = BOT_ALGORITHM_OPTIONS.find((o) => o.value === botAlgorithm)?.hint ?? ''
   const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
   const teamOptions = sortedTeams.map((t) => ({ value: t.id, label: t.name }))
 
@@ -200,8 +233,11 @@ export default function SetupPanel() {
                 options={BOT_ALGORITHM_OPTIONS}
                 onChange={(v) => setBotAlgorithm(v as BotAlgorithm)}
               />
+              <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-hint">
+                {algorithmHint}
+              </p>
               <p className="mt-1 text-xs text-ink-muted">
-                This stores limits for the planned P2 bot. P2 stays under hotseat control for now.
+                P2 uses this solver profile after Player 1 locks a command.
               </p>
             </>
           )}

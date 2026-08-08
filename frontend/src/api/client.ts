@@ -2,6 +2,7 @@ import type {
   BenchmarkProgress,
   BenchmarkResult,
   BenchmarkSweepError,
+  AnalysisProgressResponse,
   CreateBattleRequest,
   CreateBattleResponse,
   CreateTrackerRequest,
@@ -73,6 +74,10 @@ export function submitTurn(battleId: string, req: TurnRequest): Promise<TurnResp
     method: 'POST',
     body: JSON.stringify(req),
   })
+}
+
+export function getAnalysis(battleId: string): Promise<AnalysisProgressResponse> {
+  return request(`/api/battles/${battleId}/analysis`)
 }
 
 export function deleteBattle(battleId: string): Promise<void> {

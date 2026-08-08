@@ -5,6 +5,7 @@ import Arena from './Arena'
 import BotBadge from './BotBadge'
 import BattleLogSidebar from './BattleLogSidebar'
 import ControlPanel from './ControlPanel'
+import P2RevealPanel from './P2RevealPanel'
 import TeamInfoSidebar from './TeamInfoSidebar'
 
 export default function BattleScreen() {
@@ -23,6 +24,7 @@ export default function BattleScreen() {
 
       <div className="relative order-1 flex min-h-[440px] min-w-0 flex-1 flex-col lg:order-none">
         {botP2 && <BotBadge profile={botP2} />}
+        <P2RevealPanel />
 
         {inBattle ? (
           <Arena />

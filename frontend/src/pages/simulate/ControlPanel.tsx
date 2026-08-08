@@ -17,6 +17,7 @@ export default function ControlPanel() {
     draftCommands,
     pendingAttack,
     previewPicks,
+    botP2,
     busy,
     pushSlotCommand,
     setPendingAttack,
@@ -125,7 +126,7 @@ export default function ControlPanel() {
             disabled={previewPicks.length !== needed || busy}
             className="lift rounded-card bg-primary px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
           >
-            {currentPlayer === 'p1' ? 'Confirm — Player 2 next' : 'Start Battle'}
+            {currentPlayer === 'p1' && !botP2 ? 'Confirm — Player 2 next' : 'Start Battle'}
           </button>
         </div>
       </div>

@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from 'react'
 export interface SelectOption {
   value: string
   label: string
+  /** Tooltip text for this option.
+   * The trigger shows the tooltip of the selected option. */
+  hint?: string
 }
 
 /**
@@ -82,6 +85,7 @@ export default function Select({
         onClick={openMenu}
         onKeyDown={onTriggerKeyDown}
         disabled={disabled}
+        title={selected?.hint}
         aria-haspopup="listbox"
         aria-expanded={open}
         className="flex w-full items-center justify-between rounded-card border border-subtle bg-surface px-3 py-2 text-left text-sm outline-none transition-colors focus:border-primary disabled:opacity-50"
@@ -120,6 +124,7 @@ export default function Select({
               type="button"
               role="option"
               aria-selected={option.value === value}
+              title={option.hint}
               onClick={() => pick(option)}
               onMouseEnter={() => setHighlight(i)}
               className={`block w-full rounded-md px-2.5 py-1.5 text-left text-sm transition-colors ${
