@@ -1,6 +1,7 @@
 Remove items when the work is complete.
 
-# Fixes: If there is only 1 top-level item below here, should be included in ADDITION to another major TODO item
+# Fixes
+
 
 # New Features
 ## Solver target
@@ -116,6 +117,7 @@ Resolve both commands together.
   - [ ] Store deterministic replay data beyond the seed and the profile.
   - [ ] Show the sampled P2 action only after both commands lock.
   - [ ] Submit the sampled P2 command instead of the hotseat input.
+  - [ ] Add tooltips to what the sampled and exact profiles mean in the selectionscreen
 
 `analysis.rs` holds the generation, the running job, and the last checkpoint.
 `invalidate` cancels a job before its search starts, and the generation check in
@@ -124,6 +126,8 @@ Resolve both commands together.
 - [ ] Give `solver::search` a cooperative cancel flag.
   - [ ] Check the flag between cells, successors, and nodes.
   - [ ] Return the last complete depth after a cancel.
+- [ ] Add the solver info to the Tracker frontend. For the last resolved turn, it should show the best strategies for both players as well as the win changes of each player. It should live update as depth increases further. Its configuration shuold mirror the sdimulators'
+  - [ ] Displayed below the event input instructions
 
 The analysis job can only stop a search that has not started. A long exact
 search therefore runs to its deadline after the position changes.
