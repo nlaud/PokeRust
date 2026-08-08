@@ -420,10 +420,37 @@ pub async fn submit_turn(
         Ok(cmd) => cmd,
         Err(message) => return unprocessable(message),
     };
-    let p2_cmd = match session::reconstruct_player_command(session, &app.dexes, Player::P2, &req.p2)
-    {
-        Ok(cmd) => cmd,
-        Err(message) => return unprocessable(message),
+
+    // A session with a P2 bot draws P2's command itself, so the request must
+    // carry none. A hotseat session must still carry one.
+    let (p2_cmd, p2_reveal) = match (session.bot_p2.is_some(), &req.p2) {
+        (true, Some(_)) => {
+            return unprocessable(
+                "p2: this battle runs a P2 bot, so the request must not carry a p2 command"
+                    .to_string(),
+            );
+        }
+        (false, None) => {
+            return unprocessable(
+                "p2: this battle runs no P2 bot, so the request must carry a p2 command"
+                    .to_string(),
+            );
+        }
+        (false, Some(dto)) => {
+            match session::reconstruct_player_command(session, &app.dexes, Player::P2, dto) {
+                Ok(cmd) => (cmd, None),
+                Err(message) => return unprocessable(message),
+            }
+        }
+        (true, None) => match crate::analysis::draw_p2_command(session, &app.dexes) {
+            // The reveal renders against the position before the turn, so each
+            // description names the Pokemon that acted.
+            Ok(draw) => {
+                let reveal = crate::analysis::reveal_dto(&session.state, &draw);
+                (draw.command, Some(reveal))
+            }
+            Err(message) => return unprocessable(message),
+        },
     };
 
     // A contradiction in the fog-of-war inference engine is caught inside
@@ -454,6 +481,7 @@ pub async fn submit_turn(
         events,
         events_p2,
         probability,
+        p2_reveal,
     })
     .into_response()
 }
@@ -836,7 +864,29 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
 mod tests {
     use super::catch_benchmark_panic;
     use super::side_count_error;
-    use crate::dto::CreateBattleRequest;
+    use crate::dto::{CreateBattleRequest, TurnRequest};
+
+    /// A session with a P2 bot sends no `p2` field, and `submit_turn` reads the
+    /// absent field as the request for a draw. An empty field must therefore
+    /// parse, not fail.
+    #[test]
+    fn a_turn_request_without_a_p2_command_parses() {
+        let body = r#"{ "p1": { "kind": "pass" } }"#;
+
+        let req: TurnRequest = serde_json::from_str(body).unwrap();
+
+        assert!(req.p2.is_none());
+    }
+
+    /// A hotseat session still sends both commands.
+    #[test]
+    fn a_turn_request_with_a_p2_command_parses() {
+        let body = r#"{ "p1": { "kind": "pass" }, "p2": { "kind": "pass" } }"#;
+
+        let req: TurnRequest = serde_json::from_str(body).unwrap();
+
+        assert!(req.p2.is_some());
+    }
 
     #[test]
     fn benchmark_panics_become_sweep_failures() {

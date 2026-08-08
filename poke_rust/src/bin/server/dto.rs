@@ -613,7 +613,13 @@ pub struct GetBattleResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TurnRequest {
     pub p1: PlayerCommandDto,
-    pub p2: PlayerCommandDto,
+    /// The P2 command of a hotseat battle.
+    ///
+    /// A session with a P2 bot must omit this field, because the server draws
+    /// P2's command itself. A session with no bot must send it. Each broken
+    /// rule returns HTTP 422.
+    #[serde(default)]
+    pub p2: Option<PlayerCommandDto>,
 }
 
 #[derive(Serialize)]
@@ -626,6 +632,59 @@ pub struct TurnResponse {
     /// This turn's events masked for P2.
     pub events_p2: Vec<EventNode>,
     pub probability: f64,
+    /// The command that the server drew for P2.
+    /// `None` for a hotseat battle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2_reveal: Option<P2RevealDto>,
+}
+
+/// The drawn P2 command of one bot turn.
+///
+/// The reveal carries one action and nothing else of P2's plan: no probability
+/// of that action, no second action, and no win odds. The server returns it
+/// only with the resolved turn, so both commands are already locked.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2RevealDto {
+    /// The drawn command of each active slot, rendered against the position
+    /// before the turn.
+    ///
+    /// Empty at team preview. The leads appear on the field of their own
+    /// accord, and the back picks stay hidden under the fog of war.
+    pub commands: Vec<CommandOptionDto>,
+    /// Which rule produced the draw.
+    /// One of `strategy`, `uniform`, or `teamPreview`.
+    pub source: String,
+    /// The seed of the draw.
+    pub draw_seed: u64,
+    /// The replay record of the search that supplied the strategy.
+    /// Absent for either uniform draw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<AnalysisReplayDto>,
+}
+
+/// The data that repeats one analysis search.
+///
+/// The generation and turn identify the position in the session history.
+/// The other fields contain the seed and the resolved solver settings.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisReplayDto {
+    pub generation: u64,
+    pub turn_number: u16,
+    /// The seed of the search.
+    pub search_seed: u64,
+    pub algorithm: String,
+    pub preset: String,
+    pub time_ms: Option<u64>,
+    pub node_budget: Option<u64>,
+    pub depth: u8,
+    pub workers: u8,
+    pub iterations: Option<u32>,
+    pub particles: Option<usize>,
+    pub max_actions_per_player: Option<usize>,
+    pub damage_rolls: u8,
+    pub consider_crit: bool,
 }
 
 #[derive(Serialize)]

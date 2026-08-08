@@ -10,26 +10,35 @@
 //! keep the last complete checkpoint, so the client always reads the newest
 //! complete answer even after a failure or a cancellation.
 //!
-//! P1 reads `GET /api/battles/{id}/analysis` during a hotseat battle, so the
-//! progress view holds no P2 action, no P2 win odds, no count that divides out
-//! P2's action-set size, and no engine-written text. A later item shows the
-//! sampled P2 action after both commands lock.
+//! P1 reads `GET /api/battles/{id}/analysis` during a battle, so the progress
+//! view holds no P2 action, no P2 win odds, no count that divides out P2's
+//! action-set size, and no engine-written text.
+//!
+//! [`draw_p2_command`] draws the command that P2 plays. The turn response
+//! reveals that one command after the turn resolves, so both commands are
+//! already locked. See [`P2Draw`] for what the reveal carries.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
 use poke_rust::information::determinize::DeterminizeConfig;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::UnknownMatchState;
 use poke_rust::meta::{MetaDex, MetaFormat};
 use poke_rust::solver::{self, JointActionProb};
-use poke_rust::state::battle::{MatchState, Player};
+use poke_rust::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
 
 use crate::bot::{BotSearchConfig, MAX_SAFE_INTEGER};
-use crate::dto::{AnalysisCheckpointDto, AnalysisProgressDto};
-use crate::session::{BattleSession, Dexes, MetaDexes};
+use crate::dto::{
+    AnalysisCheckpointDto, AnalysisProgressDto, AnalysisReplayDto, P2RevealDto, PlayerCommandDto,
+};
+use crate::mapping;
+use crate::session::{self, BattleSession, Dexes, MetaDexes};
 
 /// The completed answer of one job.
 ///
@@ -43,12 +52,13 @@ pub struct AnalysisCheckpoint {
     /// P2's odds of winning, in `[0, 1]`.
     ///
     /// No endpoint returns this. The answer is private to P2, and a hotseat
-    /// battle lets P1 read every endpoint. The later reveal item reads it.
+    /// battle lets P1 read every endpoint.
     #[allow(dead_code)]
     pub p2_win_odds: f64,
     /// P2's mixed strategy at the root.
-    /// Private for the same reason as `p2_win_odds`.
-    #[allow(dead_code)]
+    ///
+    /// No endpoint returns this list. [`draw_p2_command`] draws one action from
+    /// it, and the turn response reveals that one action alone.
     pub p2_strategy: Vec<JointActionProb>,
     /// The depth that the search reached.
     /// A sampling search reports its configured depth.
@@ -70,8 +80,36 @@ pub struct AnalysisCheckpoint {
     pub elapsed: Duration,
     /// The seed of this search, which makes the result reproducible.
     pub seed: u64,
+    /// The data that repeats this search.
+    pub replay: AnalysisReplay,
+    /// True when the strategy respects the session's fog of war.
+    pub strategy_is_playable: bool,
     /// Every reason that the answer is approximate.
     pub warnings: Vec<String>,
+}
+
+/// The data that repeats one analysis search.
+///
+/// Every field is a position identifier, a seed, or a public profile setting.
+/// An operator with the session history can run the same search again.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisReplay {
+    /// The generation and turn identify the position in the session history.
+    pub generation: u64,
+    pub turn_number: u16,
+    /// The seed of the search.
+    pub search_seed: u64,
+    pub algorithm: String,
+    pub preset: String,
+    pub time_ms: Option<u64>,
+    pub node_budget: Option<u64>,
+    pub depth: u8,
+    pub workers: u8,
+    pub iterations: Option<u32>,
+    pub particles: Option<usize>,
+    pub max_actions_per_player: Option<usize>,
+    pub damage_rolls: u8,
+    pub consider_crit: bool,
 }
 
 /// The job that is running now.
@@ -180,7 +218,23 @@ impl AnalysisState {
         }
     }
 
-    /// The last complete checkpoint, for a test or a later reveal endpoint.
+    /// The generation of the current position.
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The checkpoint of the current position.
+    ///
+    /// Returns `None` while the newest complete answer belongs to an older
+    /// position, because a stale strategy names actions that the current
+    /// position can no longer play.
+    fn current_checkpoint(&self) -> Option<&AnalysisCheckpoint> {
+        self.checkpoint
+            .as_ref()
+            .filter(|c| c.generation == self.generation)
+    }
+
+    /// The last complete checkpoint, stale or not.
     #[cfg(test)]
     fn checkpoint(&self) -> Option<&AnalysisCheckpoint> {
         self.checkpoint.as_ref()
@@ -229,6 +283,7 @@ pub fn start_job(
     let format = MetaFormat::from_active_per_side(session.config.active_per_side);
     let state = session.state.clone();
     let belief_p2 = session.belief_p2.clone();
+    let generation = session.analysis.generation;
     // Only a belief search reads the inference rules, and cloning the learnset
     // dex is not free, so build the copy for those two algorithms alone.
     let inference = match search {
@@ -239,7 +294,23 @@ pub fn start_job(
         _ => None,
     };
 
-    let generation = session.analysis.generation;
+    let replay = AnalysisReplay {
+        generation,
+        turn_number: 0,
+        search_seed: seed,
+        algorithm: profile.view.algorithm.clone(),
+        preset: profile.view.preset.clone(),
+        time_ms: profile.view.time_ms,
+        node_budget: profile.view.node_budget,
+        depth: profile.view.depth,
+        workers: profile.view.workers,
+        iterations: profile.view.iterations,
+        particles: profile.view.particles,
+        max_actions_per_player: profile.view.max_actions_per_player,
+        damage_rolls: session.config.damage_rolls,
+        consider_crit: session.config.consider_crit,
+    };
+
     let cancel = session.analysis.start();
     let battle_id = battle_id.to_string();
 
@@ -257,6 +328,7 @@ pub fn start_job(
                 &dexes,
                 meta.for_format(format),
                 inference,
+                replay,
             )
         };
         let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -309,6 +381,7 @@ fn run_search(
     dexes: &Dexes,
     meta: Option<&MetaDex>,
     inference: Option<InferenceConfig>,
+    replay: AnalysisReplay,
 ) -> Result<AnalysisCheckpoint, String> {
     let turn_number = match state {
         MatchState::BattleState(battle) => battle.turn_number,
@@ -329,6 +402,11 @@ fn run_search(
     checkpoint.generation = generation;
     checkpoint.turn_number = turn_number;
     checkpoint.seed = seed;
+    checkpoint.replay = AnalysisReplay {
+        turn_number,
+        ..replay
+    };
+    checkpoint.strategy_is_playable = strategy_respects_fog(search, belief_p2.is_some());
     if let Some(line) = perfect_information_warning(search, belief_p2.is_some()) {
         checkpoint.warnings.push(line);
     }
@@ -453,12 +531,20 @@ fn one_search(
 /// The line names the algorithm, which the client already reads back in
 /// `BattleView::bot_p2`, and no state of either side.
 fn perfect_information_warning(search: BotSearchConfig, fogged: bool) -> Option<String> {
-    let perfect = matches!(search, BotSearchConfig::Exact(_) | BotSearchConfig::Mcts(_));
-    (perfect && fogged).then(|| {
+    (!strategy_respects_fog(search, fogged)).then(|| {
         "This algorithm searched the true position, so the answer used data that the fog of \
          war hides. Only ismcts and mccfr search the belief."
             .to_string()
     })
+}
+
+/// True when this search can control P2 without reading hidden P1 data.
+fn strategy_respects_fog(search: BotSearchConfig, fogged: bool) -> bool {
+    !fogged
+        || matches!(
+            search,
+            BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
+        )
 }
 
 /// The belief and the draw rules of a belief search.
@@ -598,14 +684,253 @@ fn partial_checkpoint(
         nodes,
         elapsed,
         seed: 0,
+        replay: AnalysisReplay::default(),
+        strategy_is_playable: true,
         warnings: lines,
     }
+}
+
+// ── The P2 draw ──────────────────────────────────────────────────────────────
+
+/// Which rule produced the drawn P2 command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawSource {
+    /// The mixed strategy of a checkpoint of the current position.
+    Strategy,
+    /// A uniform draw over the legal joint actions.
+    Uniform,
+    /// A uniform draw over the team-preview choices.
+    TeamPreview,
+}
+
+impl DrawSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            DrawSource::Strategy => "strategy",
+            DrawSource::Uniform => "uniform",
+            DrawSource::TeamPreview => "teamPreview",
+        }
+    }
+}
+
+/// One drawn P2 command.
+///
+/// The record holds one action. It holds no probability of that action and no
+/// other action of the strategy, so the reveal that [`reveal_dto`] builds shows
+/// P2's choice and nothing else of P2's plan.
+pub struct P2Draw {
+    pub command: PlayerCommand,
+    pub source: DrawSource,
+    /// The seed of this draw.
+    pub seed: u64,
+    /// The replay record of the checkpoint that supplied the strategy.
+    /// `None` for either uniform draw.
+    pub replay: Option<AnalysisReplay>,
+}
+
+/// Draws the command that P2 plays this turn.
+///
+/// The three cases run in this order:
+///
+/// 1. A team-preview position draws one choice with a uniform weight.
+/// 2. A battle position with a checkpoint of the current position draws one
+///    joint action from the mixed strategy of that checkpoint.
+/// 3. Every other case draws one legal joint action with a uniform weight.
+///
+/// Case 3 covers a job that has not finished, a job that failed, and a strategy
+/// whose action the legality check rejects. [`P2Draw::source`] names the case
+/// that ran, so the client can show which one it was.
+pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw, String> {
+    let seed = draw_seed(session);
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    if let MatchState::TeamPreviewState(preview) = &session.state {
+        let choices = solver::preview::preview_choices(preview, Player::P2);
+        if choices.is_empty() {
+            return Err("P2 has no legal team-preview choice".to_string());
+        }
+        let pick = choices[rng.gen_range(0..choices.len())].clone();
+        return Ok(P2Draw {
+            command: PlayerCommand::TeamPreview(pick),
+            source: DrawSource::TeamPreview,
+            seed,
+            replay: None,
+        });
+    }
+
+    let MatchState::BattleState(battle) = &session.state else {
+        return Err("battle is already over".to_string());
+    };
+
+    if let Some(checkpoint) = session.analysis.current_checkpoint()
+        && checkpoint.strategy_is_playable
+        && let Some(commands) = sample_strategy(&checkpoint.p2_strategy, &mut rng)
+        && let Some(command) = accept(session, dexes, commands)
+    {
+        return Ok(P2Draw {
+            command,
+            source: DrawSource::Strategy,
+            seed,
+            replay: Some(checkpoint.replay.clone()),
+        });
+    }
+
+    // No cap and no dominance pruning: the draw needs the whole legal set, and
+    // either filter would remove an action that P2 may play.
+    let joint = solver::actions::joint_actions(
+        battle,
+        Player::P2,
+        solver::actions::phase_of(&session.state),
+        &dexes.move_dex,
+        &dexes.pokemon_dex,
+        None,
+        false,
+    );
+    if joint.actions.is_empty() {
+        return Err("P2 has no legal command right now".to_string());
+    }
+    let start = rng.gen_range(0..joint.actions.len());
+    first_legal_from(session, dexes, &joint.actions, start)
+        .map(|command| P2Draw {
+            command,
+            source: DrawSource::Uniform,
+            seed,
+            replay: None,
+        })
+        .ok_or_else(|| "P2 has no legal command right now".to_string())
+}
+
+/// Renders one drawn P2 command for the turn response.
+///
+/// `state` must be the position before the turn, so each description names the
+/// Pokemon that acted.
+pub fn reveal_dto(state: &MatchState, draw: &P2Draw) -> P2RevealDto {
+    // Team preview renders nothing: the leads appear on the field of their own
+    // accord, and the back picks stay hidden under the fog of war.
+    let commands = match (state, &draw.command) {
+        (MatchState::BattleState(battle), PlayerCommand::Battle(commands)) => commands
+            .iter()
+            .enumerate()
+            .map(|(slot_idx, command)| {
+                mapping::command_option(battle, Player::P2, slot_idx, command)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    P2RevealDto {
+        commands,
+        source: draw.source.as_str().to_string(),
+        draw_seed: draw.seed,
+        replay: draw.replay.as_ref().map(replay_dto),
+    }
+}
+
+/// Builds the replay row of one reveal.
+///
+/// Each digest goes over the wire as a decimal string, because a `u64` above
+/// `2^53` loses precision in a JavaScript number.
+fn replay_dto(replay: &AnalysisReplay) -> AnalysisReplayDto {
+    AnalysisReplayDto {
+        generation: replay.generation,
+        turn_number: replay.turn_number,
+        search_seed: replay.search_seed,
+        algorithm: replay.algorithm.clone(),
+        preset: replay.preset.clone(),
+        time_ms: replay.time_ms,
+        node_budget: replay.node_budget,
+        depth: replay.depth,
+        workers: replay.workers,
+        iterations: replay.iterations,
+        particles: replay.particles,
+        max_actions_per_player: replay.max_actions_per_player,
+        damage_rolls: replay.damage_rolls,
+        consider_crit: replay.consider_crit,
+    }
+}
+
+/// The seed of one draw.
+///
+/// A profile seed makes the whole battle reproducible, so the generation mixes
+/// into it. Without that mix one seed would select the same index of every
+/// strategy, and P2 would repeat one action for the whole battle. A profile
+/// with no seed draws a fresh one under the mask that [`random_seed`] explains.
+fn draw_seed(session: &BattleSession) -> u64 {
+    mix_draw_seed(
+        session.bot_p2.as_ref().and_then(|p| p.view.seed),
+        session.analysis.generation(),
+    )
+}
+
+/// Mixes a profile seed with the generation of the position.
+///
+/// The result stays under [`MAX_SAFE_INTEGER`], because the reveal publishes it
+/// and the client reads it as a JavaScript number.
+fn mix_draw_seed(profile_seed: Option<u64>, generation: u64) -> u64 {
+    match profile_seed {
+        Some(seed) => (seed ^ generation.wrapping_mul(0x9E37_79B9_7F4A_7C15)) & MAX_SAFE_INTEGER,
+        None => random_seed(),
+    }
+}
+
+/// Draws one joint action from a mixed strategy.
+///
+/// Returns `None` for an empty strategy. A negative weight counts as zero, and
+/// a total that falls short of one still returns an action, so a rounding loss
+/// never drops the draw.
+fn sample_strategy<'a>(
+    strategy: &'a [JointActionProb],
+    rng: &mut StdRng,
+) -> Option<&'a [BattleCommand]> {
+    let total: f64 = strategy
+        .iter()
+        .map(|action| action.probability.max(0.0))
+        .sum();
+    if !total.is_finite() || total <= 0.0 {
+        return strategy.first().map(|action| action.commands.as_slice());
+    }
+    let mut roll = rng.gen_range(0.0..1.0) * total;
+    for action in strategy {
+        roll -= action.probability.max(0.0);
+        if roll <= 0.0 {
+            return Some(&action.commands);
+        }
+    }
+    strategy.last().map(|action| action.commands.as_slice())
+}
+
+/// The first joint action that the legality check accepts.
+///
+/// The scan starts at `start` and wraps, so one seed always gives one answer.
+fn first_legal_from(
+    session: &BattleSession,
+    dexes: &Dexes,
+    actions: &[Vec<BattleCommand>],
+    start: usize,
+) -> Option<PlayerCommand> {
+    (0..actions.len())
+        .map(|offset| &actions[(start + offset) % actions.len()])
+        .find_map(|commands| accept(session, dexes, commands))
+}
+
+/// Runs one drawn joint action through the legality check of the server.
+///
+/// The check is the one that a submitted command takes, so a drawn command can
+/// never reach the engine on a path that a client command could not.
+fn accept(
+    session: &BattleSession,
+    dexes: &Dexes,
+    commands: &[BattleCommand],
+) -> Option<PlayerCommand> {
+    let dto = PlayerCommandDto::Battle {
+        commands: commands.iter().map(mapping::battle_command_dto).collect(),
+    };
+    session::reconstruct_player_command(session, dexes, Player::P2, &dto).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poke_rust::state::battle::BattleCommand;
+    use poke_rust::state::battle::{BattleCommand, SwitchCommand};
 
     fn checkpoint(generation: u64, turn_number: u16) -> AnalysisCheckpoint {
         AnalysisCheckpoint {
@@ -621,6 +946,23 @@ mod tests {
             nodes: 12,
             elapsed: Duration::from_millis(30),
             seed: 7,
+            replay: AnalysisReplay {
+                generation,
+                turn_number,
+                search_seed: 7,
+                algorithm: "doubleOracle".to_string(),
+                preset: "balanced".to_string(),
+                time_ms: Some(10_000),
+                node_budget: Some(500_000),
+                depth: 2,
+                workers: 1,
+                iterations: None,
+                particles: None,
+                max_actions_per_player: Some(12),
+                damage_rolls: 16,
+                consider_crit: true,
+            },
+            strategy_is_playable: true,
             warnings: vec!["DepthNotReached".to_string()],
         }
     }
@@ -795,6 +1137,22 @@ mod tests {
         }
     }
 
+    /// A true-state search can report progress in a fogged session, but its
+    /// strategy must not control P2.
+    #[test]
+    fn a_true_state_strategy_cannot_control_a_fogged_bot() {
+        let exact = BotSearchConfig::Exact(Default::default());
+        let mcts = BotSearchConfig::Mcts(Default::default());
+        let ismcts = BotSearchConfig::Ismcts(Default::default());
+        let mccfr = BotSearchConfig::Mccfr(Default::default());
+
+        assert!(!strategy_respects_fog(exact, true));
+        assert!(!strategy_respects_fog(mcts, true));
+        assert!(strategy_respects_fog(ismcts, true));
+        assert!(strategy_respects_fog(mccfr, true));
+        assert!(strategy_respects_fog(exact, false));
+    }
+
     /// The engine writes a species and a belief mon index into its own error
     /// text, and P1 reads this endpoint during a hotseat battle.
     #[test]
@@ -927,6 +1285,195 @@ mod tests {
         )
         .warnings;
         assert_eq!(one, two);
+    }
+
+    // ── The P2 draw ─────────────────────────────────────────────────────────
+
+    fn strategy(weights: &[f64]) -> Vec<JointActionProb> {
+        weights
+            .iter()
+            .enumerate()
+            .map(|(idx, probability)| JointActionProb {
+                commands: vec![BattleCommand::Switch(SwitchCommand { party_index: idx })],
+                probability: *probability,
+            })
+            .collect()
+    }
+
+    fn drawn_index(commands: &[BattleCommand]) -> usize {
+        match &commands[0] {
+            BattleCommand::Switch(switch) => switch.party_index,
+            other => panic!("the fixture draws a switch, got {other:?}"),
+        }
+    }
+
+    /// One seed must give one answer, so an operator can repeat a battle.
+    #[test]
+    fn one_seed_draws_the_same_action_every_time() {
+        let strategy = strategy(&[0.3, 0.5, 0.2]);
+
+        let first = {
+            let mut rng = StdRng::seed_from_u64(4_242);
+            drawn_index(sample_strategy(&strategy, &mut rng).unwrap())
+        };
+        for _ in 0..20 {
+            let mut rng = StdRng::seed_from_u64(4_242);
+            let again = drawn_index(sample_strategy(&strategy, &mut rng).unwrap());
+            assert_eq!(again, first);
+        }
+    }
+
+    /// The draw must follow the mixed strategy. A solver that plays its second
+    /// action at 25% has to reach that rate at the table.
+    #[test]
+    fn the_draw_follows_the_strategy_weights() {
+        let strategy = strategy(&[0.75, 0.25]);
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut counts = [0u32; 2];
+
+        for _ in 0..20_000 {
+            counts[drawn_index(sample_strategy(&strategy, &mut rng).unwrap())] += 1;
+        }
+
+        let second = f64::from(counts[1]) / 20_000.0;
+        assert!((second - 0.25).abs() < 0.02, "{counts:?}");
+    }
+
+    /// A solver can return weights that do not total one, and a rounding loss
+    /// must never drop the draw.
+    #[test]
+    fn a_short_or_broken_weight_total_still_draws() {
+        let mut rng = StdRng::seed_from_u64(9);
+
+        // Weights that fall short of one.
+        let short = strategy(&[0.4, 0.4]);
+        assert!(sample_strategy(&short, &mut rng).is_some());
+
+        // Every weight zero.
+        let zeroed = strategy(&[0.0, 0.0]);
+        assert_eq!(drawn_index(sample_strategy(&zeroed, &mut rng).unwrap()), 0);
+
+        // A negative weight counts as zero, so the positive action wins.
+        let negative = strategy(&[-1.0, 1.0]);
+        for _ in 0..50 {
+            assert_eq!(
+                drawn_index(sample_strategy(&negative, &mut rng).unwrap()),
+                1
+            );
+        }
+
+        // An empty strategy has nothing to draw, which sends the caller to the
+        // uniform case.
+        assert!(sample_strategy(&[], &mut rng).is_none());
+    }
+
+    /// A stale checkpoint names actions of an older position, so the draw must
+    /// not read it. The uniform case then runs.
+    #[test]
+    fn only_a_checkpoint_of_the_current_position_supplies_a_strategy() {
+        let mut state = AnalysisState::default();
+        state.accept(0, Ok(checkpoint(0, 1)));
+        assert!(state.current_checkpoint().is_some());
+
+        state.invalidate();
+
+        assert!(state.checkpoint().is_some());
+        assert!(state.current_checkpoint().is_none());
+    }
+
+    /// A job that never finished leaves no checkpoint at all.
+    #[test]
+    fn a_missing_checkpoint_supplies_no_strategy() {
+        let mut state = AnalysisState::default();
+        assert!(state.current_checkpoint().is_none());
+
+        state.accept(0, Err("the search failed".to_string()));
+
+        assert!(state.current_checkpoint().is_none());
+    }
+
+    /// A fixed profile seed must stay reproducible and must still move between
+    /// turns. Without the mix, one seed would select the same index of every
+    /// strategy for the whole battle.
+    #[test]
+    fn the_draw_seed_mixes_the_generation_in() {
+        let first = mix_draw_seed(Some(77), 3);
+
+        assert_eq!(first, mix_draw_seed(Some(77), 3));
+        assert_ne!(first, mix_draw_seed(Some(77), 4));
+        assert_ne!(first, mix_draw_seed(Some(78), 3));
+
+        // The reveal publishes the seed as a JavaScript number.
+        for generation in 0..1_000 {
+            let seed = mix_draw_seed(Some(u64::MAX), generation);
+            assert!(seed <= MAX_SAFE_INTEGER, "{seed}");
+            assert_eq!(seed as f64 as u64, seed, "{seed}");
+        }
+    }
+
+    /// Replay metadata must contain every resolved search setting. It must not
+    /// contain a digest of hidden state.
+    #[test]
+    fn replay_metadata_is_complete_and_holds_no_hidden_state_digest() {
+        let replay = AnalysisReplay {
+            generation: 9,
+            turn_number: 4,
+            search_seed: 12,
+            algorithm: "ismcts".to_string(),
+            preset: "strong".to_string(),
+            time_ms: Some(40_000),
+            node_budget: None,
+            depth: 3,
+            workers: 1,
+            iterations: Some(20_000),
+            particles: Some(32),
+            max_actions_per_player: None,
+            damage_rolls: 16,
+            consider_crit: true,
+        };
+
+        let json = serde_json::to_string(&replay_dto(&replay)).unwrap();
+
+        assert!(json.contains("\"generation\":9"), "{json}");
+        assert!(json.contains("\"turnNumber\":4"), "{json}");
+        assert!(json.contains("\"iterations\":20000"), "{json}");
+        assert!(json.contains("\"particles\":32"), "{json}");
+        assert!(json.contains("\"timeMs\":40000"), "{json}");
+        assert!(!json.to_lowercase().contains("hash"), "{json}");
+        assert!(!json.to_lowercase().contains("belief"), "{json}");
+        assert!(!json.to_lowercase().contains("state"), "{json}");
+    }
+
+    /// The reveal shows P2's one action. It must never show the odds of that
+    /// action or any other action of the strategy.
+    #[test]
+    fn the_reveal_holds_no_probability_and_no_second_action() {
+        let checkpoint = checkpoint(0, 3);
+        let draw = P2Draw {
+            command: PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            source: DrawSource::Strategy,
+            seed: 31,
+            replay: Some(checkpoint.replay.clone()),
+        };
+        // The fixture strategy holds one action; a real one holds more. Build
+        // the reveal from the draw alone, which is the whole point.
+        let reveal = P2RevealDto {
+            commands: Vec::new(),
+            source: draw.source.as_str().to_string(),
+            draw_seed: draw.seed,
+            replay: draw.replay.as_ref().map(replay_dto),
+        };
+
+        let json = serde_json::to_string(&reveal).unwrap();
+
+        assert!(!json.contains("probability"), "{json}");
+        assert!(!json.contains("strategy\":"), "{json}");
+        assert!(!json.to_lowercase().contains("odds"), "{json}");
+        assert!(!json.contains("0.75"), "{json}");
+        // The cost counts stay private for the reason `warning_line` explains.
+        assert!(!json.contains("turnsSimulated"), "{json}");
+        assert!(!json.contains("nodes"), "{json}");
+        assert_eq!(reveal.source, "strategy");
     }
 
     /// The collapse must keep every distinct line, so a real second reason

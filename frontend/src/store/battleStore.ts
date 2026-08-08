@@ -137,9 +137,11 @@ export const useBattle = create<BattleStore>((set, get) => {
     set({ busy: true, error: null })
     try {
       const turnLabel = view.phase === 'teamPreview' ? 'Team Preview' : `Turn ${view.turnNumber}`
+      // A session with a P2 bot lets the server draw P2's command, so the
+      // request carries no `p2` field.
       const response = await api.submitTurn(battleId, {
         p1: p1Commands ?? { kind: 'pass' },
-        p2: playerCommand,
+        ...(get().botP2 ? {} : { p2: playerCommand }),
       })
       set((s) => {
         const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, turnLabel, response.events, response.eventsP2)
@@ -395,9 +397,11 @@ export const useBattle = create<BattleStore>((set, get) => {
 
       set({ busy: true, error: null })
       try {
+        // A session with a P2 bot lets the server draw P2's picks, so the
+        // request carries no `p2` field.
         const response = await api.submitTurn(battleId, {
           p1: p1Commands ?? { kind: 'pass' },
-          p2: command,
+          ...(get().botP2 ? {} : { p2: command }),
         })
         set((s) => {
           const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, 'Team Preview', response.events, response.eventsP2)

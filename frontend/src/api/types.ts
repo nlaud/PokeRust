@@ -322,8 +322,7 @@ export interface CreateBattleRequest {
   /** Permitted item slugs after format bans.
    * Empty or absent means no item restriction. */
   legalItems?: string[]
-  /** An optional profile for the planned P2 bot.
-   * The current battle remains hotseat. */
+  /** An optional profile for the P2 bot. */
   botP2?: BotProfileRequest
 }
 
@@ -350,7 +349,12 @@ export interface GetBattleResponse {
 
 export interface TurnRequest {
   p1: PlayerCommand
-  p2: PlayerCommand
+  /** The P2 command of a hotseat battle.
+   *
+   * A session with a P2 bot must omit this field, because the server draws
+   * P2's command itself. A session with no bot must send it. Each broken rule
+   * returns HTTP 422. */
+  p2?: PlayerCommand
 }
 
 export interface TurnResponse {
@@ -361,6 +365,49 @@ export interface TurnResponse {
   /** This turn's events masked for P2. */
   eventsP2: EventNode[]
   probability: number
+  /** The command that the server drew for P2, or absent for a hotseat battle. */
+  p2Reveal?: P2Reveal
+}
+
+/** The drawn P2 command of one bot turn.
+ *
+ * The reveal carries one action and nothing else of P2's plan: no probability
+ * of that action, no second action, and no win odds. The server returns it only
+ * with the resolved turn, so both commands are already locked. */
+export interface P2Reveal {
+  /** The drawn command of each active slot, rendered against the position
+   * before the turn.
+   *
+   * Empty at team preview. The leads appear on the field of their own accord,
+   * and the back picks stay hidden under the fog of war. */
+  commands: CommandOption[]
+  /** Which rule produced the draw. */
+  source: 'strategy' | 'uniform' | 'teamPreview'
+  /** The seed of the draw. */
+  drawSeed: number
+  /** The replay record of the search that supplied the strategy.
+   * Absent for either uniform draw. */
+  replay?: AnalysisReplay
+}
+
+/** The data that repeats one analysis search. */
+export interface AnalysisReplay {
+  /** These values identify the position in the session history. */
+  generation: number
+  turnNumber: number
+  /** The seed of the search. */
+  searchSeed: number
+  algorithm: string
+  preset: string
+  timeMs: number | null
+  nodeBudget: number | null
+  depth: number
+  workers: number
+  iterations: number | null
+  particles: number | null
+  maxActionsPerPlayer: number | null
+  damageRolls: number
+  considerCrit: boolean
 }
 
 /** The phase of the P2 analysis job. */

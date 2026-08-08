@@ -114,14 +114,21 @@ Sample one P2 command from the latest complete mixed strategy.
 Resolve both commands together.
 
 - [ ] Finish the P2 analysis job.
-  - [ ] Store deterministic replay data beyond the seed and the profile.
-  - [ ] Show the sampled P2 action only after both commands lock.
-  - [ ] Submit the sampled P2 command instead of the hotseat input.
+  - [x] Store deterministic replay data beyond the seed and the profile.
+  - [x] Show the sampled P2 action only after both commands lock.
+  - [x] Submit the sampled P2 command instead of the hotseat input.
   - [ ] Add tooltips to what the sampled and exact profiles mean in the selectionscreen
+  - [ ] Poll the analysis job before the client submits a bot turn.
+  - [ ] Show the reveal panel and the wait line in the battle screen.
 
 `analysis.rs` holds the generation, the running job, and the last checkpoint.
 `invalidate` cancels a job before its search starts, and the generation check in
 `accept` drops a result that a state change has already made old.
+
+The server now draws P2's command and returns it as `p2Reveal`. The client sends
+no `p2` field for a bot session, but it does not yet wait for the job, so the
+draw falls back to the uniform case. The three open items above finish the
+client work.
 
 - [ ] Give `solver::search` a cooperative cancel flag.
   - [ ] Check the flag between cells, successors, and nodes.
