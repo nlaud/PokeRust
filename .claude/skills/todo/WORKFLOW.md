@@ -216,6 +216,40 @@ the log write time and by process liveness. Do not trust the job status field.
 If the job dies, read its log file. The log can hold a complete review. Use the
 findings that you can verify against the code. Run every verification yourself.
 
+### The subagent fallback
+
+A dead job has two shapes. Read the log size to tell them apart.
+
+1. A log with a complete review is recoverable. Use it.
+2. A log with only startup lines produced nothing. Nothing is recoverable.
+3. Retry a startup failure one time.
+4. If a second job fails the same way, start no third job. Use the fallback.
+
+The fallback keeps the independent pass. Start one subagent with
+`subagent_type` `general-purpose` and `run_in_background` `false`. Give it only
+this prompt:
+
+```text
+Review the commit at HEAD of the Git repository at <repository path>
+independently. Compare HEAD with its first parent. Use only repository files
+and Git history. Do not read .claude/todo. Find anything wrong with the code
+introduced by HEAD, including its interactions with existing code. Pay
+attention to whether any response, warning string, log line, or error message
+can disclose hidden player-two data. Report every problem with the file, the
+line, and a concrete failure case. Fix every problem that you find within
+HEAD's scope. Add or update tests for each fix. Run cargo test and cargo
+clippy from poke_rust/. Do not commit. Do not amend. Report what you changed.
+```
+
+That prompt is the whole handoff. The isolation rules of this section apply to
+the subagent reviewer exactly as they apply to Codex. Give it no plan, no task
+text, no reasoning, and no expected findings.
+
+Verify every finding yourself against the code. Reject a finding that you
+cannot confirm, and say so in your report.
+
+Record the reviewer that ran in `state.json`. Remove a dead `codex_job` block.
+
 Inspect `git status --short` and `git diff` after Codex finishes. Make sure that
 Codex changed only files related to the reviewed commit.
 
