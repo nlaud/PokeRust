@@ -217,11 +217,33 @@ test.describe('Simulate mode', () => {
       animations: 'disabled',
     })
 
+    // Watch for the terminal response before P1 submits a move.
+    // This prevents the test from missing the last polling response.
+    const terminalAnalysis = page.waitForResponse(async (response) => {
+      if (!response.url().endsWith('/analysis')) return false
+      const body = (await response.json()) as { phase?: string }
+      return body.phase === 'complete' || body.phase === 'failed'
+    })
+
     // P1 locks one move. The client waits for analysis and never asks for P2 input.
     await page.getByTestId('move-option').first().click()
     // The turn can end in a replacement, so assert the log, not a move list.
-    await expect(page.getByText('Turn 1', { exact: true })).toBeVisible({ timeout: 15_000 })
+    const [analysisResponse] = await Promise.all([
+      terminalAnalysis,
+      expect(page.getByText('Turn 1', { exact: true })).toBeVisible({ timeout: 15_000 }),
+    ])
     expect(analysisRequests).toBeGreaterThan(0)
+    const analysis = (await analysisResponse.json()) as {
+      generation: number
+      phase: string
+      checkpoint: { generation: number; stale: boolean } | null
+      error: string | null
+    }
+    expect(analysis).toMatchObject({
+      phase: 'complete',
+      checkpoint: { generation: analysis.generation, stale: false },
+      error: null,
+    })
     expect(turnRequests).toHaveLength(2)
     expect(turnRequests[1]).not.toHaveProperty('p2')
 
@@ -230,9 +252,11 @@ test.describe('Simulate mode', () => {
     const reveal = page.getByTestId('p2-reveal')
     await expect(reveal).toBeVisible()
     await expect(reveal).toContainText('Player 2 played')
+    await expect(reveal).toContainText('from the solver strategy')
     await reveal.getByRole('button').first().click()
     const revealDetail = page.getByTestId('p2-reveal-detail')
     await expect(revealDetail).toContainText('Draw seed')
+    await expect(revealDetail).toContainText('ismcts')
     await expect(revealDetail).not.toContainText('%')
     await expect(revealDetail).not.toContainText(/win/i)
     await page.screenshot({

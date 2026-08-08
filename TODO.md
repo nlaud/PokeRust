@@ -2,6 +2,25 @@ Remove items when the work is complete.
 
 # Fixes
 
+## Champions roster legality
+
+- [ ] Reject a teamsheet species that the Champions learnset dex does not hold.
+  - [ ] Check the learnset dex when a team loads.
+  - [ ] Report the species name to the player who owns the team.
+  - [ ] Keep the engine error text away from the opponent.
+
+`pokemon_info/showdownDex.txt` holds 1516 species.
+`pokemon_info/showdownLearnsets.txt` holds 232 species.
+A teamsheet can therefore name a species that has no legal Champions moveset.
+
+The species plays for its owner, because the teamsheet supplies its moves.
+It can fail when an opponent must infer its hidden moves.
+`determinize::sample_moves` returns `NoLegalMoves` when it has no move source.
+`ParticleBelief::from_belief` cannot create the set, so the analysis job fails.
+The bot then uses a uniform draw.
+
+The player sees only a fixed failure line, so the cause stays hidden.
+A check at team-load time names the species while the player can still fix it.
 
 # New Features
 ## Solver target

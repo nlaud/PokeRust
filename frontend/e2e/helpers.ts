@@ -5,6 +5,8 @@ import { expect, type Page } from '@playwright/test'
 
 // Singles requires three selected Pokémon on each side.
 // Most tests send out only Pikachu.
+// Each species in this shared team needs a Champions learnset entry.
+// The P2 bot draws Player 1's hidden moves from that dex.
 export const TEAM_SHEET = `Pikachu
 Ability: Static
 Level: 50
@@ -15,7 +17,7 @@ Jolly Nature
 - Volt Switch
 - Iron Tail
 
-Ferrothorn
+Venusaur
 Level: 50
 - Power Whip
 
