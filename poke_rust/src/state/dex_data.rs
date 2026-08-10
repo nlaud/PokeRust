@@ -2094,5 +2094,20 @@ pub fn parse_learnset_dex(file_path: &str) -> HashMap<Species, HashSet<PokemonMo
         }
     }
 
+    // These Champions forms use another entry's move list in the source file.
+    // Add exact keys so inference and determinization use the same list.
+    for (species, source) in [
+        (Species::Floette, Species::FloetteEternal),
+        (Species::GourgeistSmall, Species::Gourgeist),
+        (Species::GourgeistLarge, Species::Gourgeist),
+        (Species::GourgeistSuper, Species::Gourgeist),
+        (Species::MausholdFour, Species::Maushold),
+        (Species::VivillonFancy, Species::Vivillon),
+    ] {
+        if let Some(moves) = result.get(&source).cloned() {
+            result.entry(species).or_insert(moves);
+        }
+    }
+
     result
 }

@@ -28,8 +28,10 @@ const OPPONENT_HINT: Record<TrackerInfoMode, string> = {
   openSheetNatures:
     'A full teamsheet: species @ item, ability, moves, and nature are all visible under Open Team Sheet + Natures — EVs/IVs stay hidden.',
 }
+// Every placeholder species must have a Champions learnset.
+// The server rejects a roster species that the learnset dex does not hold.
 const OPPONENT_PLACEHOLDER: Record<TrackerInfoMode, string> = {
-  closedSheet: 'Garchomp, Landorus, Incineroar, Rillaboom, Flutter Mane, Urshifu',
+  closedSheet: 'Garchomp, Incineroar, Toxapex, Gholdengo, Kingambit, Dragonite',
   openSheet: 'Garchomp @ Rocky Helmet\nAbility: Rough Skin\n- Earthquake\n- Stealth Rock\n...',
   openSheetNatures:
     'Garchomp @ Rocky Helmet\nAbility: Rough Skin\nJolly Nature\n- Earthquake\n- Stealth Rock\n...',

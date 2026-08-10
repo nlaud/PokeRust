@@ -1,7 +1,7 @@
 //! Defines the Axum handlers.
 //! `AppState` stores shared dexes and a mutex-protected session map.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use poke_rust::benchmarking;
 use poke_rust::data::item::Item;
+use poke_rust::data::pokemon_move::PokemonMove;
+use poke_rust::data::species::Species;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::meta::MetaFormat;
@@ -133,6 +135,48 @@ fn side_count_error(
     None
 }
 
+pub(crate) fn learnset_data_error(
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+) -> Option<&'static str> {
+    learnset_dex
+        .is_empty()
+        .then_some("Champions learnset data is unavailable")
+}
+
+/// Checks that the Champions learnset dex holds every species of one side.
+/// Returns the message of the first species that it does not hold, or `None`.
+///
+/// `showdownDex.txt` holds 1516 species, but Champions gives a learnset to only
+/// a small subset. A species outside that set still plays for its own owner,
+/// because the teamsheet supplies its moves. It breaks for the opponent:
+/// `determinize::sample_moves` finds no move source and returns
+/// `NoLegalMoves`, which fails the analysis job mid-battle. `analysis::
+/// engine_error` then replaces the engine text with a fixed line that protects
+/// hidden player-two data, so the player never learns the cause. Reject the
+/// team here instead, while the player can still repair the sheet.
+///
+/// The check runs in every information mode. Such a species is not legal in
+/// Champions, and Perfect Information does not make it legal.
+///
+/// `parse_pokemon_header` maps a mega entry back to its base species before the
+/// preview state stores it, so a `Tyranitar-Mega` line checks `tyranitar`.
+pub(crate) fn roster_legality_error<'a>(
+    label: &str,
+    roster: impl IntoIterator<Item = &'a Species>,
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+) -> Option<String> {
+    for species in roster {
+        if !learnset_dex.contains_key(species) {
+            return Some(format!(
+                "{}: {} has no Champions learnset and cannot be used",
+                label,
+                poke_rust::user::humanize_identifier(format!("{species:?}"))
+            ));
+        }
+    }
+    None
+}
+
 pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
@@ -144,6 +188,9 @@ pub async fn create_battle(
     }
     if !(1..=16).contains(&req.damage_rolls) {
         return unprocessable("damageRolls must be between 1 and 16");
+    }
+    if let Some(message) = learnset_data_error(&app.dexes.learnset_dex) {
+        return internal_error(message);
     }
 
     // `req.legal_items` is the selected format's resolved catalog-minus-banned slug
@@ -223,6 +270,15 @@ pub async fn create_battle(
                 mons.len(),
                 req.brought_per_side
             ));
+        }
+        // Roster legality comes before item legality: a species with no
+        // Champions learnset cannot hold a legal item either.
+        if let Some(message) = roster_legality_error(
+            label,
+            mons.iter().map(|mon| &mon.species),
+            &app.dexes.learnset_dex,
+        ) {
+            return unprocessable(message);
         }
         // Reject up front rather than letting the first in-battle reveal of this
         // item panic deep inside `apply_information` (`inference_contradiction!` —
@@ -527,20 +583,30 @@ pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) 
 /// Silvally-Steel and Genesect-Douse all carry a `requiredItem` too, which is
 /// why that field is deliberately NOT the filter.
 pub async fn get_species_list(State(app): State<AppState>) -> Response {
+    if let Some(message) = learnset_data_error(&app.dexes.learnset_dex) {
+        return internal_error(message);
+    }
     let mut species: Vec<String> = app
         .dexes
         .pokemon_dex
         .iter()
-        .filter(|(key, data)| {
-            data.battle_only.is_none()
-                && !poke_rust::state::pokemon::is_mega_dex_entry(key, data)
-                && !is_gigantamax_dex_entry(key)
-        })
+        .filter(|(key, data)| is_champions_teamsheet_species(key, data, &app.dexes.learnset_dex))
         .map(|(key, _)| poke_rust::user::humanize_identifier(format!("{key:?}")))
         .collect();
     species.sort();
     species.dedup();
     Json(SpeciesListDto { species }).into_response()
+}
+
+fn is_champions_teamsheet_species(
+    species: &Species,
+    data: &poke_rust::state::dex_data::PokemonData,
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+) -> bool {
+    data.battle_only.is_none()
+        && !poke_rust::state::pokemon::is_mega_dex_entry(species, data)
+        && !is_gigantamax_dex_entry(species)
+        && learnset_dex.contains_key(species)
 }
 
 /// Gigantamax formes carry neither `battleOnly` nor `requiredItem` in the dex —
@@ -862,9 +928,128 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use poke_rust::data::pokemon_move::PokemonMove;
+    use poke_rust::data::species::Species;
+
     use super::catch_benchmark_panic;
+    use super::is_champions_teamsheet_species;
+    use super::learnset_data_error;
+    use super::roster_legality_error;
     use super::side_count_error;
     use crate::dto::{CreateBattleRequest, TurnRequest};
+
+    /// Holds the two species that the tests treat as Champions species.
+    fn learnset_dex() -> HashMap<Species, HashSet<PokemonMove>> {
+        HashMap::from([
+            (Species::Garchomp, HashSet::from([PokemonMove::Earthquake])),
+            (Species::RotomWash, HashSet::from([PokemonMove::HydroPump])),
+        ])
+    }
+
+    /// The first species outside the dex names itself, not the whole roster.
+    #[test]
+    fn a_species_outside_the_learnset_dex_is_rejected() {
+        let message = roster_legality_error(
+            "p2Team",
+            &[Species::Garchomp, Species::Landorus],
+            &learnset_dex(),
+        );
+
+        assert_eq!(
+            message,
+            Some("p2Team: Landorus has no Champions learnset and cannot be used".to_string())
+        );
+    }
+
+    /// The message must carry the display name, not the enum name.
+    #[test]
+    fn the_message_holds_the_side_label_and_the_display_name() {
+        let message = roster_legality_error("myTeam", &[Species::RotomHeat], &learnset_dex())
+            .expect("a species outside the dex must produce a message");
+
+        assert!(message.starts_with("myTeam: "), "{message}");
+        assert!(message.contains("Rotom Heat"), "{message}");
+    }
+
+    #[test]
+    fn a_roster_of_learnset_species_is_accepted() {
+        assert_eq!(
+            roster_legality_error(
+                "p1Team",
+                &[Species::Garchomp, Species::RotomWash],
+                &learnset_dex()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_roster_is_accepted() {
+        let empty: &[Species] = &[];
+
+        assert_eq!(roster_legality_error("p1Team", empty, &learnset_dex()), None);
+    }
+
+    #[test]
+    fn an_empty_learnset_dex_reports_a_server_data_error() {
+        assert_eq!(
+            learnset_data_error(&HashMap::new()),
+            Some("Champions learnset data is unavailable")
+        );
+        assert_eq!(learnset_data_error(&learnset_dex()), None);
+    }
+
+    /// The real dex must hold the species that the shipped teamsheets use, and
+    /// must not hold a species that Champions leaves out.
+    #[test]
+    fn the_shipped_learnset_dex_matches_the_check() {
+        let dex = poke_rust::state::dex_data::parse_learnset_dex(
+            "../pokemon_info/showdownLearnsets.txt",
+        );
+        assert!(!dex.is_empty(), "the learnset dex must load");
+
+        for species in [
+            Species::Pikachu,
+            Species::Venusaur,
+            Species::Incineroar,
+            Species::Floette,
+            Species::GourgeistSmall,
+            Species::GourgeistLarge,
+            Species::GourgeistSuper,
+            Species::MausholdFour,
+            Species::VivillonFancy,
+        ] {
+            assert_eq!(
+                roster_legality_error("p1Team", std::slice::from_ref(&species), &dex),
+                None,
+                "{species:?} must use its effective Champions learnset"
+            );
+        }
+        assert_eq!(
+            roster_legality_error("p2Team", &[Species::Rillaboom], &dex),
+            Some("p2Team: Rillaboom has no Champions learnset and cannot be used".to_string())
+        );
+    }
+
+    #[test]
+    fn the_species_catalog_matches_roster_legality() {
+        let pokemon_dex = poke_rust::state::dex_data::parse_pokemon_dex(
+            "../pokemon_info/showdownDex.txt",
+        );
+        let learnset_dex = poke_rust::state::dex_data::parse_learnset_dex(
+            "../pokemon_info/showdownLearnsets.txt",
+        );
+        let listed = |species: &Species| {
+            let data = pokemon_dex.get(species).expect("the species must have dex data");
+            is_champions_teamsheet_species(species, data, &learnset_dex)
+        };
+
+        assert!(listed(&Species::Garchomp));
+        assert!(listed(&Species::GourgeistSuper));
+        assert!(!listed(&Species::Rillaboom));
+    }
 
     /// A session with a P2 bot sends no `p2` field, and `submit_turn` reads the
     /// absent field as the request for a draw. An empty field must therefore

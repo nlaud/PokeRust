@@ -146,6 +146,9 @@ pub async fn create_tracker(
     if req.active_per_side == 0 || req.brought_per_side < req.active_per_side {
         return unprocessable("activePerSide must be >= 1 and <= broughtPerSide");
     }
+    if let Some(message) = crate::routes::learnset_data_error(&app.dexes.learnset_dex) {
+        return internal_error(message);
+    }
 
     let legal_items: Option<HashSet<Item>> = if req.legal_items.is_empty() {
         None
@@ -186,6 +189,13 @@ pub async fn create_tracker(
                 mons.len(),
                 req.brought_per_side
             ));
+        }
+        if let Some(message) = crate::routes::roster_legality_error(
+            label,
+            mons.iter().map(|mon| &mon.species),
+            &app.dexes.learnset_dex,
+        ) {
+            return unprocessable(message);
         }
     }
     let information_mode = match req.information_mode.as_str() {

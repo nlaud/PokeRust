@@ -295,3 +295,34 @@ fn rendered_sample_looks_sane() {
     let team = generate_meta_team(meta, pokemon_dex(), learnset_dex(), 6, 2026).unwrap();
     println!("{}", render_teamsheet(&team));
 }
+
+/// Every species in the usage cache must have a Champions learnset.
+///
+/// `generate_meta_team` filters its candidates with `is_selectable_species`,
+/// which reads the Pokemon dex and never the learnset dex. A cache species with
+/// no learnset entry therefore reaches a generated team, where it draws no
+/// moves in the determinizer and fails the server's roster-legality check.
+///
+/// Six form species carry their move list under another key in
+/// `showdownLearnsets.txt`. `parse_learnset_dex` adds those exact keys, and this
+/// test holds that alias list to the cache.
+#[test]
+fn every_cache_species_has_a_champions_learnset() {
+    let Some(root) = meta_root() else { return };
+
+    for format in [MetaFormat::Doubles, MetaFormat::Singles] {
+        let Ok(dex) = MetaDex::load(&root, None, format) else {
+            continue;
+        };
+        let missing: Vec<String> = dex
+            .species()
+            .filter(|s| !learnset_dex().contains_key(s))
+            .map(|s| format!("{s:?}"))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "{format:?} cache species without a learnset: {missing:?}"
+        );
+    }
+}
