@@ -105,6 +105,10 @@ subagent report, so an unshown screenshot never reaches the user.
 If the report holds no screenshot block, ask the subagent for one with
 `SendMessage`. Never guess a path.
 
+The subagent writes each screenshot to `.claude/todo/screenshots/`. Delete no
+screenshot after you show it. The next run removes the whole directory, and it
+also removes the other temporary files of this run.
+
 ## 5. Send the push notification
 
 Send one push notification for each run. This step is required.
@@ -165,3 +169,6 @@ This check is main-thread work. It is not a step of the task.
 - Do the work in the subagent. Do not do a step yourself because it looks small.
 - Deciding whether to dispatch is main-thread work. That check is allowed.
 - Never commit `.claude/todo/`. It holds loop state, not project work.
+- The subagent removes the temporary files. Delete no file from this thread.
+- Report a leftover artifact that the user must know about. Do not remove it
+  yourself.

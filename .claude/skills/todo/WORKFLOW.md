@@ -44,6 +44,35 @@ Write `SCREENSHOTS: none` when the run captured no screenshot. The main thread
 shows each listed file to the user. The screenshot block does not replace the
 contract line. Write both.
 
+## Temporary files
+
+A run writes files that are not project work. These files are temporary
+artifacts:
+
+- `frontend/test-results/` — Playwright traces, videos, and failure screenshots.
+- `frontend/playwright-report/` — the Playwright HTML report.
+- `.claude/todo/screenshots/` — the screenshots that you capture in section 10.
+- An untracked scratch file that you wrote to inspect a result.
+
+Never commit a temporary artifact. Remove each one before the task ends.
+
+Use this command to remove the repository artifacts:
+
+```sh
+git clean -fd -- frontend/test-results frontend/playwright-report
+```
+
+`git clean` removes only untracked files. It never removes a tracked file, and
+it never removes a change to a tracked file. This limit is the reason to use it.
+
+Some tracked screenshots live in `frontend/e2e/screenshots/`. A spec writes to
+that directory on purpose. If `git status` shows a change to one of those files,
+do not revert it. Report the change instead. The user decides whether to keep
+it.
+
+Always pass a path to `git clean`. A bare `git clean -fd` removes every
+untracked file in the repository, and the user can lose work.
+
 ## 1. Resume an active task
 
 Read `.claude/todo/state.json`.
@@ -61,8 +90,18 @@ If the file exists, a task is active. Do these steps:
 
 If the file does not exist, no task is active. Go to section 2.
 
-Before you go to section 2, run `git status --short`. If the working tree holds
-changes that you did not make, stop and ask. See the section *When unsure*.
+Before you go to section 2, remove the temporary artifacts of the last task.
+Read the section *Temporary files* for the paths and the command. Then delete
+`.claude/todo/screenshots/`.
+
+The last task already showed its screenshots to the user. A blocked run already
+showed its failure artifacts. Nothing here is still needed.
+
+Now run `git status --short`. If the working tree holds changes that you did not
+make, stop and ask. See the section *When unsure*.
+
+Run the sweep first, and the check second. A leftover artifact looks like a
+change that you did not make, and it stops the loop for no reason.
 
 ## 2. Choose the task
 
@@ -173,12 +212,14 @@ Set the stage to `committing`.
 3. Stage only the files that this task changed. Include `TODO.md` when step 2
    changed it.
 4. Never stage `.claude/todo/`. It holds loop state, not project work.
-5. Write a commit message in the style of the recent log. Read it with
+5. Never stage a temporary artifact. Read the section *Temporary files* for the
+   list. Stage a file only when the task changed it on purpose.
+6. Write a commit message in the style of the recent log. Read it with
    `git log --oneline -10`.
-6. Commit.
-7. Record the new commit hash in `state.json` as `review_commit`.
-8. Delete `plan.md`.
-9. Set the stage to `reviewing`.
+7. Commit.
+8. Record the new commit hash in `state.json` as `review_commit`.
+9. Delete `plan.md`.
+10. Set the stage to `reviewing`.
 
 The commit gives Codex an exact review target. Do not delete `state.json` yet.
 
@@ -253,6 +294,10 @@ Record the reviewer that ran in `state.json`. Remove a dead `codex_job` block.
 Inspect `git status --short` and `git diff` after Codex finishes. Make sure that
 Codex changed only files related to the reviewed commit.
 
+Codex runs Playwright, so it also writes temporary artifacts. Read the section
+*Temporary files*. An artifact is not a Codex change. Do not report it as one,
+and do not stage it. Section 11 removes it.
+
 If Codex needs a follow-up, invoke `/codex:rescue` with `--wait`, `--resume`,
 `--model gpt-5.6-sol`, and `--effort high`. Do not add chat context or the
 deleted plan. Give only repository facts that Codex can verify.
@@ -282,6 +327,13 @@ Use Playwright to inspect each affected page and interaction. Capture a
 screenshot of each affected page. Inspect every screenshot before you report
 success.
 
+Write every screenshot to `.claude/todo/screenshots/`. Create the directory if
+it does not exist. Write no screenshot to another path in the repository.
+
+`.gitignore` holds `.claude/todo/`. A screenshot in that directory never reaches
+`git status`, so you cannot commit it by accident. The next run deletes the
+directory.
+
 Record the absolute path of each screenshot. Write every path in the screenshot
 block of your report. The user sees a screenshot only through that block.
 
@@ -292,15 +344,26 @@ Set the stage to `finalizing`.
 
 ## 11. Finalize the commit
 
-1. Inspect all uncommitted Codex changes.
-2. If Codex changed files, stage only those files.
-3. If Codex changed files, run `git commit --amend --no-edit`.
-4. Record the final commit hash.
-5. Read the current usage limits.
-6. Set `Now: Done` in the progress log. Add the task-end usage.
-7. Delete `state.json`. The task is now closed.
+1. Remove the repository artifacts. Read the section *Temporary files* for the
+   command.
+2. Inspect all uncommitted Codex changes.
+3. If Codex changed files, stage only those files.
+4. If Codex changed files, run `git commit --amend --no-edit`.
+5. Run `git status --short`. Every remaining line must be a change that you
+   chose to leave. If a line names an artifact, remove that file.
+6. Record the final commit hash.
+7. Read the current usage limits.
+8. Set `Now: Done` in the progress log. Add the task-end usage.
+9. Delete `state.json`. The task is now closed.
 
-Step 7 ends the task. A later loop run then starts a new task.
+Step 1 comes first because an artifact hides a real change. Playwright writes
+`frontend/test-results/` during section 10, and that output makes step 2 hard to
+read.
+
+Keep `.claude/todo/screenshots/` in place. The main thread shows those files to
+the user after you return. The next run deletes the directory.
+
+Step 9 ends the task. A later loop run then starts a new task.
 
 ## 12. Report
 
@@ -448,6 +511,10 @@ Never treat a stale answer as an approval for a new plan.
 If any stage fails, return `BLOCKED:` with the error text. Keep `state.json` in
 place, so the next run resumes at the failed stage. Leave the repository in a
 state that the user can inspect. Never commit a broken build.
+
+Remove no artifact before a `BLOCKED` return. A Playwright trace and a failure
+screenshot are the evidence of the failure. The user needs them. The next task
+sweeps them at its start.
 
 ## State file
 
