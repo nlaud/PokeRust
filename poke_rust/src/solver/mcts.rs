@@ -181,6 +181,15 @@
 //!
 //! One seed drives action selection, successor draws, and the engine.
 //! The same seed and the same configuration give the same result.
+//!
+//! # Cancellation
+//!
+//! [`search_cancellable`] reads a [`CancelFlag`](super::CancelFlag) at the top
+//! of the iteration loop.
+//! A cancelled search returns the mean and the average strategy of the finished
+//! iterations, and it reports
+//! [`SolveWarning::Cancelled`](super::SolveWarning::Cancelled).
+//! A cancel never returns an error.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -203,7 +212,7 @@ use super::chance::ChanceMode;
 use super::eval::{self, BatchEvaluator, EvalContext, LeafEvaluator, PolicyFeatures};
 use super::matrix::EPS;
 use super::search::strategy_of;
-use super::{JointActionProb, SolveError, SolveWarning};
+use super::{CancelFlag, JointActionProb, SolveError, SolveWarning, cancel_requested};
 
 /// P1's utility when P1 loses, and when P1 wins.
 pub(super) const LOSS: f64 = 0.0;
@@ -469,6 +478,32 @@ pub fn search(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &MctsConfig,
 ) -> Result<MctsResult, SolveError> {
+    search_cancellable(seed, state, pokemon_dex, move_dex, config, None)
+}
+
+/// [`search`], with a cooperative stop signal.
+///
+/// The search reads `cancel` at the top of the iteration loop. One iteration is
+/// the unit of work: it descends one path, it updates the tree, and it pushes
+/// one value into the running mean. A set flag ends the loop, and the result
+/// then holds the mean, the sampling error, and the average strategy of the
+/// finished iterations alone.
+///
+/// The search always finishes iteration 1. A mean over zero iterations has no
+/// value, and a tree with no visit has no strategy.
+///
+/// A cancelled result carries [`SolveWarning::Cancelled`], and
+/// [`MctsStats::iterations`] holds the finished count.
+///
+/// `None` gives the behavior of [`search`].
+pub fn search_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MctsConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<MctsResult, SolveError> {
     match state {
         MatchState::TeamPreviewState(_) => return Err(SolveError::TeamPreviewUnsupported),
         MatchState::GameOverState { winner, .. } => {
@@ -513,7 +548,14 @@ pub fn search(
     ctx.stats.nodes_created += 1;
 
     let mut values = RunningStats::default();
-    for _ in 0..iterations {
+    let mut cancelled = false;
+    for index in 0..iterations {
+        // Iteration 1 always runs. Every later iteration reads the flag first,
+        // so the answer covers whole iterations and nothing else.
+        if index > 0 && cancel_requested(cancel) {
+            cancelled = true;
+            break;
+        }
         values.push(ctx.iterate(state, depth, 0));
     }
 
@@ -557,6 +599,9 @@ pub fn search(
 
     let value = values.mean().clamp(LOSS, WIN);
     let mut warnings = Vec::new();
+    if cancelled {
+        warnings.push(SolveWarning::Cancelled);
+    }
     if ctx.max_discarded > EPS {
         warnings.push(SolveWarning::ChanceMassDiscarded {
             max_fraction: ctx.max_discarded,

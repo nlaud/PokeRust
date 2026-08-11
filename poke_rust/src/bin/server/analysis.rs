@@ -2,13 +2,18 @@
 //!
 //! A session with a resolved P2 profile starts one search after each resolved
 //! turn. The search runs on a blocking thread, so it never holds the session
-//! lock. Each job carries the generation of the position that started it.
+//! lock. Each job carries a generation and a job ID.
 //!
 //! [`AnalysisState::invalidate`] raises the generation and cancels the running
-//! job. [`AnalysisState::accept`] then drops any result whose generation is no
-//! longer current, so a slow job can never overwrite a newer answer. Both calls
-//! keep the last complete checkpoint, so the client always reads the newest
-//! complete answer even after a failure or a cancellation.
+//! job. [`AnalysisState::accept`] drops a result when its generation or job ID
+//! is not current. Thus, a slow job cannot overwrite a newer answer. Both calls
+//! keep the last complete checkpoint after a failure or a cancellation.
+//!
+//! Every search reads the cancel flag during the search, so a raised flag stops
+//! the work rather than only the start of it. A cancelled search still returns
+//! an answer, and that answer covers only the work that finished. The task
+//! therefore drops it: a partial answer must not replace the last complete
+//! checkpoint.
 //!
 //! P1 reads `GET /api/battles/{id}/analysis` during a battle, so the progress
 //! view holds no P2 action, no P2 win odds, no count that divides out P2's
@@ -19,7 +24,6 @@
 //! already locked. See [`P2Draw`] for what the reveal carries.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,7 +34,7 @@ use poke_rust::information::determinize::DeterminizeConfig;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::UnknownMatchState;
 use poke_rust::meta::{MetaDex, MetaFormat};
-use poke_rust::solver::{self, JointActionProb};
+use poke_rust::solver::{self, CancelFlag, JointActionProb};
 use poke_rust::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
 
 use crate::bot::{BotSearchConfig, MAX_SAFE_INTEGER};
@@ -115,12 +119,22 @@ pub struct AnalysisReplay {
 /// The job that is running now.
 #[derive(Debug)]
 struct RunningJob {
+    id: u64,
     generation: u64,
     started: Instant,
-    /// The solver has no cancellation hook, so this flag stops a job before its
-    /// search starts. The generation check in [`AnalysisState::accept`] handles
-    /// a job that is already inside the search.
-    cancel: Arc<AtomicBool>,
+    /// Stops the job before its search starts, and during the search.
+    ///
+    /// Every search reads this flag at its own check points. The ticket check in
+    /// [`AnalysisState::accept`] covers the final race.
+    cancel: CancelFlag,
+}
+
+/// Identifies one analysis job and carries its cancel flag.
+#[derive(Debug)]
+struct JobTicket {
+    id: u64,
+    generation: u64,
+    cancel: CancelFlag,
 }
 
 /// The analysis record of one session.
@@ -129,6 +143,8 @@ pub struct AnalysisState {
     /// The generation of the current position.
     /// Every state change raises it by one.
     generation: u64,
+    /// The ID for the next job in this session.
+    next_job_id: u64,
     running: Option<RunningJob>,
     /// The newest complete answer.
     /// A failure and a cancellation both keep it.
@@ -145,41 +161,49 @@ impl AnalysisState {
     pub fn invalidate(&mut self) {
         self.generation += 1;
         if let Some(job) = self.running.take() {
-            job.cancel.store(true, Ordering::Relaxed);
+            job.cancel.cancel();
         }
     }
 
-    /// Records the job that is starting and returns its cancel flag.
+    /// Records the job that is starting and returns its ticket.
     /// Cancels an earlier job of the same generation, so one job runs at a time.
-    fn start(&mut self) -> Arc<AtomicBool> {
+    fn start(&mut self) -> JobTicket {
         if let Some(job) = self.running.take() {
-            job.cancel.store(true, Ordering::Relaxed);
+            job.cancel.cancel();
         }
-        let cancel = Arc::new(AtomicBool::new(false));
+        let id = self.next_job_id;
+        self.next_job_id = self.next_job_id.wrapping_add(1);
+        let cancel = CancelFlag::new();
         self.running = Some(RunningJob {
+            id,
             generation: self.generation,
             started: Instant::now(),
-            cancel: Arc::clone(&cancel),
+            cancel: cancel.clone(),
         });
         self.last_error = None;
-        cancel
+        JobTicket {
+            id,
+            generation: self.generation,
+            cancel,
+        }
     }
 
     /// Stores the result of one job.
     ///
-    /// Drops a result from an old generation, so a slow job never overwrites a
-    /// newer answer. A failure keeps the last complete checkpoint.
-    pub fn accept(&mut self, generation: u64, outcome: Result<AnalysisCheckpoint, String>) {
-        if generation != self.generation {
+    /// Drops a result from an old or replaced job. A failure keeps the last
+    /// complete checkpoint.
+    fn accept(&mut self, job: &JobTicket, outcome: Result<AnalysisCheckpoint, String>) {
+        if job.generation != self.generation {
             return;
         }
-        if self
+        if !self
             .running
             .as_ref()
-            .is_some_and(|job| job.generation == generation)
+            .is_some_and(|running| running.id == job.id && running.generation == job.generation)
         {
-            self.running = None;
+            return;
         }
+        self.running = None;
         match outcome {
             Ok(checkpoint) => {
                 self.checkpoint = Some(checkpoint);
@@ -311,30 +335,39 @@ pub fn start_job(
         consider_crit: session.config.consider_crit,
     };
 
-    let cancel = session.analysis.start();
+    let job = session.analysis.start();
     let battle_id = battle_id.to_string();
 
     tokio::task::spawn_blocking(move || {
-        let outcome = if cancel.load(Ordering::Relaxed) {
-            Err("the analysis job was cancelled before its search started".to_string())
-        } else {
-            run_search(
-                search,
-                seed,
-                time_ms,
-                generation,
-                &state,
-                belief_p2.as_ref(),
-                &dexes,
-                meta.for_format(format),
-                inference,
-                replay,
-            )
-        };
+        // A cancel before the search saves the whole search.
+        if job.cancel.is_cancelled() {
+            return;
+        }
+        let outcome = run_search(
+            search,
+            seed,
+            time_ms,
+            generation,
+            &state,
+            belief_p2.as_ref(),
+            &dexes,
+            meta.for_format(format),
+            inference,
+            replay,
+            &job.cancel,
+        );
+        // A cancelled search returns an answer that holds only the work that
+        // finished, so this task reports nothing at all. Two rules need that.
+        // A partial answer must not replace the last complete checkpoint. A
+        // cancelled job must also leave the record of the replacement job.
+        // The ticket check in `accept` protects the race after this flag check.
+        if job.cancel.is_cancelled() {
+            return;
+        }
         let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
         // A deleted battle leaves the task with no target.
         if let Some(session) = sessions.get_mut(&battle_id) {
-            session.analysis.accept(generation, outcome);
+            session.analysis.accept(&job, outcome);
         }
     });
 }
@@ -382,6 +415,7 @@ fn run_search(
     meta: Option<&MetaDex>,
     inference: Option<InferenceConfig>,
     replay: AnalysisReplay,
+    cancel: &CancelFlag,
 ) -> Result<AnalysisCheckpoint, String> {
     let turn_number = match state {
         MatchState::BattleState(battle) => battle.turn_number,
@@ -392,7 +426,7 @@ fn run_search(
     // A solver panic must not poison the session mutex, so catch it here and
     // report it as an ordinary job failure.
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        one_search(search, seed, state, belief_p2, dexes, meta, inference)
+        one_search(search, seed, state, belief_p2, dexes, meta, inference, cancel)
     }));
     let mut checkpoint = match caught {
         Ok(result) => result?,
@@ -429,6 +463,9 @@ fn run_search(
 ///
 /// The returned checkpoint carries no generation, no turn number, and no seed.
 /// [`run_search`] fills those three fields.
+///
+/// Every arm passes `cancel`, so a raised flag stops the search that runs.
+#[allow(clippy::too_many_arguments)]
 fn one_search(
     search: BotSearchConfig,
     seed: u64,
@@ -437,12 +474,20 @@ fn one_search(
     dexes: &Dexes,
     meta: Option<&MetaDex>,
     inference: Option<InferenceConfig>,
+    cancel: &CancelFlag,
 ) -> Result<AnalysisCheckpoint, String> {
+    let cancel = Some(cancel);
     match search {
         BotSearchConfig::Exact(config) => {
-            let result =
-                solver::solve_seeded(seed, state, &dexes.pokemon_dex, &dexes.move_dex, &config)
-                    .map_err(engine_error)?;
+            let result = solver::solve_seeded_cancellable(
+                seed,
+                state,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &config,
+                cancel,
+            )
+            .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
                 result.p2_strategy,
@@ -455,9 +500,15 @@ fn one_search(
             ))
         }
         BotSearchConfig::Mcts(config) => {
-            let result =
-                solver::mcts::search(seed, state, &dexes.pokemon_dex, &dexes.move_dex, &config)
-                    .map_err(engine_error)?;
+            let result = solver::mcts::search_cancellable(
+                seed,
+                state,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &config,
+                cancel,
+            )
+            .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
                 result.p2_strategy,
@@ -472,7 +523,7 @@ fn one_search(
         BotSearchConfig::Ismcts(config) => {
             let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
             let meta = meta.ok_or_else(unsupported_meta)?;
-            let result = solver::ismcts::search_belief(
+            let result = solver::ismcts::search_belief_cancellable(
                 seed,
                 belief,
                 meta,
@@ -480,6 +531,7 @@ fn one_search(
                 &dexes.move_dex,
                 &config,
                 &determinize,
+                cancel,
             )
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
@@ -496,7 +548,7 @@ fn one_search(
         BotSearchConfig::Mccfr(config) => {
             let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
             let meta = meta.ok_or_else(unsupported_meta)?;
-            let result = solver::mccfr::search_belief(
+            let result = solver::mccfr::search_belief_cancellable(
                 seed,
                 belief,
                 meta,
@@ -504,6 +556,7 @@ fn one_search(
                 &dexes.move_dex,
                 &config,
                 &determinize,
+                cancel,
             )
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
@@ -639,6 +692,12 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         ),
         solver::SolveWarning::ActionsTruncated { .. } => {
             "The action cap removed at least one action, so the search can miss it.".to_string()
+        }
+        // A cancelled job reports no checkpoint, so this line reaches the client
+        // only through a search that a caller inside the process cancelled. The
+        // line names no state of either side.
+        solver::SolveWarning::Cancelled => {
+            "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
     }
 }
@@ -970,7 +1029,8 @@ mod tests {
     #[test]
     fn invalidate_raises_the_generation_and_keeps_the_checkpoint() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 3)));
+        let job = state.start();
+        state.accept(&job, Ok(checkpoint(0, 3)));
         assert_eq!(state.checkpoint().unwrap().turn_number, 3);
 
         state.invalidate();
@@ -986,8 +1046,9 @@ mod tests {
     fn accept_stores_a_result_of_the_current_generation() {
         let mut state = AnalysisState::default();
         state.invalidate();
+        let job = state.start();
 
-        state.accept(1, Ok(checkpoint(1, 5)));
+        state.accept(&job, Ok(checkpoint(1, 5)));
 
         assert_eq!(state.checkpoint().unwrap().turn_number, 5);
         let view = state.progress();
@@ -998,10 +1059,11 @@ mod tests {
     #[test]
     fn accept_drops_a_result_of_an_old_generation() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 1)));
+        let job = state.start();
+        state.accept(&job, Ok(checkpoint(0, 1)));
         state.invalidate();
 
-        state.accept(0, Ok(checkpoint(0, 99)));
+        state.accept(&job, Ok(checkpoint(0, 99)));
 
         assert_eq!(state.checkpoint().unwrap().turn_number, 1);
         assert!(state.progress().error.is_none());
@@ -1010,9 +1072,11 @@ mod tests {
     #[test]
     fn a_failed_job_keeps_the_last_complete_checkpoint() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 2)));
+        let complete = state.start();
+        state.accept(&complete, Ok(checkpoint(0, 2)));
+        let failed = state.start();
 
-        state.accept(0, Err("the search panicked".to_string()));
+        state.accept(&failed, Err("the search panicked".to_string()));
 
         assert_eq!(state.checkpoint().unwrap().turn_number, 2);
         let view = state.progress();
@@ -1024,13 +1088,13 @@ mod tests {
     #[test]
     fn invalidate_sets_the_cancel_flag_of_the_running_job() {
         let mut state = AnalysisState::default();
-        let cancel = state.start();
-        assert!(!cancel.load(Ordering::Relaxed));
+        let job = state.start();
+        assert!(!job.cancel.is_cancelled());
         assert_eq!(state.progress().phase, "running");
 
         state.invalidate();
 
-        assert!(cancel.load(Ordering::Relaxed));
+        assert!(job.cancel.is_cancelled());
         assert_eq!(state.progress().phase, "idle");
     }
 
@@ -1040,14 +1104,46 @@ mod tests {
         let first = state.start();
         let second = state.start();
 
-        assert!(first.load(Ordering::Relaxed));
-        assert!(!second.load(Ordering::Relaxed));
+        assert!(first.cancel.is_cancelled());
+        assert!(!second.cancel.is_cancelled());
+    }
+
+    /// A replaced job must not store a result or clear the new running job.
+    #[test]
+    fn accept_drops_a_result_from_a_replaced_job() {
+        let mut state = AnalysisState::default();
+        let first = state.start();
+        let second = state.start();
+
+        state.accept(&first, Ok(checkpoint(0, 1)));
+
+        assert!(state.checkpoint().is_none());
+        assert_eq!(state.progress().phase, "running");
+
+        state.accept(&second, Ok(checkpoint(0, 2)));
+
+        assert_eq!(state.checkpoint().unwrap().turn_number, 2);
+        assert_eq!(state.progress().phase, "complete");
+    }
+
+    /// A clone of the flag shares the signal, which is what lets the session
+    /// keep one handle while the search thread holds another.
+    #[test]
+    fn a_cloned_cancel_flag_shares_the_signal() {
+        let flag = CancelFlag::new();
+        let copy = flag.clone();
+
+        assert!(!copy.is_cancelled());
+        flag.cancel();
+
+        assert!(copy.is_cancelled());
     }
 
     #[test]
     fn a_new_job_clears_the_last_error() {
         let mut state = AnalysisState::default();
-        state.accept(0, Err("no usage cache".to_string()));
+        let failed = state.start();
+        state.accept(&failed, Err("no usage cache".to_string()));
         assert_eq!(state.progress().phase, "failed");
 
         state.start();
@@ -1060,7 +1156,8 @@ mod tests {
     #[test]
     fn the_progress_view_holds_no_p2_strategy() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 4)));
+        let job = state.start();
+        state.accept(&job, Ok(checkpoint(0, 4)));
 
         let view = state.progress();
         let json = serde_json::to_string(&view).unwrap();
@@ -1080,7 +1177,8 @@ mod tests {
     #[test]
     fn the_progress_view_holds_no_search_node_count() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 4)));
+        let job = state.start();
+        state.accept(&job, Ok(checkpoint(0, 4)));
 
         let json = serde_json::to_string(&state.progress()).unwrap();
 
@@ -1372,7 +1470,8 @@ mod tests {
     #[test]
     fn only_a_checkpoint_of_the_current_position_supplies_a_strategy() {
         let mut state = AnalysisState::default();
-        state.accept(0, Ok(checkpoint(0, 1)));
+        let job = state.start();
+        state.accept(&job, Ok(checkpoint(0, 1)));
         assert!(state.current_checkpoint().is_some());
 
         state.invalidate();
@@ -1386,8 +1485,9 @@ mod tests {
     fn a_missing_checkpoint_supplies_no_strategy() {
         let mut state = AnalysisState::default();
         assert!(state.current_checkpoint().is_none());
+        let job = state.start();
 
-        state.accept(0, Err("the search failed".to_string()));
+        state.accept(&job, Err("the search failed".to_string()));
 
         assert!(state.current_checkpoint().is_none());
     }

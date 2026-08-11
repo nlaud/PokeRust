@@ -80,6 +80,16 @@
 //!
 //! One seed drives the particle draws, the action selection, and the engine. The
 //! same seed and the same configuration give the same result.
+//!
+//! # Cancellation
+//!
+//! [`search_cancellable`] and [`search_belief_cancellable`] read a
+//! [`CancelFlag`](super::CancelFlag) at the top of the iteration loop.
+//! A cancelled search returns the mean and the average strategy of the finished
+//! iterations, and it reports
+//! [`SolveWarning::Cancelled`](super::SolveWarning::Cancelled).
+//! The particle draw itself reads no flag, because a partial particle set is not
+//! a belief.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -103,7 +113,7 @@ use super::mcts::{
     LOSS, MIN_EXPLORATION, MctsConfig, MctsResult, MctsSamplingError, MctsStats, RunningStats, WIN,
     draw_index, terminal_value,
 };
-use super::{JointActionProb, SolveError, SolveWarning};
+use super::{CancelFlag, JointActionProb, SolveError, SolveWarning, cancel_requested};
 
 /// Everything the fog-of-war search needs beyond the belief itself.
 ///
@@ -243,6 +253,36 @@ pub fn search_belief(
     config: &IsmctsConfig,
     determinize: &DeterminizeConfig,
 ) -> Result<IsmctsResult, IsmctsError> {
+    search_belief_cancellable(
+        seed,
+        belief,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        config,
+        determinize,
+        None,
+    )
+}
+
+/// [`search_belief`], with a cooperative stop signal.
+///
+/// The draw runs first, and it reads no flag. A partial particle set is not a
+/// belief, so the search cannot answer from one. [`search_cancellable`] then
+/// reads the flag between iterations.
+///
+/// `None` gives the behavior of [`search_belief`].
+#[allow(clippy::too_many_arguments)]
+pub fn search_belief_cancellable(
+    seed: u64,
+    belief: &UnknownBattleState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &IsmctsConfig,
+    determinize: &DeterminizeConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<IsmctsResult, IsmctsError> {
     let particles = ParticleBelief::from_belief(
         seed,
         belief,
@@ -252,7 +292,7 @@ pub fn search_belief(
         config.particles,
         determinize,
     )?;
-    search(seed, &particles, pokemon_dex, move_dex, config)
+    search_cancellable(seed, &particles, pokemon_dex, move_dex, config, cancel)
 }
 
 /// Searches a particle set that the caller already holds.
@@ -268,6 +308,34 @@ pub fn search(
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &IsmctsConfig,
+) -> Result<IsmctsResult, IsmctsError> {
+    search_cancellable(seed, belief, pokemon_dex, move_dex, config, None)
+}
+
+/// [`search`], with a cooperative stop signal.
+///
+/// The search reads `cancel` at the top of the iteration loop. One iteration is
+/// the unit of work: it draws one world, it descends one path, it updates both
+/// trees, and it pushes one value into the running mean. A set flag ends the
+/// loop, and the result then holds the mean, the sampling error, and the average
+/// strategy of the finished iterations alone.
+///
+/// The search always finishes iteration 1, for the reason
+/// [`mcts::search_cancellable`](super::mcts::search_cancellable) gives.
+///
+/// A cancelled result carries [`SolveWarning::Cancelled`], and
+/// [`MctsStats::iterations`] holds the finished count. The reported belief size
+/// and effective sample size describe the set that the search used, so a cancel
+/// does not change them.
+///
+/// `None` gives the behavior of [`search`].
+pub fn search_cancellable(
+    seed: u64,
+    belief: &ParticleBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &IsmctsConfig,
+    cancel: Option<&CancelFlag>,
 ) -> Result<IsmctsResult, IsmctsError> {
     if belief.is_empty() {
         return Err(BeliefError::NoParticles.into());
@@ -315,7 +383,14 @@ pub fn search(
     };
 
     let mut values = RunningStats::default();
-    for _ in 0..iterations {
+    let mut cancelled = false;
+    for index in 0..iterations {
+        // Iteration 1 always runs. Every later iteration reads the flag first,
+        // so the answer covers whole iterations and nothing else.
+        if index > 0 && cancel_requested(cancel) {
+            cancelled = true;
+            break;
+        }
         let state = worlds.draw().expect("the set is not empty").state.clone();
         let MatchState::BattleState(battle) = &state else {
             unreachable!("the search rejected each non-battle state");
@@ -337,6 +412,9 @@ pub fn search(
     let p2_strategy = root_strategy(&ctx.trees[1], &ctx.root_keys[1]);
 
     let mut warnings = Vec::new();
+    if cancelled {
+        warnings.push(SolveWarning::Cancelled);
+    }
     for (player, truncation) in [
         (Player::P1, ctx.action_truncations[0]),
         (Player::P2, ctx.action_truncations[1]),

@@ -38,6 +38,23 @@
 //! The node budget and the deadline span the whole solve, not one pass. `run`
 //! returns the last pass that neither limit stopped.
 //!
+//! # Cancellation
+//!
+//! [`CancelFlag`](super::CancelFlag) is the third stop reason, beside the node
+//! budget and the deadline. It behaves as those two do: the search stops at the
+//! next check point, it scores the rest of the tree statically, and it returns
+//! the last complete deepening pass.
+//!
+//! The search reads the flag at three places:
+//!
+//! 1. Each node, through [`SearchContext::should_stop`].
+//! 2. Each matrix cell, before the cell resolves a turn.
+//! 3. Each chance successor, before the search descends into it.
+//!
+//! A point that the cancel reached takes a static score. Every chance node
+//! therefore keeps a complete weighted average over its successors, because each
+//! successor keeps its own probability and its own value.
+//!
 //! # Midturn decisions
 //!
 //! A faint can require a replacement before the turn ends.
@@ -61,8 +78,8 @@ use super::actions::{self, JointActions, Phase};
 use super::eval::EvalContext;
 use super::matrix::{self, EPS, MatrixSolution};
 use super::{
-    JointActionProb, SolveConfig, SolveError, SolveResult, SolveStats, SolveWarning,
-    SolverAlgorithm,
+    CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveStats, SolveWarning,
+    SolverAlgorithm, cancel_requested,
 };
 
 /// P1's utility when P1 loses, and when P1 wins. Every value in the search lies
@@ -82,11 +99,14 @@ const SALT_SIMULTANEOUS: u64 = 0x243F_6A88_85A3_08D3;
 /// turns the single search into a sequence of passes at depth 1, 2, and so on.
 /// One `SearchContext` serves every pass, so the passes share the transposition
 /// table, the turn cache, and the statistics.
+///
+/// `cancel` stops the search from another thread. See the module documentation.
 pub(super) fn run(
     state: &MatchState,
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &SolveConfig,
+    cancel: Option<&CancelFlag>,
 ) -> Result<SolveResult, SolveError> {
     match state {
         MatchState::TeamPreviewState(_) => return Err(SolveError::TeamPreviewUnsupported),
@@ -97,7 +117,7 @@ pub(super) fn run(
     }
 
     let started = Instant::now();
-    let mut ctx = SearchContext::new(pokemon_dex, move_dex, config, started);
+    let mut ctx = SearchContext::new(pokemon_dex, move_dex, config, started, cancel);
 
     // Depth 0 would make every cell an evaluation of the same position, so the
     // matrix would be constant and the "equilibrium" arbitrary. One ply is the
@@ -125,8 +145,9 @@ pub(super) fn run(
         let action_truncations = ctx.action_truncations;
         let pass = ctx.solve_position(state, depth, 0, LOSS, WIN, seed.as_ref());
 
-        // `budget_hit` and `deadline_hit` latch, and the loop stops at the first
-        // pass that sets either, so the flags describe this pass alone.
+        // `budget_hit`, `deadline_hit`, and `cancel_hit` latch, and the loop
+        // stops at the first pass that sets one, so the flags describe this pass
+        // alone.
         if ctx.stopped() {
             // A complete shallower answer beats a partial deeper one. The
             // partial pass is kept only when no pass ever finished, because
@@ -160,6 +181,12 @@ pub(super) fn run(
         if let (true, Some(budget)) = (ctx.deadline_hit, config.deadline) {
             warnings.push(SolveWarning::DeadlineExceeded { budget });
         }
+    }
+    // The other two warnings say that the returned answer is part static, so
+    // they apply to the returned pass alone. A cancel describes the whole
+    // search, so it applies whether or not the returned pass is complete.
+    if ctx.cancel_hit {
+        warnings.push(SolveWarning::Cancelled);
     }
     if reached < target {
         warnings.push(SolveWarning::DepthNotReached { target, reached });
@@ -279,6 +306,11 @@ struct SearchContext<'a> {
     action_truncations: [Option<(usize, usize)>; 2],
     budget_hit: bool,
     deadline_hit: bool,
+    /// Set when the search read a raised [`CancelFlag`].
+    /// It latches for the same reason the other two do.
+    cancel_hit: bool,
+    /// The stop signal of the caller, if the caller supplied one.
+    cancel: Option<&'a CancelFlag>,
     /// When the solve began. Every deepening pass shares it, so the deadline
     /// bounds the whole solve rather than one pass.
     started: Instant,
@@ -292,6 +324,7 @@ impl<'a> SearchContext<'a> {
         move_dex: &'a HashMap<PokemonMove, MoveData>,
         cfg: &'a SolveConfig,
         started: Instant,
+        cancel: Option<&'a CancelFlag>,
     ) -> Self {
         SearchContext {
             pokemon_dex,
@@ -304,6 +337,8 @@ impl<'a> SearchContext<'a> {
             action_truncations: [None, None],
             budget_hit: false,
             deadline_hit: false,
+            cancel_hit: false,
+            cancel,
             started,
             root_seed: None,
         }
@@ -322,21 +357,27 @@ impl<'a> SearchContext<'a> {
         self.cfg.algorithm == SolverAlgorithm::SerializedBounds || self.cfg.use_serialized_bounds
     }
 
-    /// Whether the search must stop: the node budget is spent, or the deadline
-    /// has passed. Latches the reason so the caller can report it once, rather
-    /// than the search failing loudly mid-flight. A stopped search evaluates the
-    /// rest of the tree statically; it never abandons a node half-solved, so
-    /// every matrix cell keeps an exact value.
+    /// Whether the search must stop: the node budget is spent, the deadline has
+    /// passed, or a caller raised the cancel flag. Latches the reason so the
+    /// caller can report it once, rather than the search failing loudly
+    /// mid-flight. A stopped search evaluates the rest of the tree statically;
+    /// it never abandons a node half-solved, so every matrix cell keeps an exact
+    /// value.
     ///
-    /// Both tests read a monotone quantity, so a stop never becomes a resume.
+    /// All three tests read a monotone quantity, so a stop never becomes a
+    /// resume.
     fn should_stop(&mut self) -> bool {
-        if let Some(budget) = self.cfg.node_budget
+        let budget_hit = if let Some(budget) = self.cfg.node_budget
             && self.stats.nodes_expanded >= budget
         {
             self.budget_hit = true;
-            return true;
-        }
-        self.deadline_expired()
+            true
+        } else {
+            false
+        };
+        let deadline_hit = self.deadline_expired();
+        let cancel_hit = self.cancel_requested();
+        budget_hit || deadline_hit || cancel_hit
     }
 
     /// Check the deadline and save the result for the solve warning.
@@ -350,9 +391,25 @@ impl<'a> SearchContext<'a> {
         false
     }
 
+    /// Check the cancel flag and save the result for the solve warning.
+    ///
+    /// The latch makes every later check cheap, and it also keeps one search
+    /// consistent: a flag that another thread raises mid-pass cannot make one
+    /// half of that pass stop and the other half continue.
+    fn cancel_requested(&mut self) -> bool {
+        if self.cancel_hit {
+            return true;
+        }
+        if cancel_requested(self.cancel) {
+            self.cancel_hit = true;
+            return true;
+        }
+        false
+    }
+
     /// Whether a stop reason has latched.
     fn stopped(&self) -> bool {
-        self.budget_hit || self.deadline_hit
+        self.budget_hit || self.deadline_hit || self.cancel_hit
     }
 
     // ── The simultaneous-move search ────────────────────────────────────────
@@ -581,8 +638,11 @@ impl<'a> SearchContext<'a> {
     ) -> f64 {
         self.stats.matrix_cells_evaluated += 1;
         // The root does not enter node_value before it resolves a matrix cell.
-        // Check here to stop new turn simulations after the deadline.
-        if self.deadline_expired() {
+        // Check here to stop new turn simulations after the deadline, and after
+        // a cancel.
+        let deadline_hit = self.deadline_expired();
+        let cancel_hit = self.cancel_requested();
+        if deadline_hit || cancel_hit {
             let battle = as_battle(state).expect("cell_value requires a battle position");
             return self.score(battle);
         }
@@ -597,6 +657,9 @@ impl<'a> SearchContext<'a> {
                 continue;
             }
             let (child_depth, child_chain) = self.descend(&child, depth, chain);
+            // A cancel between two successors scores the rest of them
+            // statically, which `node_value` does on its own. The average
+            // therefore still covers every successor with its own probability.
             expected += probability * self.node_value(&child, child_depth, child_chain, LOSS, WIN);
         }
         expected
@@ -708,8 +771,11 @@ impl<'a> SearchContext<'a> {
         beta: f64,
         second: Player,
     ) -> f64 {
-        // A deadline can expire after serial_ab starts and before it resolves a cell.
-        if self.deadline_expired() {
+        // A deadline can expire, and a caller can cancel, after serial_ab starts
+        // and before it resolves a cell.
+        let deadline_hit = self.deadline_expired();
+        let cancel_hit = self.cancel_requested();
+        if deadline_hit || cancel_hit {
             let battle = as_battle(state).expect("serial_cell requires a battle position");
             return self.score(battle);
         }
@@ -743,6 +809,9 @@ impl<'a> SearchContext<'a> {
                 ((beta - accumulated - (remaining - probability) * LOSS) / probability).min(WIN);
 
             let (child_depth, child_chain) = self.descend(&child, depth, chain);
+            // `serial_ab` reads the stop reasons at its own top, so a cancel
+            // between two successors gives the rest a static score. The running
+            // average keeps every successor and its probability.
             let value = self.serial_ab(
                 &child,
                 child_depth,
@@ -881,7 +950,9 @@ impl<'a> RootCells<'a> {
             // Depth 0 would score the root without a decision, as it would in
             // `run`. One turn is the minimum.
             depth: config.depth.max(1),
-            ctx: SearchContext::new(pokemon_dex, move_dex, config, Instant::now()),
+            // No cancel flag: one cell is the unit of work here, and the caller
+            // stops between cells rather than inside one.
+            ctx: SearchContext::new(pokemon_dex, move_dex, config, Instant::now(), None),
         }
     }
 

@@ -117,6 +117,16 @@
 //!
 //! One seed drives the particle draws, the action selection, and the engine. The
 //! same seed and the same configuration give the same result.
+//!
+//! # Cancellation
+//!
+//! [`search_cancellable`] and [`search_belief_cancellable`] read a
+//! [`CancelFlag`](super::CancelFlag) at the top of the iteration loop.
+//! The search alternates the traverser on the iteration index, so it stops only
+//! on an even index.
+//! Both players then hold the average of an equal number of traversals.
+//! A cancelled search reports
+//! [`SolveWarning::Cancelled`](super::SolveWarning::Cancelled).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -140,7 +150,7 @@ use super::mcts::{
     LOSS, MIN_EXPLORATION, MctsConfig, MctsSamplingError, MctsStats, RunningStats, SelectionPolicy,
     WIN, draw_index, terminal_value,
 };
-use super::{JointActionProb, SolveError, SolveWarning};
+use super::{CancelFlag, JointActionProb, SolveError, SolveWarning, cancel_requested};
 
 use rand::Rng;
 
@@ -510,6 +520,36 @@ pub fn search_belief(
     config: &MccfrConfig,
     determinize: &DeterminizeConfig,
 ) -> Result<MccfrResult, MccfrError> {
+    search_belief_cancellable(
+        seed,
+        belief,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        config,
+        determinize,
+        None,
+    )
+}
+
+/// [`search_belief`], with a cooperative stop signal.
+///
+/// The draw runs first, and it reads no flag. A partial particle set is not a
+/// belief, so the search cannot answer from one. [`search_cancellable`] then
+/// reads the flag between iterations.
+///
+/// `None` gives the behavior of [`search_belief`].
+#[allow(clippy::too_many_arguments)]
+pub fn search_belief_cancellable(
+    seed: u64,
+    belief: &UnknownBattleState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MccfrConfig,
+    determinize: &DeterminizeConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<MccfrResult, MccfrError> {
     let particles = ParticleBelief::from_belief(
         seed,
         belief,
@@ -519,7 +559,7 @@ pub fn search_belief(
         config.particles,
         determinize,
     )?;
-    search(seed, &particles, pokemon_dex, move_dex, config)
+    search_cancellable(seed, &particles, pokemon_dex, move_dex, config, cancel)
 }
 
 /// Searches a particle set that the caller already holds.
@@ -540,6 +580,42 @@ pub fn search(
     config: &MccfrConfig,
 ) -> Result<MccfrResult, MccfrError> {
     search_with_leaves(seed, belief, pokemon_dex, move_dex, config, None)
+}
+
+/// [`search`], with a cooperative stop signal.
+///
+/// The search reads `cancel` at the top of the iteration loop. One iteration is
+/// the unit of work: it draws one world, it traverses for one player, and it
+/// pushes one value into the running mean.
+///
+/// The traverser alternates on the iteration index, so a player builds its
+/// average on the iterations that traverse for the other player. The loop
+/// therefore stops only on an even index, and only after index 2. Both players
+/// then hold the average of an equal number of traversals.
+///
+/// A cancelled result carries [`SolveWarning::Cancelled`], and
+/// [`MctsStats::iterations`] holds the finished count.
+///
+/// `None` gives the behavior of [`search`].
+pub fn search_cancellable(
+    seed: u64,
+    belief: &ParticleBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MccfrConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<MccfrResult, MccfrError> {
+    search_root_belief(
+        seed,
+        RootBelief::from_particles(belief)?,
+        pokemon_dex,
+        move_dex,
+        config,
+        None,
+        None,
+        belief.warnings().to_vec(),
+        cancel,
+    )
 }
 
 /// Searches a particle set against a supplied leaf oracle.
@@ -567,6 +643,7 @@ pub fn search_with_leaves(
         leaves,
         None,
         belief.warnings().to_vec(),
+        None,
     )
 }
 
@@ -581,6 +658,7 @@ fn search_root_belief(
     leaves: Option<&HorizonLeaves>,
     root_public: Option<ObservationKey>,
     draw_warnings: Vec<DeterminizeWarning>,
+    cancel: Option<&CancelFlag>,
 ) -> Result<MccfrResult, MccfrError> {
     for world in &worlds.worlds {
         match &world.state {
@@ -625,7 +703,15 @@ fn search_root_belief(
     };
 
     let mut values = RunningStats::default();
+    let mut cancelled = false;
     for iteration in 0..iterations {
+        // The traverser alternates on this index, so one complete alternation
+        // pair is the unit that both average strategies read. Stop only on an
+        // even index, and only after the first pair.
+        if iteration >= 2 && iteration.is_multiple_of(2) && cancel_requested(cancel) {
+            cancelled = true;
+            break;
+        }
         let root = worlds.draw().expect("the set is not empty").clone();
         let state = root.state;
         let histories = root.histories;
@@ -654,6 +740,9 @@ fn search_root_belief(
     let p2_strategy = root_strategy(&ctx.trees[1], &ctx.root_keys[1]);
 
     let mut warnings = Vec::new();
+    if cancelled {
+        warnings.push(SolveWarning::Cancelled);
+    }
     for (player, truncation) in [
         (Player::P1, ctx.action_truncations[0]),
         (Player::P2, ctx.action_truncations[1]),
@@ -822,6 +911,7 @@ pub fn continual_solve(
             None,
             Some(public),
             root.draw_warnings.clone(),
+            None,
         )?;
         for (&key, value) in &subgame.root_values {
             if let Some(player_value) = value.counterfactual_value() {

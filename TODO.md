@@ -103,8 +103,10 @@ Nash stays the default of every search.
 ## Simulator bot
 
 `analysis.rs` holds the generation, the running job, and the last checkpoint.
-`invalidate` cancels a job before its search starts, and the generation check in
-`accept` drops a result that a state change has already made old.
+`invalidate` raises the cancel flag of the running job, and the generation check
+in `accept` drops a result that a state change has already made old.
+`solver::CancelFlag` stops a search that already runs, so a cancelled job leaves
+the last complete checkpoint in place.
 
 The server draws P2's command and returns it as `p2Reveal`. The client sends no
 `p2` field for a bot session. It waits for the current analysis job before it
@@ -112,14 +114,8 @@ submits a battle command. A timeout or a failed job uses the uniform draw.
 `P2RevealPanel` shows the wait line during the search, and the drawn command
 after the turn resolves.
 
-- [ ] Give `solver::search` a cooperative cancel flag.
-  - [ ] Check the flag between cells, successors, and nodes.
-  - [ ] Return the last complete depth after a cancel.
 - [ ] Add the solver info to the Tracker frontend. For the last resolved turn, it should show the best strategies for both players as well as the win changes of each player. It should live update as depth increases further. Its configuration shuold mirror the sdimulators'
   - [ ] Displayed below the event input instructions
-
-The analysis job can only stop a search that has not started. A long exact
-search therefore runs to its deadline after the position changes.
 
 ## Parallel search
 

@@ -123,6 +123,22 @@
 //! Neither function changes [`SolveConfig`], and neither one changes the result
 //! of [`solve`].
 //!
+//! # Cancellation
+//!
+//! [`CancelFlag`] stops a search that already runs.
+//! Every search reads the flag during the search, and a set flag ends the work
+//! at the next safe point.
+//! A cancelled search returns an answer, never an error.
+//!
+//! [`solve_seeded_cancellable`] returns the last complete deepening pass.
+//! [`mcts::search_cancellable`], [`ismcts::search_cancellable`], and
+//! [`mccfr::search_cancellable`] return the mean and the strategy of the
+//! finished iterations alone.
+//! Each cancelled answer carries [`SolveWarning::Cancelled`].
+//!
+//! The flag is a separate argument, not a [`SolveConfig`] field.
+//! `SolveConfig` is `Copy`, and an `Arc` field would remove that.
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.
@@ -176,6 +192,8 @@ pub mod train;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::data::pokemon_move::PokemonMove;
@@ -200,6 +218,49 @@ pub enum SolverAlgorithm {
     /// Grows a restricted game from one action per player.
     /// Adds each player's best response until neither player can improve.
     DoubleOracle,
+}
+
+/// A cooperative stop signal that one thread raises and a search reads.
+///
+/// A clone shares the flag of the original, so the caller keeps a handle while
+/// the search holds its own. The flag only moves from clear to set, so a search
+/// that reads it one time never has to read it again.
+///
+/// The search reads the flag at a point where it holds a complete answer. It
+/// then returns that answer with [`SolveWarning::Cancelled`]. A cancel is
+/// therefore never an error.
+///
+/// The flag travels as an argument of a `_cancellable` entry point.
+/// [`SolveConfig`] is `Copy`, so it cannot hold this type.
+#[derive(Debug, Clone, Default)]
+pub struct CancelFlag(Arc<AtomicBool>);
+
+impl CancelFlag {
+    /// A new flag, clear.
+    pub fn new() -> Self {
+        CancelFlag(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Asks every search that holds this flag to stop.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether some caller asked the search to stop.
+    ///
+    /// `Relaxed` is enough. The flag carries no other data, and a search that
+    /// reads a stale `false` reads the flag again at the next check point.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether an optional flag is set.
+///
+/// Each search takes `Option<&CancelFlag>`, and `None` means that the caller
+/// asked for no cancellation.
+pub(crate) fn cancel_requested(flag: Option<&CancelFlag>) -> bool {
+    flag.is_some_and(CancelFlag::is_cancelled)
 }
 
 /// Everything the search needs beyond the position itself.
@@ -343,6 +404,13 @@ pub enum SolveWarning {
         kept: usize,
         total: usize,
     },
+    /// A [`CancelFlag`] stopped the search before it finished.
+    ///
+    /// The answer holds the work that finished. An exact search returns its last
+    /// complete deepening pass, and a sampling search returns the mean and the
+    /// strategy of its finished iterations. This warning describes the whole
+    /// search, so it does not depend on which pass the search returned.
+    Cancelled,
 }
 
 impl fmt::Display for SolveWarning {
@@ -371,6 +439,10 @@ impl fmt::Display for SolveWarning {
                 kept,
                 total,
             } => write!(f, "{player:?}'s action set was limited to {kept} of {total}"),
+            SolveWarning::Cancelled => write!(
+                f,
+                "the search was cancelled; the answer holds the work that finished"
+            ),
         }
     }
 }
@@ -446,7 +518,7 @@ pub fn solve(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &SolveConfig,
 ) -> Result<SolveResult, SolveError> {
-    search::run(state, pokemon_dex, move_dex, config)
+    search::run(state, pokemon_dex, move_dex, config, None)
 }
 
 /// [`solve`], made deterministic in `seed`.
@@ -460,6 +532,27 @@ pub fn solve_seeded(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &SolveConfig,
 ) -> Result<SolveResult, SolveError> {
+    solve_seeded_cancellable(seed, state, pokemon_dex, move_dex, config, None)
+}
+
+/// [`solve_seeded`], with a cooperative stop signal.
+///
+/// The search reads `cancel` between nodes, between matrix cells, and between
+/// chance successors. A set flag ends the search, and the result holds the last
+/// complete deepening pass with [`SolveWarning::Cancelled`].
+///
+/// A single-pass search returns the pass that ran. Each point that the cancel
+/// reached holds a static score, so every chance-node average stays complete.
+///
+/// `None` gives the behavior of [`solve_seeded`].
+pub fn solve_seeded_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &SolveConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<SolveResult, SolveError> {
     let _guard = scoped_sample_rng(seed);
-    solve(state, pokemon_dex, move_dex, config)
+    search::run(state, pokemon_dex, move_dex, config, cancel)
 }

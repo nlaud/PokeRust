@@ -9,7 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::data::ability::Ability;
@@ -39,8 +40,8 @@ use crate::solver::preview::{
     solve_team_preview, solve_team_preview_cached,
 };
 use crate::solver::{
-    JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning, SolverAlgorithm, eval,
-    solve, solve_seeded,
+    CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning,
+    SolverAlgorithm, eval, solve, solve_seeded, solve_seeded_cancellable,
 };
 use crate::state::battle::{
     BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
@@ -5258,4 +5259,500 @@ fn mccfr_refuses_a_preview_and_a_finished_battle() {
             winner: Player::P1
         })
     );
+}
+
+// ── Cancellation of the exact search ────────────────────────────────────────
+
+/// `SolveConfig::eval` is a plain function pointer, so it cannot capture a flag.
+/// The probe evaluator reads these statics instead. One lock guards the whole
+/// group, so two tests never share the call count.
+static PROBE_LOCK: Mutex<()> = Mutex::new(());
+/// The flag that `probe_eval` raises.
+static PROBE_FLAG: Mutex<Option<CancelFlag>> = Mutex::new(None);
+/// The call at which `probe_eval` raises the flag. `None` never raises it.
+static PROBE_LIMIT: Mutex<Option<u64>> = Mutex::new(None);
+/// How many times `probe_eval` ran.
+static PROBE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// [`eval::fitted`], with a call counter and a cancel trigger.
+///
+/// The returned value is the fitted value, so a solve with this evaluator
+/// returns the answer that the same solve with `eval::fitted` returns.
+fn probe_eval(state: &BattleState, ctx: &eval::EvalContext<'_>) -> f64 {
+    let calls = PROBE_CALLS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    let limit = *PROBE_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(limit) = limit
+        && calls >= limit
+        && let Some(flag) = PROBE_FLAG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+    {
+        flag.cancel();
+    }
+    eval::fitted(state, ctx)
+}
+
+/// Clears the probe count and installs one flag and one trigger.
+fn arm_probe(flag: Option<&CancelFlag>, limit: Option<u64>) {
+    *PROBE_FLAG.lock().unwrap_or_else(|e| e.into_inner()) = flag.cloned();
+    *PROBE_LIMIT.lock().unwrap_or_else(|e| e.into_inner()) = limit;
+    PROBE_CALLS.store(0, AtomicOrdering::Relaxed);
+}
+
+/// A flag that nobody raises must not change the answer at all. The exact search
+/// is the oracle of every other search, so a cancel hook that leaked into an
+/// untouched solve would move every one of them.
+#[test]
+fn an_untouched_cancel_flag_does_not_change_the_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let config = SolveConfig {
+        depth: 2,
+        ..base_config()
+    };
+    let flag = CancelFlag::new();
+
+    let plain = solve(&state, pokemon_dex, move_dex, &config).expect("solvable");
+    let watched =
+        solve_seeded_cancellable(1, &state, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("solvable");
+
+    assert_valid_strategies(&watched);
+    assert_eq!(watched.value, plain.value);
+    assert_eq!(watched.depth_reached, plain.depth_reached);
+    assert_eq!(watched.stats.turns_simulated, plain.stats.turns_simulated);
+    assert!(!watched.warnings.contains(&SolveWarning::Cancelled));
+    assert!(!flag.is_cancelled());
+}
+
+/// A flag that is already raised must stop the search before it simulates a
+/// turn, and it must still return a playable strategy.
+#[test]
+fn a_flag_set_before_the_solve_stops_the_first_pass() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    let result = solve_seeded_cancellable(
+        1,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    assert_valid_strategies(&result);
+    assert_eq!(result.stats.turns_simulated, 0);
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// Each active stop reason must appear in the warnings.
+#[test]
+fn an_expired_deadline_does_not_hide_a_cancel() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+    let config = SolveConfig {
+        deadline: Some(Duration::ZERO),
+        ..base_config()
+    };
+
+    let result = solve_seeded_cancellable(
+        1,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    assert_valid_strategies(&result);
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        result
+            .warnings
+            .contains(&SolveWarning::DeadlineExceeded {
+                budget: Duration::ZERO
+            }),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// The point of the flag: a cancel part way through a deepening solve must hand
+/// back the last depth that finished, exactly as a spent node budget does.
+///
+/// The trigger fires on the first leaf of pass 2, so pass 1 is complete and pass
+/// 2 is not. `BudgetExhausted` must not appear, because the returned answer is a
+/// complete depth-1 search rather than a part-static one.
+#[test]
+fn a_cancel_returns_the_last_complete_depth() {
+    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (pokemon_dex, move_dex) = dexes();
+    let state = quiet_position();
+
+    // The leaf cost of one complete depth-1 pass, under the same evaluator.
+    arm_probe(None, None);
+    let shallow = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 1,
+            eval: probe_eval,
+            ..base_config()
+        },
+    )
+    .expect("solvable");
+    let pass_one_leaves = PROBE_CALLS.load(AtomicOrdering::Relaxed);
+    assert!(pass_one_leaves > 0);
+
+    let flag = CancelFlag::new();
+    arm_probe(Some(&flag), Some(pass_one_leaves + 1));
+    let result = solve_seeded_cancellable(
+        1,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 3,
+            iterative_deepening: true,
+            eval: probe_eval,
+            ..base_config()
+        },
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+    arm_probe(None, None);
+
+    assert_valid_strategies(&result);
+    assert!(flag.is_cancelled());
+    assert_eq!(result.depth_reached, 1);
+    assert!(
+        (result.value - shallow.value).abs() < 1e-12,
+        "the cancel returned {}, depth 1 alone returns {}",
+        result.value,
+        shallow.value
+    );
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        result.warnings.contains(&SolveWarning::DepthNotReached {
+            target: 3,
+            reached: 1
+        }),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::BudgetExhausted { .. })),
+        "{:?}",
+        result.warnings
+    );
+}
+
+// ── Cancellation of the sampling searches ───────────────────────────────────
+
+/// A flag that nobody raises must leave each sampling search alone. A long
+/// analysis job runs these three, so an unwanted early stop would show up as a
+/// quietly worse strategy rather than as a failure.
+#[test]
+fn an_untouched_cancel_flag_leaves_each_sampling_search_alone() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    let state = contested_position();
+    let belief = belief_of_worlds(vec![certain_world(), world_with_opponent_speed(60)]);
+
+    let plain = mcts::search(4, &state, pokemon_dex, move_dex, &mcts_config()).expect("playable");
+    let watched = mcts::search_cancellable(
+        4,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &mcts_config(),
+        Some(&flag),
+    )
+    .expect("playable");
+    assert_eq!(watched.value, plain.value);
+    assert_eq!(watched.stats.iterations, plain.stats.iterations);
+    assert!(!watched.warnings.contains(&SolveWarning::Cancelled));
+
+    let config = ismcts_config(24, 2);
+    let plain = ismcts::search(6, &belief, pokemon_dex, move_dex, &config).expect("playable");
+    let watched =
+        ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("playable");
+    assert_eq!(watched.value, plain.value);
+    assert_eq!(watched.stats.iterations, plain.stats.iterations);
+    assert!(!watched.warnings.contains(&SolveWarning::Cancelled));
+
+    let config = mccfr_config(24, 2);
+    let plain = mccfr::search(6, &belief, pokemon_dex, move_dex, &config).expect("playable");
+    let watched =
+        mccfr::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("playable");
+    assert_eq!(watched.value, plain.value);
+    assert_eq!(watched.stats.iterations, plain.stats.iterations);
+    assert!(!watched.warnings.contains(&SolveWarning::Cancelled));
+    assert!(!flag.is_cancelled());
+}
+
+/// Checks one cancelled sampling answer.
+///
+/// The answer holds the mean and the strategy of the finished iterations, so
+/// each strategy must still be a distribution and the value must still be a
+/// probability.
+fn assert_cancelled_sampling_answer(
+    label: &str,
+    value: f64,
+    p1_strategy: &[JointActionProb],
+    p2_strategy: &[JointActionProb],
+    warnings: &[SolveWarning],
+) {
+    assert!(
+        (0.0..=1.0).contains(&value),
+        "{label} returned {value}, which is not a probability"
+    );
+    for (player, strategy) in [("P1", p1_strategy), ("P2", p2_strategy)] {
+        assert!(!strategy.is_empty(), "{label} {player} strategy is empty");
+        let total: f64 = strategy.iter().map(|action| action.probability).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "{label} {player} strategy sums to {total}"
+        );
+    }
+    assert!(
+        warnings.contains(&SolveWarning::Cancelled),
+        "{label} reported {warnings:?}"
+    );
+}
+
+/// A raised flag must stop each sampling search after a whole number of
+/// iterations, and the answer must cover exactly those iterations.
+///
+/// Each search asks for far more iterations than it runs, so the finished count
+/// proves that the loop stopped rather than ran to the end.
+#[test]
+fn a_cancelled_sampling_search_returns_its_finished_iterations() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+    let belief = belief_of_worlds(vec![certain_world(), world_with_opponent_speed(60)]);
+
+    let config = MctsConfig {
+        iterations: 5_000,
+        ..mcts_config()
+    };
+    let result = mcts::search_cancellable(
+        4,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+    assert_eq!(result.stats.iterations, 1);
+    assert_eq!(result.sampling.iterations, 1);
+    assert_cancelled_sampling_answer(
+        "mcts",
+        result.value,
+        &result.p1_strategy,
+        &result.p2_strategy,
+        &result.warnings,
+    );
+
+    let config = ismcts_config(5_000, 2);
+    let result = ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("a cancel returns an answer, never an error");
+    assert_eq!(result.stats.iterations, 1);
+    assert_eq!(result.sampling.iterations, 1);
+    assert_cancelled_sampling_answer(
+        "ismcts",
+        result.value,
+        &result.p1_strategy,
+        &result.p2_strategy,
+        &result.warnings,
+    );
+
+    let config = mccfr_config(5_000, 2);
+    let result = mccfr::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("a cancel returns an answer, never an error");
+    assert_eq!(result.stats.iterations, 2);
+    assert_cancelled_sampling_answer(
+        "mccfr",
+        result.value,
+        &result.p1_strategy,
+        &result.p2_strategy,
+        &result.warnings,
+    );
+}
+
+/// The point of the flag for a sampling search: a cancel that arrives after the
+/// search starts must stop the iteration loop part way.
+///
+/// A pre-set flag alone proves only the first check. The leaf evaluator raises
+/// the flag here, so the raise happens inside the loop. Each search asks for 400
+/// iterations and the trigger fires near iteration 40, so a finished count
+/// between the two ends is what proves the mid-run stop.
+#[test]
+fn a_cancel_during_a_sampling_search_stops_the_iteration_loop() {
+    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![certain_world(), world_with_opponent_speed(60)]);
+    let requested = 400;
+    let trigger = 40;
+
+    let flag = CancelFlag::new();
+    arm_probe(Some(&flag), Some(trigger));
+    let config = MctsConfig {
+        iterations: requested,
+        eval: probe_eval,
+        ..mcts_config()
+    };
+    let mcts = mcts::search_cancellable(
+        4,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    let flag = CancelFlag::new();
+    arm_probe(Some(&flag), Some(trigger));
+    let base = ismcts_config(requested, 2);
+    let config = IsmctsConfig {
+        search: MctsConfig {
+            eval: probe_eval,
+            ..base.search
+        },
+        ..base
+    };
+    let ismcts = ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("a cancel returns an answer, never an error");
+
+    let flag = CancelFlag::new();
+    arm_probe(Some(&flag), Some(trigger));
+    let base = mccfr_config(requested, 2);
+    let config = MccfrConfig {
+        search: MctsConfig {
+            eval: probe_eval,
+            ..base.search
+        },
+        ..base
+    };
+    let mccfr = mccfr::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("a cancel returns an answer, never an error");
+    arm_probe(None, None);
+
+    let answers = [
+        (
+            "mcts",
+            mcts.stats.iterations,
+            mcts.value,
+            mcts.p1_strategy,
+            mcts.p2_strategy,
+            mcts.warnings,
+        ),
+        (
+            "ismcts",
+            ismcts.stats.iterations,
+            ismcts.value,
+            ismcts.p1_strategy,
+            ismcts.p2_strategy,
+            ismcts.warnings,
+        ),
+        (
+            "mccfr",
+            mccfr.stats.iterations,
+            mccfr.value,
+            mccfr.p1_strategy,
+            mccfr.p2_strategy,
+            mccfr.warnings,
+        ),
+    ];
+    for (label, finished, value, p1, p2, warnings) in answers {
+        assert!(
+            finished > 1 && finished < u64::from(requested),
+            "{label} finished {finished} of {requested}"
+        );
+        assert_cancelled_sampling_answer(label, value, &p1, &p2, &warnings);
+    }
+}
+
+/// MCCFR alternates the traverser on the iteration index, and each player builds
+/// its average on the iterations that traverse for the other player. A cancel
+/// must therefore stop on a complete pair, so both averages read an equal number
+/// of traversals.
+#[test]
+fn a_cancelled_mccfr_search_stops_on_a_complete_alternation() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![certain_world(), world_with_opponent_speed(60)]);
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    for iterations in [1, 2, 3, 40, 5_000] {
+        let config = mccfr_config(iterations, 2);
+        let result =
+            mccfr::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+                .expect("a cancel returns an answer, never an error");
+
+        let finished = result.stats.iterations;
+        assert!(
+            finished <= u64::from(iterations),
+            "{iterations} requested, {finished} finished"
+        );
+        if finished < u64::from(iterations) {
+            assert_eq!(
+                finished % 2,
+                0,
+                "{iterations} requested, the cancel stopped at {finished}"
+            );
+            assert!(
+                result.warnings.contains(&SolveWarning::Cancelled),
+                "{:?}",
+                result.warnings
+            );
+        }
+    }
+}
+
+/// Both entry points of each sampling search share one loop, so the plain name
+/// must stay unwarned.
+#[test]
+fn a_plain_sampling_entry_point_never_reports_a_cancel() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![certain_world()]);
+
+    let mcts = mcts::search(2, &contested_position(), pokemon_dex, move_dex, &mcts_config())
+        .expect("playable");
+    let ismcts =
+        ismcts::search(2, &belief, pokemon_dex, move_dex, &ismcts_config(16, 1)).expect("playable");
+    let mccfr =
+        mccfr::search(2, &belief, pokemon_dex, move_dex, &mccfr_config(16, 1)).expect("playable");
+
+    for warnings in [&mcts.warnings, &ismcts.warnings, &mccfr.warnings] {
+        assert!(!warnings.contains(&SolveWarning::Cancelled), "{warnings:?}");
+    }
 }
