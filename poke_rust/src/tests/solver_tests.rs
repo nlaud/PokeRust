@@ -5756,3 +5756,174 @@ fn a_plain_sampling_entry_point_never_reports_a_cancel() {
         assert!(!warnings.contains(&SolveWarning::Cancelled), "{warnings:?}");
     }
 }
+
+/// A deadline must also stop a turn simulation that already runs.
+///
+/// One `simulate_turn` call is the largest unit of work in an exact solve. A
+/// Skill Link Cloyster resolves five Icicle Spear hits, and at 16 damage rolls
+/// with critical hits the call dwarfs the whole rest of the search. The check
+/// between two cells cannot help: the search reaches the check only after the
+/// call returns.
+///
+/// The position gives each side one legal move, so the root holds one matrix
+/// cell and the whole solve is that one turn. The test measures the same solve
+/// twice, once without a limit and once with a short one. A deadline that binds
+/// inside the simulation must return in a small fraction of the exact time.
+fn deadline_overrun_position() -> MatchState {
+    let mut cloyster = mon(Species::Cloyster, &[PokemonMove::IcicleSpear]);
+    cloyster.ability = Ability::SkillLink;
+    cloyster.original_ability = Some(Ability::SkillLink);
+    let mut snorlax = mon(Species::Snorlax, &[PokemonMove::Splash]);
+    snorlax.stats[0] = 1000;
+    snorlax.hp = 1000;
+    let mut battle = battle_state_from_lists(vec![cloyster], vec![], vec![snorlax], vec![]);
+    // Terastallization would add a second command to each side, and the root
+    // would hold four cells instead of one.
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+    MatchState::BattleState(battle)
+}
+
+/// The configuration that makes the single turn expensive.
+fn deadline_overrun_config() -> SolveConfig {
+    SolveConfig {
+        depth: 1,
+        damage_rolls: 16,
+        consider_crit: true,
+        chance: ChanceMode::Enumerate,
+        algorithm: SolverAlgorithm::BackwardInduction,
+        ..SolveConfig::default()
+    }
+}
+
+#[test]
+fn a_deadline_stops_a_turn_simulation_that_already_runs() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = deadline_overrun_position();
+
+    let started = std::time::Instant::now();
+    let exact = solve(&state, pokemon_dex, move_dex, &deadline_overrun_config())
+        .expect("the position is solvable");
+    let exact_elapsed = started.elapsed();
+    assert_eq!(
+        exact.stats.turns_simulated, 1,
+        "the position must hold exactly one matrix cell"
+    );
+
+    let budget = Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let limited = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            deadline: Some(budget),
+            ..deadline_overrun_config()
+        },
+    )
+    .expect("a deadlined solve still returns an answer");
+    let limited_elapsed = started.elapsed();
+
+    assert_valid_strategies(&limited);
+    assert!(
+        limited.warnings.contains(&SolveWarning::DeadlineExceeded { budget }),
+        "the deadlined solve did not report the limit: {:?}",
+        limited.warnings
+    );
+    assert_eq!(
+        limited.stats.turns_simulated, 1,
+        "the search must have started the turn before the abort"
+    );
+    assert!(
+        limited_elapsed * 3 < exact_elapsed,
+        "a deadline of {budget:?} must cut the cost of the exact solve; \
+         exact took {exact_elapsed:?}, the deadlined solve took {limited_elapsed:?}"
+    );
+}
+
+/// A cancel flag must reach the same place the deadline does. A flag that is
+/// already raised leaves the search no work at all, so this test raises it from
+/// another thread while the expensive turn resolves, and reads the abort by the
+/// time it saved.
+#[test]
+fn a_cancel_stops_a_turn_simulation_that_already_runs() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = deadline_overrun_position();
+
+    let started = std::time::Instant::now();
+    let exact = solve(&state, pokemon_dex, move_dex, &deadline_overrun_config())
+        .expect("the position is solvable");
+    let exact_elapsed = started.elapsed();
+    assert_eq!(exact.stats.turns_simulated, 1);
+
+    let flag = CancelFlag::new();
+    let raiser = flag.clone();
+    let started = std::time::Instant::now();
+    let watcher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        raiser.cancel();
+    });
+    let cancelled = solve_seeded_cancellable(
+        1,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &deadline_overrun_config(),
+        Some(&flag),
+    )
+    .expect("a cancelled solve still returns an answer");
+    let cancelled_elapsed = started.elapsed();
+    watcher.join().expect("the watcher thread finished");
+
+    assert_valid_strategies(&cancelled);
+    assert!(
+        cancelled.warnings.contains(&SolveWarning::Cancelled),
+        "the cancelled solve did not report the cancel: {:?}",
+        cancelled.warnings
+    );
+    assert!(
+        cancelled_elapsed * 3 < exact_elapsed,
+        "a cancel must cut the cost of the exact solve; exact took {exact_elapsed:?}, \
+         the cancelled solve took {cancelled_elapsed:?}"
+    );
+}
+
+/// The abort signal must not outlive its `simulate_turn` call. A solve that hit
+/// its deadline installs and drops one signal per cell, and a later solve on the
+/// same thread must be exact again.
+#[test]
+fn an_abort_does_not_leak_into_the_next_solve() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = deadline_overrun_position();
+
+    let limited = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            deadline: Some(Duration::from_millis(50)),
+            ..deadline_overrun_config()
+        },
+    )
+    .expect("a deadlined solve still returns an answer");
+    assert!(
+        limited
+            .warnings
+            .iter()
+            .any(|w| matches!(w, SolveWarning::DeadlineExceeded { .. })),
+        "the first solve was meant to hit its deadline: {:?}",
+        limited.warnings
+    );
+
+    let exact = solve(&state, pokemon_dex, move_dex, &deadline_overrun_config())
+        .expect("the position is solvable");
+    assert_eq!(
+        exact.stats.turns_simulated, 1,
+        "the second solve must resolve its cell"
+    );
+    assert!(
+        exact.warnings.is_empty(),
+        "a solve with no limit must warn about nothing: {:?}",
+        exact.warnings
+    );
+}

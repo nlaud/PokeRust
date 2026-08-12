@@ -20,6 +20,9 @@ use colored::Colorize;
 use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 pub mod generative;
 pub mod helpers;
 pub mod stratify;
@@ -35,6 +38,109 @@ thread_local! {
     /// `None` means that no caller asked for it, which is the normal case: a
     /// chokepoint then pays one `Option` check and records nothing.
     static CHOKEPOINT_LOG: RefCell<Option<ChokepointLog>> = const { RefCell::new(None) };
+
+    /// The stop request that the turn simulation of this thread obeys. `None`
+    /// means that no caller set a limit, which is the normal case: a branch loop
+    /// then pays one `Option` check and never reads the clock.
+    static ABORT_SIGNAL: RefCell<Option<AbortSignal>> = const { RefCell::new(None) };
+}
+
+/// A time limit and a cancel flag for the turn simulation that runs now.
+///
+/// The simulator reads this signal at the branch loops that multiply a set: the
+/// hits of a multi-hit move, the targets of a spread move, and the expansion of
+/// the action queue. A raised signal ends the expansion at once.
+///
+/// A stopped simulation can return a partial distribution. The final signal
+/// check can also reject a complete result that finished too late. The caller
+/// reads [`AbortGuard::aborted`] and discards the result when it returns `true`.
+struct AbortSignal {
+    /// The instant at which the simulation must stop. `None` sets no time limit.
+    deadline: Option<Instant>,
+    /// The cancel flag of the caller. `None` supplies no flag.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Set by the first check that reads a raised signal. The state latches, so
+    /// a later check returns the same answer without a second clock read.
+    aborted: bool,
+}
+
+impl AbortSignal {
+    /// Whether the simulation must stop now.
+    fn raised(&mut self) -> bool {
+        if self.aborted {
+            return true;
+        }
+        if let Some(cancel) = self.cancel.as_ref()
+            && cancel.load(AtomicOrdering::Relaxed)
+        {
+            self.aborted = true;
+            return true;
+        }
+        if let Some(deadline) = self.deadline
+            && Instant::now() >= deadline
+        {
+            self.aborted = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// Restores the previous abort signal when dropped, as [`SampleRngGuard`] does
+/// for the RNG.
+///
+/// One guard covers one `simulate_turn` call. A second guard inside the scope of
+/// the first one replaces the signal, and the outer limit then stops for the
+/// length of the inner scope. No caller nests them today.
+pub(crate) struct AbortGuard(Option<AbortSignal>);
+
+impl AbortGuard {
+    /// Whether the stop signal was raised before the caller accepted the result.
+    ///
+    /// Read this before the guard drops. This check also reads the signal once
+    /// after the simulation. Thus, it cannot miss a late stop request.
+    pub(crate) fn aborted(&self) -> bool {
+        abort_requested()
+    }
+}
+
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        ABORT_SIGNAL.with(|slot| {
+            *slot.borrow_mut() = self.0.take();
+        });
+    }
+}
+
+/// Stop the turn simulations of this thread after `limit`, or when `cancel` is
+/// raised, until the returned guard drops.
+///
+/// `limit` measures from this call. `None` for both arguments installs a signal
+/// that never raises, so a caller with neither limit should install no guard.
+pub(crate) fn scoped_abort_signal(
+    limit: Option<Duration>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> AbortGuard {
+    let now = Instant::now();
+    let signal = AbortSignal {
+        // An unsupported instant is later than every instant that this process
+        // can reach. Treat it as no time limit instead of panicking.
+        deadline: limit.and_then(|limit| now.checked_add(limit)),
+        cancel,
+        aborted: false,
+    };
+    let previous = ABORT_SIGNAL.with(|slot| slot.borrow_mut().replace(signal));
+    AbortGuard(previous)
+}
+
+/// Whether the caller of this turn simulation asked it to stop.
+///
+/// `false` when no caller installed a signal, which is the normal case.
+pub(crate) fn abort_requested() -> bool {
+    ABORT_SIGNAL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.as_mut().is_some_and(AbortSignal::raised)
+    })
 }
 
 /// The logarithms that one sampled turn accumulates at its branch chokepoints.
@@ -1940,6 +2046,13 @@ fn resolve_multihit_move_for_target(
             vec![(state.clone(), hit_probability, None, 0, false)];
 
         for hit_index in 0..hit_count {
+            // The caller set a deadline or raised its cancel flag. Stop the
+            // expansion here and leave the sequence at the hits that finished.
+            // `resolve_move_action` reads the same signal, and the caller of
+            // `simulate_turn` discards the partial result.
+            if abort_requested() {
+                break;
+            }
             let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> =
                 Vec::new();
 
@@ -2140,7 +2253,12 @@ fn resolve_multihit_move_for_target(
                     |b, total_weight| b.1 = total_weight,
                 )
             } else {
-                next_sequence_branches
+                // Exact mode: merge the equal branches of this hit before the
+                // next hit multiplies the set again. Without it the set grows as
+                // (rolls × crit) to the power of the hit count for a result set
+                // that stays small. The merge adds the probabilities of equal
+                // branches, so the final distribution does not change.
+                simulator_helpers::coalesce_multihit_branches(next_sequence_branches)
             };
         }
 
@@ -8439,6 +8557,12 @@ fn possible_damage_outcomes_for_move(
         .collect();
 
     for (target_slot, target_outcomes) in &per_target_outcomes {
+        // The caller set a deadline or raised its cancel flag. Stop the product
+        // here and leave the targets that finished. The caller of `simulate_turn`
+        // discards the partial result.
+        if abort_requested() {
+            break;
+        }
         let mut new_all_outcomes = Vec::new();
 
         for (existing_state, existing_prob) in all_outcomes {
@@ -8672,7 +8796,11 @@ fn possible_damage_outcomes_for_move(
                 simulator_helpers::sample_one_branch(new_all_outcomes)
             }
         } else {
-            new_all_outcomes
+            // Exact mode: merge the equal branches of this target before the
+            // next target multiplies the set again, as the hit loop does. The
+            // merge adds the probabilities of equal branches, so the final
+            // distribution does not change.
+            simulator_helpers::coalesce_target_branches(new_all_outcomes)
         };
     }
 
@@ -11539,6 +11667,13 @@ fn simulate_turn_impl(
         let MatchState::BattleState(battle) = state else {
             return vec![(state.clone(), 1.0)];
         };
+
+        // The caller set a deadline or raised its cancel flag. Return the state
+        // with its action queue intact and expand no further. The caller of
+        // `simulate_turn` discards the partial result.
+        if abort_requested() {
+            return vec![(state.clone(), 1.0)];
+        }
 
         // A self-switch move resolved and the player must choose a replacement.
         // Return the state as-is to the caller; action_queue is preserved so the

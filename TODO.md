@@ -114,6 +114,18 @@ submits a battle command. A timeout or a failed job uses the uniform draw.
 `P2RevealPanel` shows the wait line during the search, and the drawn command
 after the turn resolves.
 
+- [ ] "The search needs both leads on the field. Record a 'leads' line first." Searching should work for team preview as well...
+  - [ ] The solver UX is quite poor. I should not have to scroll down to see other options or dropdowns, it should just resize and take up more room.
+  - [ ] Searcher should show more fine grained progress like an approximate percent to the next depth or something.
+  - [ ] In simulate mode, if the solver is not done it should wait, with the ability for player one to go back and switch their own move with a loading screen until the solving is done. None of "The search had no answer for this position, so Player 2 picked one legal command at random."
+- [ ] Searching in tracker mode should be from player 1's perspective. This means that leads should have the back pokemon for player 1 and that information should be used for the tracking. 
+
+`simulator::scoped_abort_signal` carries the deadline and the cancel flag into one
+turn simulation. The hit loop, the target loop, and the action queue read it. The
+hit loop and the target loop also merge their equal branches after each step, so
+an exact five-hit move keeps a small branch set. `search::resolve` installs the
+signal, and a cell whose simulation stops takes a static score.
+
 `tracker_analysis.rs` runs the same profile for a tracker session. It draws one
 world from the belief, then runs one search for each depth from one through the
 configured depth. Each depth publishes a complete answer, so the panel moves

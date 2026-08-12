@@ -54881,3 +54881,407 @@ mod hospitality_event_visibility {
         );
     }
 }
+
+// Exact enumeration multiplies the branch set at every hit of a multi-hit move,
+// and at every target of a spread move. Neither loop merged equal branches while
+// it ran, so Cloyster's five-hit Icicle Spear built 32^5 intermediate branches
+// for the 232 results that survive. Sixteen damage rolls asked for more than
+// 15 GB, and the process died. Each loop now merges after its step.
+//
+// A merge inside an action must compare the `BattleState` fields that equality
+// leaves out. The rest of the same action still reads them:
+// `apply_post_damage_move_effects` turns `gross_damage_dealt` into the Shell Bell
+// heal, the drain heal, and the recoil. These tests hold the branch counts, the
+// distribution, those three amounts, and the cost.
+mod midaction_branch_merging {
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::simulator::simulate_turn;
+    use crate::state::battle::{
+        AttackCommand, BattleCommand, BattleState, MatchState, Player, PlayerCommand,
+    };
+    use crate::state::pokemon::{Nature, PokemonState, build_pokemon_state};
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    fn mon(
+        species: Species,
+        moves: [Option<PokemonMove>; 4],
+        ability: Option<Ability>,
+        item: Option<Item>,
+    ) -> PokemonState {
+        build_pokemon_state(
+            species,
+            pokemon_dex(),
+            move_dex(),
+            None,
+            Some(moves),
+            None,
+            ability,
+            Some(Nature::Hardy),
+            item,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            true,
+        )
+    }
+
+    /// A Snorlax that survives every roll of the whole move. All five hits then
+    /// stay in the tree, and the damage that a branch dealt equals the HP that
+    /// the target lost.
+    fn bulky_target() -> PokemonState {
+        let mut snorlax = mon(
+            Species::Snorlax,
+            [Some(PokemonMove::Splash), None, None, None],
+            Some(Ability::Immunity),
+            None,
+        );
+        snorlax.stats[0] = 1000;
+        snorlax.hp = 1000;
+        snorlax
+    }
+
+    /// A Fire-type wall of the same bulk. Matcha Gotcha carries a 20% burn, and
+    /// a burn takes end-of-turn damage that the drain test would read as move
+    /// damage. A Fire-type cannot be burned, so the HP that a target lost is the
+    /// damage that the move dealt.
+    fn fireproof_target() -> PokemonState {
+        let mut torkoal = mon(
+            Species::Torkoal,
+            [Some(PokemonMove::Splash), None, None, None],
+            Some(Ability::Immunity),
+            None,
+        );
+        torkoal.stats[0] = 1000;
+        torkoal.hp = 1000;
+        torkoal
+    }
+
+    /// Cloyster with Skill Link always lands five Icicle Spear hits, so the hit
+    /// count adds no branch of its own. A raised maximum HP keeps every heal and
+    /// every recoil away from its clamp.
+    fn icicle_spear_attacker(item: Option<Item>) -> PokemonState {
+        let mut cloyster = mon(
+            Species::Cloyster,
+            [Some(PokemonMove::IcicleSpear), None, None, None],
+            Some(Ability::SkillLink),
+            item,
+        );
+        cloyster.stats[0] = 2000;
+        cloyster.hp = 1000;
+        cloyster
+    }
+
+    fn icicle_spear_position(item: Option<Item>) -> BattleState {
+        battle_state_from_lists(
+            vec![icicle_spear_attacker(item)],
+            vec![],
+            vec![bulky_target()],
+            vec![],
+        )
+    }
+
+    fn attack_first_slot() -> Vec<BattleCommand> {
+        vec![BattleCommand::Attack(AttackCommand {
+            move_slot: 0,
+            target: None,
+            terastallize: false,
+            mega_evolve: false,
+        })]
+    }
+
+    fn resolve(state: &BattleState, rolls: u8) -> Vec<(MatchState, f64)> {
+        simulate_turn(
+            &MatchState::BattleState(state.clone()),
+            &PlayerCommand::Battle(attack_first_slot()),
+            &PlayerCommand::Battle(attack_first_slot()),
+            move_dex(),
+            pokemon_dex(),
+            true,
+            rolls,
+            None,
+        )
+        .into_iter()
+        .map(|(st, _events, probability)| (st, probability))
+        .collect()
+    }
+
+    fn battle_of(state: &MatchState) -> &BattleState {
+        match state {
+            MatchState::BattleState(bs) => bs,
+            MatchState::GameOverState { final_state, .. } => final_state,
+            MatchState::TeamPreviewState(_) => panic!("unexpected team preview state"),
+        }
+    }
+
+    fn attacker_hp(state: &MatchState) -> u16 {
+        battle_of(state).p1_active_mons[0].hp
+    }
+
+    fn foe_hp(state: &MatchState, slot: usize) -> u16 {
+        battle_of(state).p2_active_mons[slot].hp
+    }
+
+    fn probability_total<T>(outcomes: &[(T, f64)]) -> f64 {
+        outcomes.iter().map(|(_, probability)| probability).sum()
+    }
+
+    /// The branch counts of the engine before the merge, measured on this exact
+    /// position. The merge must reproduce each one, because it only adds the
+    /// probabilities of branches that were already equal.
+    #[test]
+    fn multihit_branch_counts_are_unchanged() {
+        let state = icicle_spear_position(None);
+        for (rolls, expected) in [(2u8, 36usize), (4, 81), (8, 84), (16, 84)] {
+            let outcomes = resolve(&state, rolls);
+            assert_eq!(
+                outcomes.len(),
+                expected,
+                "{rolls} damage rolls must give {expected} branches"
+            );
+            let total = probability_total(&outcomes);
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "the branch probabilities must sum to one at {rolls} rolls, got {total}"
+            );
+        }
+    }
+
+    /// Sixteen damage rolls killed the process before the merge. The bound is
+    /// generous on purpose: a debug build is about ten times slower than a
+    /// release build, and the whole suite runs in parallel. Ten seconds is far
+    /// above the measured cost, and the old tree could not finish at any bound.
+    #[test]
+    fn multihit_at_sixteen_rolls_is_cheap() {
+        let state = icicle_spear_position(None);
+        let started = Instant::now();
+        let outcomes = resolve(&state, 16);
+        let elapsed = started.elapsed();
+        assert_eq!(outcomes.len(), 84);
+        let total = probability_total(&outcomes);
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "the branch probabilities must sum to one, got {total}"
+        );
+        for (_, probability) in &outcomes {
+            assert!(*probability > 0.0, "a merged branch must keep a weight");
+        }
+        assert!(
+            elapsed.as_secs_f64() < 10.0,
+            "five hits at 16 rolls must resolve in under ten seconds, took {elapsed:?}"
+        );
+    }
+
+    /// Every damage total that the coarse roll set reaches must also appear in
+    /// the fine roll set. A merge that joined two different damage totals would
+    /// lose one of them.
+    #[test]
+    fn multihit_damage_totals_survive_a_finer_roll_set() {
+        let state = icicle_spear_position(None);
+        let losses = |rolls: u8| -> HashMap<u16, f64> {
+            let mut totals: HashMap<u16, f64> = HashMap::new();
+            for (branch, probability) in resolve(&state, rolls) {
+                *totals.entry(1000 - foe_hp(&branch, 0)).or_insert(0.0) += probability;
+            }
+            totals
+        };
+        let coarse = losses(8);
+        let fine = losses(16);
+        assert!(coarse.len() > 1, "the position must produce several totals");
+        for damage in coarse.keys() {
+            assert!(
+                fine.contains_key(damage),
+                "the 16-roll set must also reach {damage} damage"
+            );
+        }
+    }
+
+    /// Shell Bell heals one eighth of `gross_damage_dealt`, and that field
+    /// accumulates over all five hits. It is one of the fields that
+    /// `BattleState` equality leaves out, so a merge key without it would let
+    /// two branches with different damage totals merge, and the survivor would
+    /// pay one branch's heal for both.
+    #[test]
+    fn shell_bell_heals_the_damage_of_each_multihit_branch() {
+        let state = icicle_spear_position(Some(Item::ShellBell));
+        let start_hp = state.p1_active_mons[0].hp;
+        let outcomes = resolve(&state, 8);
+        assert!(!outcomes.is_empty());
+        let mut healed_any = false;
+        for (branch, _) in &outcomes {
+            let dealt = 1000 - foe_hp(branch, 0);
+            let healed = attacker_hp(branch) - start_hp;
+            assert_eq!(
+                healed,
+                dealt / 8,
+                "a branch that dealt {dealt} damage must heal {} HP, healed {healed}",
+                dealt / 8
+            );
+            healed_any |= healed > 0;
+        }
+        assert!(healed_any, "the position must heal on at least one branch");
+    }
+
+    /// Life Orb recoil is one tenth of the maximum HP whenever the move dealt
+    /// damage. It reads the same accumulated total to decide that it applies at
+    /// all, once per action rather than once per hit.
+    #[test]
+    fn life_orb_charges_one_recoil_for_five_hits() {
+        let state = icicle_spear_position(Some(Item::LifeOrb));
+        let full_hp = state.p1_active_mons[0].stats[0];
+        let start_hp = state.p1_active_mons[0].hp;
+        let recoil = (full_hp / 10).max(1);
+        let outcomes = resolve(&state, 8);
+        assert!(!outcomes.is_empty());
+        for (branch, _) in &outcomes {
+            assert!(
+                foe_hp(branch, 0) < 1000,
+                "every branch of a Skill Link Icicle Spear must land"
+            );
+            assert_eq!(
+                attacker_hp(branch),
+                start_hp - recoil,
+                "Life Orb must charge exactly one recoil for the whole move"
+            );
+        }
+    }
+
+    /// A spread move merges between its two targets. Matcha Gotcha drains half
+    /// of the damage it dealt to both foes together, so the heal reads a
+    /// `gross_damage_dealt` that the target loop accumulated across the merge.
+    #[test]
+    fn drain_heals_the_damage_of_each_spread_branch() {
+        let mut ogerpon = mon(
+            Species::Ogerpon,
+            [Some(PokemonMove::MatchaGotcha), None, None, None],
+            Some(Ability::Defiant),
+            None,
+        );
+        ogerpon.stats[0] = 2000;
+        ogerpon.hp = 1000;
+        let start_hp = ogerpon.hp;
+        let ally = bulky_target();
+        let first = fireproof_target();
+        let mut second = fireproof_target();
+        second.mon_id = first.mon_id + 1;
+        let state =
+            battle_state_from_lists(vec![ogerpon, ally], vec![], vec![first, second], vec![]);
+
+        let spread = PlayerCommand::Battle(vec![
+            BattleCommand::Attack(AttackCommand {
+                move_slot: 0,
+                target: None,
+                terastallize: false,
+                mega_evolve: false,
+            }),
+            BattleCommand::Pass,
+        ]);
+        let idle = PlayerCommand::Battle(vec![BattleCommand::Pass, BattleCommand::Pass]);
+
+        let started = Instant::now();
+        let outcomes: Vec<(MatchState, f64)> = simulate_turn(
+            &MatchState::BattleState(state),
+            &spread,
+            &idle,
+            move_dex(),
+            pokemon_dex(),
+            true,
+            16,
+            None,
+        )
+        .into_iter()
+        .map(|(st, _events, probability)| (st, probability))
+        .collect();
+        let elapsed = started.elapsed();
+
+        assert!(!outcomes.is_empty());
+        let total = probability_total(&outcomes);
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "the branch probabilities must sum to one, got {total}"
+        );
+        let mut drained_any = false;
+        for (branch, _) in &outcomes {
+            let dealt = (1000 - foe_hp(branch, 0)) as u32 + (1000 - foe_hp(branch, 1)) as u32;
+            let healed = (attacker_hp(branch) - start_hp) as u32;
+            assert_eq!(
+                healed,
+                dealt / 2,
+                "a branch that dealt {dealt} damage over two targets must drain {} HP, drained {healed}",
+                dealt / 2
+            );
+            drained_any |= healed > 0;
+        }
+        assert!(drained_any, "the position must drain on at least one branch");
+        assert!(
+            elapsed.as_secs_f64() < 20.0,
+            "a two-target spread move at 16 rolls must resolve in under twenty seconds, took {elapsed:?}"
+        );
+    }
+
+    /// The merge must not join two branches that an observer can tell apart.
+    /// `BattleState` equality compares `pending_events` when an observer is set,
+    /// so the observed run keeps at least the branches of the plain run.
+    #[test]
+    fn an_observer_keeps_its_event_histories_apart() {
+        let state = icicle_spear_position(None);
+        let plain = resolve(&state, 2).len();
+        let observed = simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(attack_first_slot()),
+            &PlayerCommand::Battle(attack_first_slot()),
+            move_dex(),
+            pokemon_dex(),
+            true,
+            2,
+            Some(Player::P1),
+        );
+        assert!(
+            observed.len() >= plain,
+            "an observed run must keep at least the {plain} branches of the plain run, got {}",
+            observed.len()
+        );
+        let total: f64 = observed.iter().map(|(_, _, probability)| probability).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "the observed branch probabilities must sum to one, got {total}"
+        );
+    }
+}
+
+mod simulator_abort_signal {
+    use crate::simulator::scoped_abort_signal;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// The simulation can finish after its last branch-loop check. The guard
+    /// must read the deadline when the caller checks the completed simulation.
+    #[test]
+    fn the_guard_detects_a_deadline_without_an_earlier_checkpoint() {
+        let guard = scoped_abort_signal(Some(Duration::ZERO), None);
+        assert!(guard.aborted());
+    }
+
+    /// A cancel request can also arrive after the last branch-loop check. The
+    /// final guard check must read the shared flag before it accepts the result.
+    #[test]
+    fn the_guard_detects_a_late_cancel_without_an_earlier_checkpoint() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let guard = scoped_abort_signal(None, Some(Arc::clone(&cancel)));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(guard.aborted());
+    }
+
+    /// `SolveConfig` accepts any `Duration`. A duration beyond the range of
+    /// `Instant` represents an unreachable deadline and must not cause a panic.
+    #[test]
+    fn an_unreachable_deadline_does_not_overflow_instant() {
+        let guard = scoped_abort_signal(Some(Duration::MAX), None);
+        assert!(!guard.aborted());
+    }
+}

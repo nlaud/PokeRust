@@ -139,6 +139,13 @@
 //! The flag is a separate argument, not a [`SolveConfig`] field.
 //! `SolveConfig` is `Copy`, and an `Arc` field would remove that.
 //!
+//! The exact search also carries the flag and the deadline into the simulator.
+//! One turn simulation is the largest unit of work in a solve, so a stop between
+//! two units is not enough on its own.
+//! `search::resolve` installs a simulator abort signal for each turn, and a cell
+//! whose simulation aborts takes a static score.
+//! Read the `search` module documentation for the rule.
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.
@@ -253,6 +260,15 @@ impl CancelFlag {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// The shared cell of this flag.
+    ///
+    /// `search::resolve` hands this cell to the simulator, which stops one turn
+    /// simulation on a raised flag. The simulator takes the cell rather than this
+    /// type, so it needs no name from the solver.
+    pub(crate) fn shared(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
 }
 
 /// Whether an optional flag is set.
@@ -307,7 +323,9 @@ pub struct SolveConfig {
     /// Wall-clock limit from the start of the solve.
     /// Static evaluation replaces later search, as for a spent node budget.
     /// The solver does not start a new turn simulation after the limit expires.
-    /// A turn simulation that is already active can finish after the limit.
+    /// The limit also stops a turn simulation that is already active: the
+    /// simulator reads an abort signal at each branch loop, and the cell of an
+    /// aborted simulation takes a static score.
     /// `None` keeps the solve exact.
     pub deadline: Option<Duration>,
     /// Transposition-table capacity.

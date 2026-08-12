@@ -4,7 +4,7 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::information::{CantReason, EventKind, InformationEvent};
 use crate::information::unknowns::PokemonHP;
-use crate::state::battle::{Action, BattleState, DoubleKo, FieldSlot, Player};
+use crate::state::battle::{Action, BattleState, DoubleKo, FieldSlot, MatchState, Player};
 use crate::state::dex_data::VolatileStatus;
 use crate::state::dex_data::{
     AccuracyType, DamageOverride, HitEffect, MoveCategory, MoveData, MoveFlag, MoveTarget,
@@ -341,6 +341,140 @@ where
             .then_with(|| a.0.cmp(&b.0))
     });
     merged.into_iter().map(|(_, branch)| branch).collect()
+}
+
+/// The `BattleState` fields that equality and hashing leave out.
+///
+/// A merge at the end of an action is safe without them, because the turn resets
+/// or consumes each one before the next action starts. A merge *inside* an
+/// action is not: the rest of the same action still reads these fields. Life Orb
+/// recoil, drain, Shell Bell, and the recoil moves read `gross_damage_dealt` and
+/// `sub_damage_dealt`. Copycat reads `last_move_on_field`. A second Round reads
+/// `round_used_this_turn`. The `MoveUsed` wrapper reads `move_was_prevented`, and
+/// the game-over check reads `double_ko`.
+///
+/// `event_observer` is here for the same reason, and for one more: it decides
+/// whether `BattleState` equality compares `pending_events` at all. Every branch
+/// of one `simulate_turn` call carries the same observer, so this field never
+/// separates two branches in practice. It costs one `Option` comparison to stop
+/// a future caller from breaking that rule silently.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MidActionFields {
+    gross_damage_dealt: u32,
+    sub_damage_dealt: u32,
+    round_used_this_turn: bool,
+    move_was_prevented: bool,
+    last_move_on_field: Option<PokemonMove>,
+    double_ko: Option<DoubleKo>,
+    event_observer: Option<Player>,
+}
+
+impl MidActionFields {
+    fn of(bs: &BattleState) -> Self {
+        MidActionFields {
+            gross_damage_dealt: bs.gross_damage_dealt,
+            sub_damage_dealt: bs.sub_damage_dealt,
+            round_used_this_turn: bs.round_used_this_turn,
+            move_was_prevented: bs.move_was_prevented,
+            last_move_on_field: bs.last_move_on_field.clone(),
+            double_ko: bs.double_ko,
+            event_observer: bs.event_observer,
+        }
+    }
+}
+
+/// The merge key of one branch of a multi-hit sequence.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MultihitKey {
+    state: BattleState,
+    carried: MidActionFields,
+    shared_roll: Option<u8>,
+    hits_landed: u32,
+    stopped: bool,
+}
+
+/// The merge key of one branch between two targets of a spread move.
+///
+/// `carried` is `None` for a state that is not a `BattleState`. Such a state has
+/// no field to carry, and the loop passes it through.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TargetKey {
+    state: MatchState,
+    carried: Option<MidActionFields>,
+}
+
+/// Merge equal branches between two hits of a multi-hit move.
+///
+/// Exact enumeration multiplies the branch set at every hit, and the hits of one
+/// move reach the same states again and again. Five hits at 16 damage rolls build
+/// 32 to the power of 5 intermediate branches for the 232 results that survive.
+/// This merge holds the set at its true size after each hit.
+///
+/// The key holds the state, the fields of [`MidActionFields`], and the three
+/// loop values that the caller reads after the last hit: the shared damage roll,
+/// the count of landed hits, and the flag that ends the sequence. Two branches
+/// that agree on all of them produce the same result for every later step, so the
+/// sum of their probabilities is exact.
+pub(crate) fn coalesce_multihit_branches(
+    branches: Vec<(BattleState, f64, Option<u8>, u32, bool)>,
+) -> Vec<(BattleState, f64, Option<u8>, u32, bool)> {
+    if branches.len() < 2 {
+        return branches;
+    }
+    let keyed: Vec<(MultihitKey, f64)> = branches
+        .into_iter()
+        .map(|(state, probability, shared_roll, hits_landed, stopped)| {
+            (
+                MultihitKey {
+                    carried: MidActionFields::of(&state),
+                    state,
+                    shared_roll,
+                    hits_landed,
+                    stopped,
+                },
+                probability,
+            )
+        })
+        .collect();
+    coalesce_branches(keyed)
+        .into_iter()
+        .map(|(key, probability)| {
+            (
+                key.state,
+                probability,
+                key.shared_roll,
+                key.hits_landed,
+                key.stopped,
+            )
+        })
+        .collect()
+}
+
+/// Merge equal branches between two targets of a spread move.
+///
+/// The cartesian product over the targets multiplies the branch set exactly as
+/// the hit loop does. The key rule of [`coalesce_multihit_branches`] applies here
+/// too, without the three loop values, which this loop does not carry.
+pub(crate) fn coalesce_target_branches(
+    branches: Vec<(MatchState, f64)>,
+) -> Vec<(MatchState, f64)> {
+    if branches.len() < 2 {
+        return branches;
+    }
+    let keyed: Vec<(TargetKey, f64)> = branches
+        .into_iter()
+        .map(|(state, probability)| {
+            let carried = match &state {
+                MatchState::BattleState(bs) => Some(MidActionFields::of(bs)),
+                _ => None,
+            };
+            (TargetKey { state, carried }, probability)
+        })
+        .collect();
+    coalesce_branches(keyed)
+        .into_iter()
+        .map(|(key, probability)| (key.state, probability))
+        .collect()
 }
 
 /// Sample mode: keep exactly one branch, chosen proportionally to `weight`, and

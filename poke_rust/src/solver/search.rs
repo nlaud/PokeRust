@@ -45,15 +45,32 @@
 //! next check point, it scores the rest of the tree statically, and it returns
 //! the last complete deepening pass.
 //!
-//! The search reads the flag at three places:
+//! The search reads the flag at four places:
 //!
 //! 1. Each node, through [`SearchContext::should_stop`].
 //! 2. Each matrix cell, before the cell resolves a turn.
 //! 3. Each chance successor, before the search descends into it.
+//! 4. Inside one turn simulation, through the simulator abort signal.
 //!
 //! A point that the cancel reached takes a static score. Every chance node
 //! therefore keeps a complete weighted average over its successors, because each
 //! successor keeps its own probability and its own value.
+//!
+//! # Stopping inside one turn simulation
+//!
+//! Places 1 through 3 stop the search between two units of work. They cannot stop
+//! a turn simulation that already runs, and one exact turn of a multi-hit or
+//! spread move can be the largest unit in the whole solve.
+//!
+//! [`SearchContext::resolve`] therefore installs a simulator abort signal around
+//! each `simulate_turn` call. It carries the time that remains before the
+//! deadline and the cancel flag of the caller. The simulator reads the signal at
+//! the branch loops that multiply a set, and a raised signal ends the expansion.
+//!
+//! A stopped simulation can return a partial branch set. The final signal check
+//! can also reject a complete result that finished too late. `resolve` discards
+//! the result in both cases. The cell then takes a static score, and the result
+//! never enters the turn cache.
 //!
 //! # Midturn decisions
 //!
@@ -70,7 +87,7 @@ use std::time::Instant;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::simulator::simulate_turn;
+use crate::simulator::{AbortGuard, scoped_abort_signal, simulate_turn};
 use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
@@ -646,7 +663,13 @@ impl<'a> SearchContext<'a> {
             let battle = as_battle(state).expect("cell_value requires a battle position");
             return self.score(battle);
         }
-        let branches = self.resolve(state, p1_commands, p2_commands);
+        let Some(branches) = self.resolve(state, p1_commands, p2_commands) else {
+            // The turn simulation stopped part way, so its branch set is not a
+            // distribution. Score the position as a stop between two cells does.
+            self.latch_abort_reason();
+            let battle = as_battle(state).expect("cell_value requires a battle position");
+            return self.score(battle);
+        };
 
         let mut expected = 0.0;
         // Consumed rather than borrowed, so each successor's own subtree is
@@ -779,7 +802,13 @@ impl<'a> SearchContext<'a> {
             let battle = as_battle(state).expect("serial_cell requires a battle position");
             return self.score(battle);
         }
-        let branches = self.resolve(state, p1_commands, p2_commands);
+        let Some(branches) = self.resolve(state, p1_commands, p2_commands) else {
+            // The turn simulation stopped part way, so its branch set is not a
+            // distribution. Score the position as a stop between two cells does.
+            self.latch_abort_reason();
+            let battle = as_battle(state).expect("serial_cell requires a battle position");
+            return self.score(battle);
+        };
 
         let mut accumulated = 0.0;
         let mut remaining = 1.0;
@@ -838,12 +867,16 @@ impl<'a> SearchContext<'a> {
     /// expansion point in a way the search cannot see or account for, whereas
     /// `ChanceMode` reduces the final distribution explicitly and reports what
     /// it dropped.
+    ///
+    /// `None` means that the deadline expired, or that a caller cancelled, before
+    /// the caller accepted the result. The branch set can be partial or complete.
+    /// The caller must discard it and score the position statically.
     fn resolve(
         &mut self,
         state: &MatchState,
         p1_commands: &[BattleCommand],
         p2_commands: &[BattleCommand],
-    ) -> Vec<(MatchState, f64)> {
+    ) -> Option<Vec<(MatchState, f64)>> {
         let cache_key = self.turn_cache.enabled().then(|| {
             (
                 hash_state(state),
@@ -854,11 +887,23 @@ impl<'a> SearchContext<'a> {
 
         if let Some(hit) = cache_key.and_then(|key| self.turn_cache.get(&key)) {
             self.stats.turn_cache_hits += 1;
-            return hit;
+            return Some(hit);
         }
 
         self.stats.turns_simulated += 1;
-        let mut raw: Vec<(MatchState, f64)> = simulate_turn(
+        // The simulator stops the expansion of one turn at the same two limits
+        // the search itself obeys. Without this the search can only stop between
+        // two cells, and one exact turn of a multi-hit or spread move can run far
+        // past the deadline.
+        let remaining = self
+            .cfg
+            .deadline
+            .map(|deadline| deadline.saturating_sub(self.started.elapsed()));
+        let cancel = self.cancel.map(CancelFlag::shared);
+        let abort = (remaining.is_some() || cancel.is_some())
+            .then(|| scoped_abort_signal(remaining, cancel));
+
+        let simulated = simulate_turn(
             state,
             &PlayerCommand::Battle(p1_commands.to_vec()),
             &PlayerCommand::Battle(p2_commands.to_vec()),
@@ -870,10 +915,22 @@ impl<'a> SearchContext<'a> {
             // with identical states but different event histories from being
             // kept apart, which would inflate the branching factor for nothing.
             None,
-        )
-        .into_iter()
-        .map(|(child, _events, probability)| (child, probability))
-        .collect();
+        );
+
+        // Read the guard before it drops, and drop it before the return so the
+        // next turn simulation installs its own signal.
+        let aborted = abort.as_ref().is_some_and(AbortGuard::aborted);
+        drop(abort);
+        if aborted {
+            // A stopped result never enters the turn cache. A later cell with the
+            // same key must simulate the turn again.
+            return None;
+        }
+
+        let mut raw: Vec<(MatchState, f64)> = simulated
+            .into_iter()
+            .map(|(child, _events, probability)| (child, probability))
+            .collect();
 
         // `simulate_turn` sorts its branches by descending probability, but it
         // builds them by draining a `HashMap` first, so successors that *tie* on
@@ -907,7 +964,17 @@ impl<'a> SearchContext<'a> {
         if let Some(key) = cache_key {
             self.turn_cache.insert(key, &kept);
         }
-        kept
+        Some(kept)
+    }
+
+    /// Latch the reason that a turn simulation aborted, so the answer carries the
+    /// matching warning.
+    ///
+    /// The abort raises on the same two conditions the search reads between two
+    /// cells, so one read of each condition names it.
+    fn latch_abort_reason(&mut self) {
+        self.deadline_expired();
+        self.cancel_requested();
     }
 
     /// The depth and forced-chain counter a successor should be searched at.

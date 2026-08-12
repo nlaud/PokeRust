@@ -54,14 +54,14 @@ const PRESET_OPTIONS: { value: BotPreset; label: string; hint: string }[] = [
 /** The algorithms that enumerate every damage roll of every turn. */
 const EXACT_ALGORITHMS: BotAlgorithm[] = ['doubleOracle', 'serializedBounds', 'backwardInduction']
 
-/** Warns that an exact search can run far past its time limit.
+/** Warns that an exact search costs much more than a sampled search.
  *
- * The solver stops before it starts another turn simulation, but a simulation
- * that already runs still finishes. One multi-hit move at 16 damage rolls
- * branches millions of ways, and that one turn can take minutes. A sampling
- * algorithm draws one outcome, so it does not have this cost. */
+ * The solver enumerates every damage roll of every turn, so one turn of a
+ * multi-hit or spread move holds many branches. The time limit now stops a turn
+ * simulation that already runs, and the search scores that position statically.
+ * A sampling algorithm draws one outcome, so it does not have this cost. */
 const EXACT_TIME_NOTE =
-  'An exact algorithm enumerates every damage roll. One multi-hit move, such as Scale Shot, can make one turn take minutes, and the time limit cannot stop a turn that already runs.'
+  'An exact algorithm enumerates every damage roll, so it reaches a smaller depth in the same time. The time limit stops a turn that already runs, and the search scores that position from its evaluator.'
 
 /** How often the panel reads the newest rung while a search runs. */
 const POLL_MS = 1000
