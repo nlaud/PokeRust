@@ -245,11 +245,18 @@ The belief is the tracker state.
 `tracker_parse.rs` defines the text grammar.
 `tracker_effects.rs` adds deterministic effects.
 `tracker_render.rs` converts events back to tracker text.
+`tracker_analysis.rs` runs the solver panel.
 
 The server applies complete turns to a scratch belief first.
 It commits the result only when every turn succeeds.
 
-Tracker sessions never call legal-command or turn-simulation functions.
+A tracker turn never calls a legal-command or turn-simulation function.
+The text grammar supplies every event.
+
+The solver panel is the one exception.
+`tracker_analysis.rs` draws one world from the belief and searches it.
+That search calls the simulator through the solver.
+It never resolves a tracker turn, and it never changes the belief.
 
 ## Benchmark endpoint
 

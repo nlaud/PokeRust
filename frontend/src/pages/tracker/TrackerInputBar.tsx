@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTracker } from '../../store/trackerStore'
 import { completionsAt, isSelfCompleteToken, norm } from '../../lib/trackerGrammar'
+import TrackerSolverPanel from './TrackerSolverPanel'
 
 /** Limits the height of the suggestion list. */
 const MAX_SUGGESTIONS = 6
@@ -369,6 +370,10 @@ export default function TrackerInputBar() {
           </span>
         )}
       </div>
+
+      {/* The solver answer for the last committed turn. The bar is anchored at
+          its bottom edge, so this panel grows the bar upward. */}
+      <TrackerSolverPanel />
 
       {/* Non-blocking advisory (yellow): the line just committed/edited parsed
           fine but had no observable effect — distinct from `error` below

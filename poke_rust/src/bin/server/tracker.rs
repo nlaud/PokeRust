@@ -19,8 +19,17 @@
 //! Each turn ends with an `endofturn` line.
 //! The server first applies all turns to a belief copy.
 //! It commits the copy only when every turn succeeds.
+//!
+//! # Solver panel
+//!
+//! A tracker session can also hold one solver profile.
+//! `tracker_analysis.rs` owns that job.
+//! The job draws one world from the belief and searches it.
+//! It never resolves a tracker turn.
+//! Every committed turn cancels the running job and starts a new one.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -64,7 +73,22 @@ pub struct TrackerSession {
     /// Unique species from both original rosters.
     /// Autocomplete uses this list without fog-of-war masking.
     pub roster_species: Vec<Species>,
+    /// The resolved profile of the solver panel.
+    /// `None` means that the user has not started a search.
+    pub solver_profile: Option<crate::bot::BotProfile>,
+    /// The generation, the running ladder, and the newest rung of that search.
+    /// A session with no profile keeps this record at generation zero.
+    pub analysis: crate::tracker_analysis::TrackerAnalysisState,
 }
+
+/// The damage rolls that the tracker solver searches with.
+///
+/// A create-tracker request carries no battle physics, because the tracker
+/// records a real battle rather than resolving one. The panel therefore uses
+/// the engine defaults, which are the same values that the simulator setup
+/// panel sends.
+const SOLVER_DAMAGE_ROLLS: u8 = 16;
+const SOLVER_CONSIDER_CRIT: bool = true;
 
 #[derive(Debug)]
 pub(crate) enum SubmitTrackerError {
@@ -278,6 +302,8 @@ pub async fn create_tracker(
         log: Vec::new(),
         turn_count: 0,
         roster_species,
+        solver_profile: None,
+        analysis: Default::default(),
     };
     let view = mapping::battle_view_from_belief(
         &session.belief,
@@ -315,8 +341,90 @@ pub async fn get_tracker(State(app): State<AppState>, Path(id): Path<String>) ->
 }
 
 pub async fn delete_tracker(State(app): State<AppState>, Path(id): Path<String>) -> Response {
-    lock(&app).remove(&id);
+    // A removed session leaves the ladder with no target, so stop it here
+    // rather than let it run to its limit.
+    if let Some(mut session) = lock(&app).remove(&id) {
+        session.analysis.cancel_running();
+    }
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Solver panel ─────────────────────────────────────────────────────────────
+
+/// `POST /api/tracker/{id}/analysis` — store one solver profile and start the
+/// first ladder.
+///
+/// The request body is the profile shape that `POST /api/battles` sends as
+/// `botP2`, so the panel offers the same algorithms, presets, and limits as the
+/// simulator. A second call replaces the profile and restarts the search.
+pub async fn start_tracker_analysis(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::bot::BotProfileRequest>,
+) -> Response {
+    let profile =
+        match crate::bot::resolve("analysis", &req, SOLVER_DAMAGE_ROLLS, SOLVER_CONSIDER_CRIT) {
+            Ok(profile) => profile,
+            Err(message) => return unprocessable(message),
+        };
+
+    let mut sessions = lock(&app);
+    let Some(session) = sessions.get_mut(&id) else {
+        return not_found();
+    };
+    // A new profile answers a new question, so the old answer goes away.
+    session.analysis.reset();
+    session.solver_profile = Some(profile);
+    crate::tracker_analysis::start_job(
+        &id,
+        session,
+        Arc::clone(&app.dexes),
+        Arc::clone(&app.meta),
+        Arc::clone(&app.tracker_sessions),
+    );
+    Json(session.analysis.view(session.solver_profile.as_ref())).into_response()
+}
+
+/// `GET /api/tracker/{id}/analysis` — the record of the solver panel.
+///
+/// The tracker has one user, and that user typed both rosters, so the response
+/// carries the strategy and the win odds of both players.
+pub async fn get_tracker_analysis(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+    let sessions = lock(&app);
+    let Some(session) = sessions.get(&id) else {
+        return not_found();
+    };
+    Json(session.analysis.view(session.solver_profile.as_ref())).into_response()
+}
+
+/// `DELETE /api/tracker/{id}/analysis` — remove the profile and stop the
+/// search.
+pub async fn stop_tracker_analysis(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut sessions = lock(&app);
+    let Some(session) = sessions.get_mut(&id) else {
+        return not_found();
+    };
+    session.analysis.reset();
+    session.solver_profile = None;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Starts one ladder for the position that a commit produced.
+///
+/// The caller already applied the turn, so `apply_tracker_text` and
+/// `rebuild_tracker_history` have raised the generation and cancelled the job
+/// of the old position.
+fn restart_analysis(app: &AppState, id: &str, session: &mut TrackerSession) {
+    crate::tracker_analysis::start_job(
+        id,
+        session,
+        Arc::clone(&app.dexes),
+        Arc::clone(&app.meta),
+        Arc::clone(&app.tracker_sessions),
+    );
 }
 
 /// Split parsed lines into complete, `EndOfTurn`-terminated batches, appending
@@ -557,7 +665,10 @@ pub async fn submit_tracker_events(
     };
 
     match apply_tracker_text(session, &req.text, &app.dexes) {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            restart_analysis(&app, &id, session);
+            Json(response).into_response()
+        }
         Err(SubmitTrackerError::Parse(error)) => parse_error_response(error),
         Err(SubmitTrackerError::Unprocessable(message)) => unprocessable(message),
         Err(SubmitTrackerError::Internal(message)) => internal_error(message),
@@ -697,6 +808,10 @@ pub(crate) fn apply_tracker_text(
     session.turn_count += applied.log.len() as u16;
     session.log.extend(applied.log.iter().cloned());
     session.script.push(text.to_string());
+    // The position changed, so the running ladder now answers an old question.
+    // This raises the generation and cancels that ladder. It keeps the last
+    // complete rung, which the view marks as stale.
+    session.analysis.invalidate(session.belief.turn_number);
     let view = mapping::battle_view_from_belief(
         &session.belief,
         session.active_per_side,
@@ -826,6 +941,9 @@ pub async fn rebuild_tracker_history(
     } else {
         vec![req.text]
     };
+    // A rebuild replaces every committed turn, so the old answer describes a
+    // position that no longer exists.
+    session.analysis.invalidate(session.belief.turn_number);
 
     let view = mapping::battle_view_from_belief(
         &session.belief,
@@ -833,12 +951,14 @@ pub async fn rebuild_tracker_history(
         session.brought_per_side,
         session.inference_config.legal_items.as_ref(),
     );
-    Json(GetTrackerResponse {
+    let response = Json(GetTrackerResponse {
         state: view,
         log: session.log.clone(),
         script: session.script.join("\n"),
     })
-    .into_response()
+    .into_response();
+    restart_analysis(&app, &id, session);
+    response
 }
 
 /// `GET /api/tracker/{id}/completions` — name pools for the tracker input
@@ -939,6 +1059,8 @@ mod tests {
             log: Vec::new(),
             turn_count: 0,
             roster_species: vec![Species::Pikachu, Species::Garchomp],
+            solver_profile: None,
+            analysis: Default::default(),
         }
     }
 

@@ -385,7 +385,7 @@ pub async fn create_battle(
     // Resolve the optional P2 bot profile last. A team or item error must still
     // win the 422. The profile uses the same physics as the battle.
     let bot_p2 = match &req.bot_p2 {
-        Some(request) => match crate::bot::resolve(request, req.damage_rolls, req.consider_crit) {
+        Some(request) => match crate::bot::resolve("botP2", request, req.damage_rolls, req.consider_crit) {
             Ok(profile) => Some(profile),
             Err(message) => return unprocessable(message),
         },
@@ -1169,6 +1169,7 @@ mod tests {
         }"#;
         let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
         let profile = crate::bot::resolve(
+            "botP2",
             req.bot_p2.as_ref().unwrap(),
             req.damage_rolls,
             req.consider_crit,

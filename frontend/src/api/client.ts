@@ -12,6 +12,8 @@ import type {
   LegalCommands,
   PlayerId,
   SpeciesListDto,
+  TrackerAnalysisRequest,
+  TrackerAnalysisResponse,
   TrackerCompletionsDto,
   TrackerEventsRequest,
   TrackerEventsResponse,
@@ -146,6 +148,28 @@ export function rebuildTrackerHistory(
 
 export function getTrackerCompletions(trackerId: string): Promise<TrackerCompletionsDto> {
   return request(`/api/tracker/${trackerId}/completions`)
+}
+
+/** Stores one solver profile and starts the first depth rung.
+ * A second call replaces the profile and restarts the search. */
+export function startTrackerAnalysis(
+  trackerId: string,
+  req: TrackerAnalysisRequest,
+): Promise<TrackerAnalysisResponse> {
+  return request(`/api/tracker/${trackerId}/analysis`, {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+/** Reads the newest rung and the phase of the search. */
+export function getTrackerAnalysis(trackerId: string): Promise<TrackerAnalysisResponse> {
+  return request(`/api/tracker/${trackerId}/analysis`)
+}
+
+/** Removes the profile and stops the search. */
+export function stopTrackerAnalysis(trackerId: string): Promise<void> {
+  return request(`/api/tracker/${trackerId}/analysis`, { method: 'DELETE' })
 }
 
 /** Gets all teamsheet species for the tracker setup page. */

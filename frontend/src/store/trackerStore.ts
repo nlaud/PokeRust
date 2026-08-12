@@ -1,7 +1,13 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
 import { TrackerParseApiError } from '../api/client'
-import type { BattleView, EventNode, TurnLogEntry } from '../api/types'
+import type {
+  BattleView,
+  EventNode,
+  TrackerAnalysisRequest,
+  TrackerAnalysisResponse,
+  TurnLogEntry,
+} from '../api/types'
 import { CATALOG } from '../lib/items'
 import { megaFormeNames, preloadSprites } from '../lib/sprites'
 import { contentLinesOf, splitScriptIntoTurns, type CompletionPools } from '../lib/trackerGrammar'
@@ -41,6 +47,12 @@ interface TrackerStore {
   error: string | null
   errorLine: number | null
   busy: boolean
+  /** The solver record of this session.
+   * `null` means that the panel has not read the server yet. */
+  analysis: TrackerAnalysisResponse | null
+  /** Why the last analysis request failed.
+   * A rejected profile lands here, not in `error`. */
+  analysisError: string | null
 
   create: (req: Parameters<typeof api.createTracker>[0]) => Promise<void>
   restore: (trackerId: string) => Promise<void>
@@ -65,6 +77,15 @@ interface TrackerStore {
    * Returns `null` when no turn exists or the rebuild fails. */
   popLastCommittedTurn: () => Promise<string[] | null>
   clearError: () => void
+  /** Stores one solver profile and starts the depth ladder.
+   * Returns `true` when the server accepted the profile. */
+  startAnalysis: (req: TrackerAnalysisRequest) => Promise<boolean>
+  /** Removes the profile and stops the search. */
+  stopAnalysis: () => Promise<void>
+  /** Reads the newest rung.
+   * `TrackerSolverPanel` calls this method on a timer while a search runs.
+   * Every committed turn also calls it one time. */
+  refreshAnalysis: () => Promise<void>
 }
 
 const TRACKER_ID_KEY = 'pokerust.activeTrackerId'
@@ -99,6 +120,8 @@ export const useTracker = create<TrackerStore>((set, get) => ({
   error: null,
   errorLine: null,
   busy: false,
+  analysis: null,
+  analysisError: null,
 
   create: async (req) => {
     set({ busy: true, error: null, errorLine: null })
@@ -117,6 +140,8 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         previewEvents: [],
         lastLineWarning: null,
         busy: false,
+        analysis: null,
+        analysisError: null,
       })
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err), busy: false })
@@ -135,12 +160,15 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         committedTurns: splitScriptIntoTurns(response.script),
         completions,
       })
+      // The session can already hold a profile after a page reload.
+      await get().refreshAnalysis()
     } catch {
       sessionStorage.removeItem(TRACKER_ID_KEY)
     }
   },
 
   leave: () => {
+    const trackerId = get().trackerId
     sessionStorage.removeItem(TRACKER_ID_KEY)
     set({
       trackerId: null,
@@ -152,7 +180,11 @@ export const useTracker = create<TrackerStore>((set, get) => ({
       lastLineWarning: null,
       error: null,
       errorLine: null,
+      analysis: null,
+      analysisError: null,
     })
+    // Delete the server session so an active solver job stops.
+    if (trackerId) void api.deleteTracker(trackerId)
   },
 
   submitText: async (text) => {
@@ -168,6 +200,9 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         committedTurns: [...s.committedTurns, ...splitScriptIntoTurns(text)],
         busy: false,
       }))
+      // The commit raised the generation on the server, so read the record now
+      // rather than wait for the next poll tick.
+      void get().refreshAnalysis()
       return true
     } catch (err) {
       const line = err instanceof TrackerParseApiError ? err.line : null
@@ -219,6 +254,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         lastLineWarning: null,
         busy: false,
       })
+      void get().refreshAnalysis()
       return true
     } catch (err) {
       const line = err instanceof TrackerParseApiError ? err.line : null
@@ -245,6 +281,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         lastLineWarning: null,
         busy: false,
       })
+      void get().refreshAnalysis()
       return true
     } catch (err) {
       const line = err instanceof TrackerParseApiError ? err.line : null
@@ -271,6 +308,7 @@ export const useTracker = create<TrackerStore>((set, get) => ({
         lastLineWarning: null,
         busy: false,
       })
+      void get().refreshAnalysis()
       return contentLinesOf(popped)
     } catch (err) {
       const line = err instanceof TrackerParseApiError ? err.line : null
@@ -280,6 +318,44 @@ export const useTracker = create<TrackerStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null, errorLine: null }),
+
+  startAnalysis: async (req) => {
+    const { trackerId } = get()
+    if (!trackerId) return false
+    set({ analysisError: null })
+    try {
+      const analysis = await api.startTrackerAnalysis(trackerId, req)
+      set({ analysis })
+      return true
+    } catch (err) {
+      set({ analysisError: err instanceof Error ? err.message : String(err) })
+      return false
+    }
+  },
+
+  stopAnalysis: async () => {
+    const { trackerId } = get()
+    set({ analysis: null, analysisError: null })
+    if (!trackerId) return
+    try {
+      await api.stopTrackerAnalysis(trackerId)
+    } catch {
+      // The panel is already closed. A failed stop leaves one job to expire on
+      // its own time limit.
+    }
+  },
+
+  refreshAnalysis: async () => {
+    const { trackerId } = get()
+    if (!trackerId) return
+    try {
+      const analysis = await api.getTrackerAnalysis(trackerId)
+      // Ignore a response from a session that the user already left.
+      if (get().trackerId === trackerId) set({ analysis })
+    } catch {
+      // Keep the last record. The next tick tries again.
+    }
+  },
 }))
 
 export function storedTrackerId(): string | null {

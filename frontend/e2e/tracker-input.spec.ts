@@ -134,6 +134,58 @@ test.describe('Tracker input bar', () => {
   })
 })
 
+test.describe('Tracker solver panel', () => {
+  // The search itself runs on the server and can take tens of seconds, so this
+  // test covers the panel and the request, not one complete answer.
+  test('starts, restores, stops, and deletes a search with its session', async ({ page }) => {
+    await seedTeam(page)
+    await startTrackerSession(page)
+    const panel = page.getByTestId('tracker-solver-panel')
+    await expect(panel).toBeVisible()
+
+    // The panel starts closed and reports that no search runs.
+    await expect(page.getByTestId('tracker-solver-start')).toBeHidden()
+    await panel.getByTestId('tracker-solver-toggle').click()
+    await expect(page.getByTestId('tracker-solver-start')).toBeVisible()
+
+    // Commit the leads so the position holds an active Pokemon on both sides.
+    const input = page.getByTestId('tracker-input')
+    await input.pressSequentially('leads p pikachu o Garchomp', { delay: 10 })
+    await page.keyboard.press('Shift+Enter')
+    await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
+
+    await pickSelectOption(page, 'Algorithm', 'MCTS (sampled)')
+    await pickSelectOption(page, 'Preset', 'Fast')
+    await page.getByTestId('tracker-solver-start').click()
+
+    // The toggle row reports the running search until the first depth answers.
+    await expect(page.getByTestId('tracker-solver-stop')).toBeVisible()
+
+    // A reload restores the profile controls from the server record.
+    await page.reload()
+    await expect(panel).toBeVisible()
+    await panel.getByTestId('tracker-solver-toggle').click()
+    await expect(
+      panel.locator('label').filter({ hasText: 'Algorithm' }).getByRole('button').first(),
+    ).toContainText('MCTS (sampled)')
+    await expect(
+      panel.locator('label').filter({ hasText: 'Preset' }).getByRole('button').first(),
+    ).toContainText('Fast')
+
+    await page.getByTestId('tracker-solver-stop').click()
+    await expect(page.getByTestId('tracker-solver-stop')).toBeHidden()
+
+    // Ending the tracker deletes its server session and cancels a new job.
+    await page.getByTestId('tracker-solver-start').click()
+    const deleted = page.waitForRequest(
+      (request) => request.method() === 'DELETE' && /\/api\/tracker\/[^/]+$/.test(request.url()),
+    )
+    await page.getByRole('button', { name: 'End tracker' }).click()
+    await page.getByRole('button', { name: 'Delete' }).click()
+    await deleted
+  })
+})
+
 // ── Casing coverage ───────────────────────────────────────────────────────
 // The client and server ignore case and punctuation during name matching.
 // Test completion and direct input for each supported case style.

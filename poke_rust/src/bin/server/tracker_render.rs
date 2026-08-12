@@ -1189,6 +1189,8 @@ mod tests {
             log: Vec::new(),
             turn_count: 0,
             roster_species,
+            solver_profile: None,
+            analysis: Default::default(),
         }
     }
 

@@ -453,6 +453,74 @@ export interface AnalysisProgressResponse {
   error: string | null
 }
 
+// ── Tracker analysis ────────────────────────────────────────────────────────
+// The tracker has one user, and that user typed both rosters, so these rows
+// carry the strategy and the win odds of both players. The battle endpoints
+// keep their own privacy rules — see `AnalysisProgressResponse`.
+
+/** The profile that starts a tracker search.
+ * It is the same shape the simulator sends as `botP2`. */
+export type TrackerAnalysisRequest = BotProfileRequest
+
+/** The phase of the tracker solver panel.
+ * `off` means that the session holds no profile. */
+export type TrackerAnalysisPhase = 'off' | 'idle' | 'running' | 'complete' | 'failed'
+
+/** One joint action of a strategy, with its rate. */
+export interface TrackerStrategyRow {
+  /** One command for each active slot, in slot order. */
+  commands: CommandOption[]
+  /** How often the strategy plays this joint action, from 0 through 1. */
+  probability: number
+}
+
+/** The answer of one complete ladder rung. */
+export interface TrackerAnalysisCheckpoint {
+  /** The generation of the position that the search read. */
+  generation: number
+  /** True when a later committed turn made this answer old. */
+  stale: boolean
+  turnNumber: number
+  /** The depth of this rung. */
+  depthReached: number
+  elapsedMs: number
+  /** The seed of the draw and the search. */
+  seed: number
+  /** Player 1's odds of winning, from 0 through 1. */
+  p1WinOdds: number
+  /** Player 2's odds of winning. The game is zero-sum. */
+  p2WinOdds: number
+  /** The highest-rate joint actions of Player 1. */
+  p1Strategy: TrackerStrategyRow[]
+  /** The highest-rate joint actions of Player 2. */
+  p2Strategy: TrackerStrategyRow[]
+  /** True when the Player 2 rows form one strategy for one private state. */
+  p2StrategyIsPlayable: boolean
+  /** Every reason that the answer is approximate. */
+  warnings: string[]
+}
+
+/** The tracker analysis record of one session. */
+export interface TrackerAnalysisResponse {
+  /** The generation of the current position.
+   * Every committed turn raises it by one. */
+  generation: number
+  phase: TrackerAnalysisPhase
+  /** How long the running ladder has run, or null when no job runs. */
+  runningMs: number | null
+  /** The configured depth horizon of the ladder. */
+  targetDepth: number | null
+  /** The newest complete rung.
+   * A failure and a cancellation both keep it. */
+  checkpoint: TrackerAnalysisCheckpoint | null
+  /** Player 1's win odds at the position before the current one. */
+  previousP1WinOdds: number | null
+  /** Why the last job produced no rung. */
+  error: string | null
+  /** The resolved profile of this session. */
+  profile: BotProfileView | null
+}
+
 // ── Benchmarking ────────────────────────────────────────────────────────────
 // Mirrors the benchmark DTOs in `src/bin/server/dto.rs`.
 // `GET /api/benchmark` streams the complete grid through server-sent events.

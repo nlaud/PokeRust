@@ -114,8 +114,11 @@ submits a battle command. A timeout or a failed job uses the uniform draw.
 `P2RevealPanel` shows the wait line during the search, and the drawn command
 after the turn resolves.
 
-- [ ] Add the solver info to the Tracker frontend. For the last resolved turn, it should show the best strategies for both players as well as the win changes of each player. It should live update as depth increases further. Its configuration shuold mirror the sdimulators'
-  - [ ] Displayed below the event input instructions
+`tracker_analysis.rs` runs the same profile for a tracker session. It draws one
+world from the belief, then runs one search for each depth from one through the
+configured depth. Each depth publishes a complete answer, so the panel moves
+while the search goes deeper. `TrackerSolverPanel` shows the win odds and the
+best strategy of both players below the event input instructions.
 
 ## Parallel search
 

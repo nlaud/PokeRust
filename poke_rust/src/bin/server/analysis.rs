@@ -386,8 +386,9 @@ fn random_seed() -> u64 {
 /// Copies the inference rules of a session for a belief search.
 ///
 /// `InferenceConfig` lives in the engine, and the determinizer needs an owned
-/// copy per job.
-fn clone_inference_config(config: &InferenceConfig) -> InferenceConfig {
+/// copy per job. `tracker_analysis.rs` copies its own session rules the same
+/// way.
+pub fn clone_inference_config(config: &InferenceConfig) -> InferenceConfig {
     InferenceConfig {
         use_stat_points: config.use_stat_points,
         force_max_ivs: config.force_max_ivs,

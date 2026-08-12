@@ -87,7 +87,7 @@ src/
     battleStore.ts         Hotseat command flow
     benchmarkStore.ts      Benchmark stream state
     settingsStore.ts       Saved display settings
-    trackerStore.ts        Tracker history and preview state
+    trackerStore.ts        Tracker history, preview, and solver state
   pages/
     benchmark/             Benchmark charts
     simulate/              Battle controls and display
@@ -174,6 +174,43 @@ The frontend resubmits the full history after the edit.
 
 Press `Shift+Escape` to remove the last complete turn.
 If a draft exists, the first press clears the draft.
+
+### Solver panel
+
+`TrackerSolverPanel.tsx` shows the solver answer for the last committed turn.
+The panel appears below the input instructions.
+It starts closed.
+
+Open the panel, select an algorithm and a preset, then start the search.
+The controls hold the same knobs as the simulator setup panel.
+
+These endpoints control the search:
+
+```text
+POST   /api/tracker/{id}/analysis
+GET    /api/tracker/{id}/analysis
+DELETE /api/tracker/{id}/analysis
+```
+
+The tracker holds a belief, not a concrete battle state.
+The server draws one world from the belief with the determinizer.
+An exact search and a sampled search read that one world.
+A belief search reads the belief and renders its rows against the drawn world.
+Each answer names this limit in a note.
+
+The server runs one search for each depth from one through the configured depth.
+Each depth publishes a complete answer.
+The store reads the newest answer one time each second.
+The numbers therefore move while the search goes deeper.
+
+The panel shows the win odds of both players.
+It also shows the change since the last committed turn.
+The tracker user typed both rosters, so both action lists appear.
+A belief search mixes the opponent's private builds.
+The panel labels that list as a summary, not as one playable strategy.
+
+Every committed turn cancels the running search and starts a new one.
+The panel marks an answer of an older position as stale.
 
 ## Tracker grammar
 

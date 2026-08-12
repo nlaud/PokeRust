@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 
 // ── Shared views ─────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldSlotDto {
     pub player: PlayerDto,
     pub slot_index: u8,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerDto {
     P1,
@@ -184,7 +184,7 @@ pub struct BattleView {
 
 // ── Legal commands ───────────────────────────────────────────────────────────
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandOptionDto {
     pub command: BattleCommandDto,
@@ -213,7 +213,7 @@ pub struct LegalCommandsView {
 
 // ── Inbound commands ─────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BattleCommandDto {
     #[serde(rename_all = "camelCase")]
@@ -837,6 +837,78 @@ pub struct TrackerCompletionsDto {
     pub species: Vec<String>,
     pub moves: Vec<String>,
     pub abilities: Vec<String>,
+}
+
+// ── Tracker analysis ─────────────────────────────────────────────────────────
+// The tracker has one user, and that user typed both rosters. These rows
+// therefore carry the strategy and the win odds of both players. The battle
+// endpoints keep their own privacy rules — see `AnalysisProgressDto`.
+
+/// One joint action of a strategy, with its rate.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerStrategyRowDto {
+    /// One command for each active slot, in slot order.
+    pub commands: Vec<CommandOptionDto>,
+    /// How often the strategy plays this joint action, from 0 through 1.
+    pub probability: f64,
+}
+
+/// The answer of one complete ladder rung.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerAnalysisCheckpointDto {
+    /// The generation of the position that the search read.
+    pub generation: u64,
+    /// True when a later committed turn made this answer old.
+    pub stale: bool,
+    /// The turn number of that position.
+    pub turn_number: u16,
+    /// The depth of this rung.
+    pub depth_reached: u8,
+    pub elapsed_ms: u64,
+    /// The seed of the draw and the search.
+    pub seed: u64,
+    /// Player 1's odds of winning, from 0 through 1.
+    pub p1_win_odds: f64,
+    /// Player 2's odds of winning. The game is zero-sum.
+    pub p2_win_odds: f64,
+    /// The highest-rate joint actions of Player 1.
+    pub p1_strategy: Vec<TrackerStrategyRowDto>,
+    /// The highest-rate joint actions of Player 2.
+    pub p2_strategy: Vec<TrackerStrategyRowDto>,
+    /// True when the P2 rows form one strategy for one private state.
+    pub p2_strategy_is_playable: bool,
+    /// Every reason that the answer is approximate.
+    pub warnings: Vec<String>,
+}
+
+/// The tracker analysis record of one session.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerAnalysisDto {
+    /// The generation of the current position.
+    /// Every committed turn raises it by one.
+    pub generation: u64,
+    /// One of `off`, `idle`, `running`, `complete`, or `failed`.
+    /// `off` means that the session holds no profile.
+    pub phase: String,
+    /// How long the running ladder has run.
+    /// `None` when no job runs.
+    pub running_ms: Option<u64>,
+    /// The configured depth horizon of the ladder.
+    /// `None` when the session holds no profile.
+    pub target_depth: Option<u8>,
+    /// The newest complete rung.
+    /// A failure and a cancellation both keep it.
+    pub checkpoint: Option<TrackerAnalysisCheckpointDto>,
+    /// Player 1's win odds at the position before the current one.
+    /// `None` until two positions have an answer.
+    pub previous_p1_win_odds: Option<f64>,
+    /// Why the last job produced no rung.
+    pub error: Option<String>,
+    /// The resolved profile of this session.
+    pub profile: Option<crate::bot::BotProfileView>,
 }
 
 /// Contains alphabetical teamsheet species names.
