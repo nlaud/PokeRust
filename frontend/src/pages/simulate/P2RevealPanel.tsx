@@ -9,9 +9,17 @@ const SOURCE_LABELS: Record<P2Reveal['source'], string> = {
   teamPreview: 'from a uniform preview draw',
 }
 
-/** Explains why a uniform draw replaced the solver strategy. */
+/** Explains why a uniform draw replaced the solver strategy.
+ *
+ * Three rules produce this draw. The search gave no answer for the position.
+ * The answer read data that the fog of war hides, which an exact or `mcts`
+ * profile does in every fog-of-war battle. The sampled command was not legal
+ * in the position.
+ *
+ * The client waits for the search, so only the first rule also shows a message
+ * in the control panel before the turn resolves. */
 const UNIFORM_NOTE =
-  'The search had no answer for this position, so Player 2 picked one legal command at random.'
+  'Player 2 picked one legal command at random. The search supplied no strategy that Player 2 can play here.'
 
 /** Returns the resolved search limits as one short line. */
 function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
@@ -38,21 +46,52 @@ function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
  * odds. The wait line replaces the panel while the search runs.
  */
 export default function P2RevealPanel() {
-  const { botP2, p2Reveal, waitingForBot } = useBattle()
+  const { botP2, p2Reveal, waitingForBot, botWaitMs, cancelBotWait } = useBattle()
   const [open, setOpen] = useState(false)
   if (!botP2) return null
 
   if (waitingForBot) {
+    // The limit bounds the search, but a turn simulation that already runs
+    // cannot stop, so the elapsed time can pass it. The bar therefore stops at
+    // a full bar and the seconds keep counting.
+    const limit = botP2.timeMs ?? null
+    const elapsed = botWaitMs ?? 0
+    const percent = limit === null ? null : Math.min(100, Math.round((100 * elapsed) / limit))
     return (
       <div
         data-testid="bot-wait-line"
         role="status"
         className="glass relative z-20 mb-2 rounded-card border border-subtle px-3 py-2 text-xs shadow-sm"
       >
-        <span className="font-semibold">Player 2 is thinking…</span>{' '}
-        <span className="text-ink-muted">
-          The solver is searching this position. The turn resolves when it answers.
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold">Player 2 is thinking…</span>
+          <span className="text-ink-muted">
+            The solver is searching this position. The turn resolves when it answers.
+          </span>
+          <span className="ml-auto shrink-0 font-mono text-ink-muted">
+            {(elapsed / 1000).toFixed(1)} s{percent === null ? '' : ` · about ${percent}%`}
+          </span>
+          <button
+            onClick={cancelBotWait}
+            data-testid="bot-wait-cancel"
+            className="lift shrink-0 rounded-card border border-subtle px-2 py-1 font-semibold text-ink-muted"
+          >
+            Change my move
+          </button>
+        </div>
+        {percent !== null && (
+          <div className="mt-1 h-1 w-full overflow-hidden rounded-card bg-subtle">
+            <div
+              className="h-full bg-primary"
+              style={{ width: `${percent}%` }}
+              role="progressbar"
+              aria-valuenow={percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Player 2 search progress"
+            />
+          </div>
+        )}
       </div>
     )
   }

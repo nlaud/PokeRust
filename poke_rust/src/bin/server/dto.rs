@@ -844,12 +844,26 @@ pub struct TrackerCompletionsDto {
 // therefore carry the strategy and the win odds of both players. The battle
 // endpoints keep their own privacy rules — see `AnalysisProgressDto`.
 
+/// One bring-and-lead choice of a team-preview strategy.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerPreviewChoiceDto {
+    /// The lead species, in slot order.
+    pub leads: Vec<String>,
+    /// The other brought species, in roster order.
+    pub back: Vec<String>,
+}
+
 /// One joint action of a strategy, with its rate.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerStrategyRowDto {
     /// One command for each active slot, in slot order.
+    /// A team-preview row holds no command.
     pub commands: Vec<CommandOptionDto>,
+    /// The bring-and-lead choice of a team-preview row.
+    /// `None` in a battle row.
+    pub preview: Option<TrackerPreviewChoiceDto>,
     /// How often the strategy plays this joint action, from 0 through 1.
     pub probability: f64,
 }
@@ -864,6 +878,9 @@ pub struct TrackerAnalysisCheckpointDto {
     pub stale: bool,
     /// The turn number of that position.
     pub turn_number: u16,
+    /// One of `battle` or `teamPreview`.
+    /// A `teamPreview` rung answers the bring-and-lead choice.
+    pub position: String,
     /// The depth of this rung.
     pub depth_reached: u8,
     pub elapsed_ms: u64,
@@ -883,6 +900,23 @@ pub struct TrackerAnalysisCheckpointDto {
     pub warnings: Vec<String>,
 }
 
+/// The rung that the ladder runs now.
+///
+/// The solver reports no live node count, so the fraction is a time estimate.
+/// The panel labels it as an approximate value.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerAnalysisRungDto {
+    /// The depth of the rung that runs.
+    pub depth: u8,
+    /// How long this rung has run.
+    pub elapsed_ms: u64,
+    /// The time that this rung can spend.
+    pub budget_ms: u64,
+    /// `elapsed_ms` divided by `budget_ms`, from 0 through 1.
+    pub fraction: f64,
+}
+
 /// The tracker analysis record of one session.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -899,6 +933,9 @@ pub struct TrackerAnalysisDto {
     /// The configured depth horizon of the ladder.
     /// `None` when the session holds no profile.
     pub target_depth: Option<u8>,
+    /// The rung that runs now.
+    /// `None` when no job runs, and before the first rung starts.
+    pub rung: Option<TrackerAnalysisRungDto>,
     /// The newest complete rung.
     /// A failure and a cancellation both keep it.
     pub checkpoint: Option<TrackerAnalysisCheckpointDto>,

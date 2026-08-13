@@ -177,9 +177,10 @@ If a draft exists, the first press clears the draft.
 
 ### Solver panel
 
-`TrackerSolverPanel.tsx` shows the solver answer for the last committed turn.
+`TrackerSolverPanel.tsx` shows the solver answer for the current position.
 The panel appears below the input instructions.
 It starts closed.
+An open panel grows upward, and it scrolls only when it passes the window.
 
 Open the panel, select an algorithm and a preset, then start the search.
 The controls hold the same knobs as the simulator setup panel.
@@ -200,8 +201,30 @@ Each answer names this limit in a note.
 
 The server runs one search for each depth from one through the configured depth.
 Each depth publishes a complete answer.
-The store reads the newest answer one time each second.
+The store reads the newest answer two times each second.
 The numbers therefore move while the search goes deeper.
+
+Between two answers the panel shows the depth that runs and a progress bar.
+The bar reports the spent part of the time budget of that depth.
+The solver reports no live node count, so this figure is an estimate.
+
+### Team preview
+
+Before the first `leads` line, no side has a Pokemon on the field.
+The panel then searches the team preview instead of a battle.
+The server draws worlds from the team-preview belief and solves the mean
+payoff matrix of those worlds.
+
+Each row is one bring-and-lead choice, not one battle command.
+The row reads `Lead A + B · back C + D`.
+Both players play one strategy for every drawn world.
+A real opponent reads its own hidden stats, so the answer names that limit in
+a note.
+
+An `ismcts` or `mccfr` profile draws up to eight worlds.
+Every other profile draws one world.
+The answer names the count, because one world gives the whole answer one guess
+of the opponent's hidden data.
 
 The panel shows the win odds of both players.
 It also shows the change since the last committed turn.

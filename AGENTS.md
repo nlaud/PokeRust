@@ -258,6 +258,11 @@ The solver panel is the one exception.
 That search calls the simulator through the solver.
 It never resolves a tracker turn, and it never changes the belief.
 
+Before the first `leads` line, both sides have no active Pokemon.
+The panel then searches the stored team-preview belief.
+`TrackerSession::preview_belief` holds that belief, and a tracker event never
+changes it.
+
 ## Benchmark endpoint
 
 `GET /api/benchmark` streams turn, inference, and solver sweeps through SSE.

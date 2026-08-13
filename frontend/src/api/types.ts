@@ -466,12 +466,40 @@ export type TrackerAnalysisRequest = BotProfileRequest
  * `off` means that the session holds no profile. */
 export type TrackerAnalysisPhase = 'off' | 'idle' | 'running' | 'complete' | 'failed'
 
+/** One bring-and-lead choice of a team-preview strategy. */
+export interface TrackerPreviewChoice {
+  /** The lead species, in slot order. */
+  leads: string[]
+  /** The other brought species, in roster order. */
+  back: string[]
+}
+
 /** One joint action of a strategy, with its rate. */
 export interface TrackerStrategyRow {
-  /** One command for each active slot, in slot order. */
+  /** One command for each active slot, in slot order.
+   * A team-preview row holds no command. */
   commands: CommandOption[]
+  /** The bring-and-lead choice of a team-preview row.
+   * `null` in a battle row. */
+  preview: TrackerPreviewChoice | null
   /** How often the strategy plays this joint action, from 0 through 1. */
   probability: number
+}
+
+/** Which question one rung answers. */
+export type TrackerAnalysisPosition = 'battle' | 'teamPreview'
+
+/** The rung that the ladder runs now.
+ * The fraction is a time estimate, not a node count. */
+export interface TrackerAnalysisRung {
+  /** The depth of the rung that runs. */
+  depth: number
+  /** How long this rung has run. */
+  elapsedMs: number
+  /** The time that this rung can spend. */
+  budgetMs: number
+  /** `elapsedMs` divided by `budgetMs`, from 0 through 1. */
+  fraction: number
 }
 
 /** The answer of one complete ladder rung. */
@@ -481,6 +509,8 @@ export interface TrackerAnalysisCheckpoint {
   /** True when a later committed turn made this answer old. */
   stale: boolean
   turnNumber: number
+  /** The question that this rung answers. */
+  position: TrackerAnalysisPosition
   /** The depth of this rung. */
   depthReached: number
   elapsedMs: number
@@ -510,6 +540,9 @@ export interface TrackerAnalysisResponse {
   runningMs: number | null
   /** The configured depth horizon of the ladder. */
   targetDepth: number | null
+  /** The rung that runs now.
+   * `null` when no job runs, and before the first rung starts. */
+  rung: TrackerAnalysisRung | null
   /** The newest complete rung.
    * A failure and a cancellation both keep it. */
   checkpoint: TrackerAnalysisCheckpoint | null

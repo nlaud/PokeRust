@@ -59,6 +59,13 @@ interface BattleStore {
   p2Reveal: P2Reveal | null
   /** True while the client waits for the analysis job of the P2 bot. */
   waitingForBot: boolean
+  /** How long the P2 search has run, while the client waits for it. */
+  botWaitMs: number | null
+  /** True after Player 1 asks to stop the wait and change the move. */
+  botWaitCancelled: boolean
+  /** True after one search ended with no answer for this position.
+   * The next submission then plays the turn without a wait. */
+  botNoAnswer: boolean
   probability: number | null
   error: string | null
   busy: boolean
@@ -79,6 +86,8 @@ interface BattleStore {
   pushSlotCommand: (command: BattleCommand) => void
   setPendingAttack: (pending: PendingAttack | null) => void
   goBack: () => void
+  /** Stops the wait for the P2 search and returns the move choice. */
+  cancelBotWait: () => void
   togglePreviewPick: (index: number) => void
   submitPreview: () => Promise<void>
   clearError: () => void
@@ -88,19 +97,39 @@ interface BattleStore {
 const BATTLE_ID_KEY = 'pokerust.activeBattleId'
 const ANALYSIS_POLL_MS = 100
 
-/** Waits for the current analysis job or its configured time limit. */
-async function waitForBotAnalysis(battleId: string, bot: BotProfileView) {
-  const deadline = Date.now() + Math.max(bot.timeMs ?? 0, 1_000) + 2_000
-  while (Date.now() < deadline) {
+/** What one wait for the Player 2 search produced. */
+type BotWaitResult = 'answered' | 'noAnswer' | 'cancelled'
+
+/** The message that a search with no answer shows to Player 1. */
+const BOT_NO_ANSWER =
+  'The search produced no answer for this position. Submit again to play the turn with a random Player 2 command, or change your move.'
+
+/**
+ * Waits for the search that supplies Player 2's strategy.
+ *
+ * The wait ends when the job stops, and no fixed limit ends it early. A search
+ * that runs past its own time limit therefore still supplies the strategy. A
+ * turn simulation that already runs cannot stop, which is why that overrun
+ * happens.
+ *
+ * `shouldStop` returns true when Player 1 cancels the wait.
+ */
+async function waitForBotAnalysis(
+  battleId: string,
+  shouldStop: () => boolean,
+  onProgress: (elapsedMs: number | null) => void,
+): Promise<BotWaitResult> {
+  for (;;) {
+    if (shouldStop()) return 'cancelled'
     const progress = await api.getAnalysis(battleId)
-    if (
-      progress.phase === 'complete' &&
-      progress.checkpoint?.generation === progress.generation &&
+    const current =
+      progress.checkpoint !== null &&
+      progress.checkpoint.generation === progress.generation &&
       !progress.checkpoint.stale
-    ) {
-      return
+    if (progress.phase !== 'running') {
+      return current ? 'answered' : 'noAnswer'
     }
-    if (progress.phase !== 'running') return
+    onProgress(progress.runningMs)
     await new Promise((resolve) => window.setTimeout(resolve, ANALYSIS_POLL_MS))
   }
 }
@@ -189,11 +218,51 @@ export const useBattle = create<BattleStore>((set, get) => {
     if (currentPlayer === 'p1') {
       const bot = get().botP2
       if (bot) {
+        // The last search ended with no answer, so this submission plays the
+        // turn. The server then draws one legal command for Player 2. Without
+        // this path the position could never resolve.
+        if (get().botNoAnswer) {
+          set({ busy: true, error: null, botNoAnswer: false, p2Reveal: null })
+          await submitBattleTurn(battleId, playerCommand, undefined, `Turn ${view.turnNumber}`)
+          return
+        }
         // P2 has no hotseat step, so the client waits for the search that
-        // supplies P2's strategy. A timeout leaves the uniform draw in place.
-        set({ busy: true, error: null, waitingForBot: true, p2Reveal: null })
-        await waitForBotAnalysis(battleId, bot).catch(() => undefined)
-        set({ waitingForBot: false })
+        // supplies P2's strategy. The wait ends when the job stops.
+        set({
+          busy: true,
+          error: null,
+          waitingForBot: true,
+          botWaitCancelled: false,
+          botWaitMs: null,
+          p2Reveal: null,
+        })
+        const outcome = await waitForBotAnalysis(
+          battleId,
+          () => get().botWaitCancelled,
+          (elapsed) => set({ botWaitMs: elapsed }),
+        ).catch((): BotWaitResult => 'noAnswer')
+        set({ waitingForBot: false, botWaitMs: null })
+        if (outcome === 'cancelled') {
+          // Player 1 asked for the move choice again. The search keeps running,
+          // so the next submission can still read its answer.
+          set({
+            busy: false,
+            botWaitCancelled: false,
+            draftCommands: [],
+            pendingAttack: null,
+          })
+          return
+        }
+        if (outcome === 'noAnswer') {
+          set({
+            busy: false,
+            botNoAnswer: true,
+            error: BOT_NO_ANSWER,
+            draftCommands: [],
+            pendingAttack: null,
+          })
+          return
+        }
         await submitBattleTurn(battleId, playerCommand, undefined, `Turn ${view.turnNumber}`)
         return
       }
@@ -260,6 +329,9 @@ export const useBattle = create<BattleStore>((set, get) => {
     botP2: null,
     p2Reveal: null,
     waitingForBot: false,
+    botWaitMs: null,
+    botWaitCancelled: false,
+    botNoAnswer: false,
     probability: null,
     error: null,
     busy: false,
@@ -287,6 +359,9 @@ export const useBattle = create<BattleStore>((set, get) => {
           botP2: response.botP2,
           p2Reveal: null,
           waitingForBot: false,
+          botWaitMs: null,
+          botWaitCancelled: false,
+          botNoAnswer: false,
           probability: null,
           currentPlayer: 'p1',
           draftCommands: [],
@@ -317,6 +392,9 @@ export const useBattle = create<BattleStore>((set, get) => {
           // A restore reads the session, and the session keeps no past reveal.
           p2Reveal: null,
           waitingForBot: false,
+          botWaitMs: null,
+          botWaitCancelled: false,
+          botNoAnswer: false,
           currentPlayer: 'p1',
           draftCommands: [],
           p1Commands: null,
@@ -346,6 +424,9 @@ export const useBattle = create<BattleStore>((set, get) => {
         botP2: null,
         p2Reveal: null,
         waitingForBot: false,
+        botWaitMs: null,
+        botWaitCancelled: false,
+        botNoAnswer: false,
         probability: null,
         error: null,
         currentPlayer: 'p1',
@@ -417,6 +498,13 @@ export const useBattle = create<BattleStore>((set, get) => {
         }))
         void get().fetchCommands()
       }
+    },
+
+    cancelBotWait: () => {
+      // The wait loop reads this flag between two reads of the job. The search
+      // itself keeps running on the server, so the next submission can read its
+      // answer.
+      if (get().waitingForBot) set({ botWaitCancelled: true })
     },
 
     togglePreviewPick: (index) => {

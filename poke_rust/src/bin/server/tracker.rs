@@ -43,7 +43,9 @@ use poke_rust::information::inference::{
     InferenceConfig, apply_information, apply_structural_preview,
 };
 use poke_rust::information::information::{EventKind, InformationEvent};
-use poke_rust::information::unknowns::{InformationMode, UnknownBattleState, UnknownMatchState};
+use poke_rust::information::unknowns::{
+    InformationMode, UnknownBattleState, UnknownMatchState, UnknownTeamPreviewState,
+};
 use poke_rust::simulator;
 use poke_rust::state::battle::{BattleMechanics, FieldSlot, Player};
 use poke_rust::user::{humanize_identifier, move_name};
@@ -62,6 +64,12 @@ pub struct TrackerSession {
     /// Belief before any tracker event.
     /// History rebuilds start from this value.
     pub initial_belief: UnknownBattleState,
+    /// The team-preview belief of the two rosters.
+    ///
+    /// `create_tracker` builds this value, converts it to `initial_belief`, and
+    /// keeps the copy here. The solver panel searches it while no side has a
+    /// lead on the field. A tracker event never changes it.
+    pub preview_belief: Option<UnknownTeamPreviewState>,
     /// Raw text from committed tracker submissions.
     /// The editor uses it to restore authored text.
     pub script: Vec<String>,
@@ -295,6 +303,7 @@ pub async fn create_tracker(
     let session = TrackerSession {
         initial_belief: battle_belief.clone(),
         belief: battle_belief,
+        preview_belief: Some(team_preview_belief.clone()),
         script: Vec::new(),
         active_per_side: req.active_per_side,
         brought_per_side: req.brought_per_side,
@@ -1052,6 +1061,7 @@ mod tests {
         TrackerSession {
             belief: belief_1v1(),
             initial_belief: belief_1v1(),
+            preview_belief: None,
             script: Vec::new(),
             active_per_side: 1,
             brought_per_side: 1,

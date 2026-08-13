@@ -52,15 +52,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use poke_rust::information::describe::describe_unknown;
 use poke_rust::information::determinize::{DeterminizeConfig, determinize_seeded};
 use poke_rust::information::inference::InferenceConfig;
-use poke_rust::information::unknowns::UnknownBattleState;
+use poke_rust::information::unknowns::{
+    UnknownBattleState, UnknownPokemonState, UnknownTeamPreviewState,
+};
 use poke_rust::meta::{MetaDex, MetaFormat};
-use poke_rust::solver::{self, CancelFlag, JointActionProb};
+use poke_rust::solver::preview::{
+    OpenListConfig, PreviewChoiceProb, PreviewConfig, solve_open_list_preview_cancellable,
+};
+use poke_rust::solver::{self, CancelFlag, JointActionProb, SolveConfig};
 use poke_rust::state::battle::{BattleState, MatchState, Player};
 
 use crate::bot::{BotProfile, BotSearchConfig, MAX_SAFE_INTEGER};
-use crate::dto::{TrackerAnalysisCheckpointDto, TrackerAnalysisDto, TrackerStrategyRowDto};
+use crate::dto::{
+    TrackerAnalysisCheckpointDto, TrackerAnalysisDto, TrackerAnalysisRungDto,
+    TrackerPreviewChoiceDto, TrackerStrategyRowDto,
+};
 use crate::mapping;
 use crate::session::{Dexes, MetaDexes};
 use crate::tracker::TrackerSession;
@@ -72,11 +81,46 @@ use crate::tracker::TrackerSession;
 /// that the strategy rarely plays.
 const MAX_STRATEGY_ROWS: usize = 8;
 
+/// The largest number of worlds that one team-preview rung draws.
+///
+/// Each world repeats the cell work of the whole preview matrix, so the cost
+/// grows with this count. A doubles preview holds 32,400 cells, and the time
+/// limit already stops the run.
+const MAX_PREVIEW_WORLDS: usize = 8;
+
+/// One bring-and-lead choice, rendered from the roster of one side.
+#[derive(Debug, Clone)]
+pub struct TrackerPreviewChoice {
+    leads: Vec<String>,
+    back: Vec<String>,
+}
+
 /// One joint action of a strategy, rendered against the drawn world.
 #[derive(Debug, Clone)]
 pub struct TrackerStrategyRow {
     commands: Vec<crate::dto::CommandOptionDto>,
+    /// The bring-and-lead choice of a team-preview row.
+    /// `None` in a battle row.
+    preview: Option<TrackerPreviewChoice>,
     probability: f64,
+}
+
+/// Which question one rung answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionKind {
+    /// A battle position with both leads on the field.
+    Battle,
+    /// The bring-and-lead choice, before the first `leads` line.
+    TeamPreview,
+}
+
+impl PositionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            PositionKind::Battle => "battle",
+            PositionKind::TeamPreview => "teamPreview",
+        }
+    }
 }
 
 /// The complete answer of one ladder rung.
@@ -85,6 +129,8 @@ pub struct TrackerAnalysisCheckpoint {
     /// The generation of the position that the search read.
     pub generation: u64,
     pub turn_number: u16,
+    /// The question that this rung answers.
+    pub position: PositionKind,
     /// The depth of this rung.
     pub depth_reached: u8,
     pub p1_win_odds: f64,
@@ -99,12 +145,26 @@ pub struct TrackerAnalysisCheckpoint {
     pub warnings: Vec<String>,
 }
 
+/// The rung that a running job started.
+///
+/// The solver reports no live node count while it searches, so the panel needs
+/// a time estimate. The record holds the depth of the rung, the moment it
+/// started, and the time that it can spend.
+#[derive(Debug, Clone, Copy)]
+struct RungProgress {
+    depth: u8,
+    started: Instant,
+    budget: Duration,
+}
+
 /// The job that is running now.
 #[derive(Debug)]
 struct RunningJob {
     id: u64,
     generation: u64,
     started: Instant,
+    /// The rung that runs now. `None` before the first rung starts.
+    rung: Option<RungProgress>,
     /// Stops the ladder before a rung starts, and inside a running search.
     cancel: CancelFlag,
 }
@@ -192,6 +252,7 @@ impl TrackerAnalysisState {
             id,
             generation: self.generation,
             started: Instant::now(),
+            rung: None,
             cancel: cancel.clone(),
         });
         self.last_error = None;
@@ -210,6 +271,23 @@ impl TrackerAnalysisState {
                 .running
                 .as_ref()
                 .is_some_and(|running| running.id == job.id && running.generation == job.generation)
+    }
+
+    /// Records the rung that is starting.
+    ///
+    /// The panel reads this record between two complete rungs, so it can show
+    /// the depth in progress and the spent part of the budget.
+    fn note_rung(&mut self, job: &JobTicket, depth: u8, budget: Duration) {
+        if !self.is_current(job) {
+            return;
+        }
+        if let Some(running) = self.running.as_mut() {
+            running.rung = Some(RungProgress {
+                depth,
+                started: Instant::now(),
+                budget,
+            });
+        }
     }
 
     /// Stores one complete rung and leaves the job running.
@@ -266,6 +344,11 @@ impl TrackerAnalysisState {
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
             target_depth: profile.map(|p| p.view.depth),
+            rung: self
+                .running
+                .as_ref()
+                .and_then(|job| job.rung)
+                .map(rung_dto),
             checkpoint: self
                 .checkpoint
                 .as_ref()
@@ -283,6 +366,22 @@ impl TrackerAnalysisState {
     }
 }
 
+/// Builds the progress row of the rung that runs.
+///
+/// The fraction is the spent part of the time budget. It never passes 1, so a
+/// rung that runs past its budget shows a full bar rather than an overflow.
+fn rung_dto(rung: RungProgress) -> TrackerAnalysisRungDto {
+    let elapsed = rung.started.elapsed();
+    let budget_ms = rung.budget.as_millis().max(1) as u64;
+    let elapsed_ms = elapsed.as_millis() as u64;
+    TrackerAnalysisRungDto {
+        depth: rung.depth,
+        elapsed_ms,
+        budget_ms,
+        fraction: (elapsed_ms as f64 / budget_ms as f64).clamp(0.0, 1.0),
+    }
+}
+
 /// Builds the wire row of one checkpoint.
 fn checkpoint_dto(
     checkpoint: &TrackerAnalysisCheckpoint,
@@ -292,6 +391,7 @@ fn checkpoint_dto(
         generation: checkpoint.generation,
         stale: checkpoint.generation != generation,
         turn_number: checkpoint.turn_number,
+        position: checkpoint.position.as_str().to_string(),
         depth_reached: checkpoint.depth_reached,
         elapsed_ms: checkpoint.elapsed.as_millis() as u64,
         seed: checkpoint.seed,
@@ -315,6 +415,10 @@ fn checkpoint_dto(
 fn strategy_row_dto(row: &TrackerStrategyRow) -> TrackerStrategyRowDto {
     TrackerStrategyRowDto {
         commands: row.commands.clone(),
+        preview: row.preview.as_ref().map(|choice| TrackerPreviewChoiceDto {
+            leads: choice.leads.clone(),
+            back: choice.back.clone(),
+        }),
         probability: row.probability,
     }
 }
@@ -330,10 +434,24 @@ struct LadderInputs {
     generation: u64,
     turn_number: u16,
     belief: UnknownBattleState,
+    /// The team-preview belief of the session.
+    /// The ladder searches it while no side has a lead on the field.
+    preview_belief: Option<UnknownTeamPreviewState>,
     inference: InferenceConfig,
     dexes: Arc<Dexes>,
     meta: Arc<MetaDexes>,
     format: MetaFormat,
+}
+
+/// What one ladder reports back to the session record.
+///
+/// The task holds no session lock while it searches. Each hook takes the lock,
+/// writes one field, and returns.
+struct LadderHooks<'a> {
+    /// Stores one complete rung.
+    publish: &'a dyn Fn(TrackerAnalysisCheckpoint),
+    /// Records the depth and the time budget of the rung that is starting.
+    note_rung: &'a dyn Fn(u8, Duration),
 }
 
 /// Starts one ladder for the current position of a tracker session.
@@ -360,6 +478,7 @@ pub fn start_job(
         generation: session.analysis.generation,
         turn_number: session.belief.turn_number,
         belief: session.belief.clone(),
+        preview_belief: session.preview_belief.clone(),
         inference: crate::analysis::clone_inference_config(&session.inference_config),
         dexes,
         meta,
@@ -381,7 +500,17 @@ pub fn start_job(
                     session.analysis.publish(&job, checkpoint);
                 }
             };
-            run_ladder(&inputs, &job.cancel, &publish)
+            let note_rung = |depth: u8, budget: Duration| {
+                let mut guard = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(session) = guard.get_mut(&tracker_id) {
+                    session.analysis.note_rung(&job, depth, budget);
+                }
+            };
+            let hooks = LadderHooks {
+                publish: &publish,
+                note_rung: &note_rung,
+            };
+            run_ladder(&inputs, &job.cancel, &hooks)
         };
         // A cancelled ladder reports nothing at all. The replacement job already
         // owns the record, and `finish` checks the ticket for the final race.
@@ -409,22 +538,30 @@ fn random_seed() -> u64 {
     rand::random::<u64>() & MAX_SAFE_INTEGER
 }
 
-/// Runs the depth ladder and publishes each complete rung.
+/// Runs the ladder of the current position and publishes each complete rung.
+///
+/// A position with no lead on either side is the team preview, and the preview
+/// search answers it with one rung. Every other position runs the depth ladder
+/// of the battle search.
 ///
 /// Returns an error only when no rung can run at all, or when a rung fails.
 /// Every rung that already published stays in the record.
 fn run_ladder(
     inputs: &LadderInputs,
     cancel: &CancelFlag,
-    publish: &dyn Fn(TrackerAnalysisCheckpoint),
+    hooks: &LadderHooks,
 ) -> Result<(), String> {
     let started = Instant::now();
     let mut published_rung = false;
-    leads_are_on_the_field(&inputs.belief)?;
     let meta = inputs
         .meta
         .for_format(inputs.format)
         .ok_or_else(no_usage_cache)?;
+
+    if let Some(belief) = preview_position(inputs) {
+        return run_preview_rung(inputs, belief, meta, started, cancel, hooks);
+    }
+    leads_are_on_the_field(&inputs.belief)?;
 
     let determinize = DeterminizeConfig {
         inference: crate::analysis::clone_inference_config(&inputs.inference),
@@ -454,6 +591,7 @@ fn run_ladder(
             return no_time_left(published_rung);
         };
         let search = inputs.search.with_depth(depth).with_deadline(remaining);
+        (hooks.note_rung)(depth, remaining);
 
         // A solver panic must not poison the session mutex, so catch it here
         // and report it as an ordinary job failure.
@@ -483,9 +621,10 @@ fn run_ladder(
         }
         warnings.push(drawn_world_note(inputs.search));
 
-        publish(TrackerAnalysisCheckpoint {
+        (hooks.publish)(TrackerAnalysisCheckpoint {
             generation: inputs.generation,
             turn_number: inputs.turn_number,
+            position: PositionKind::Battle,
             depth_reached: rung.depth_reached,
             p1_win_odds: rung.p1_win_odds,
             p2_win_odds: rung.p2_win_odds,
@@ -683,6 +822,233 @@ fn leads_error(p1_is_empty: bool, p2_is_empty: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ── The team-preview rung ────────────────────────────────────────────────────
+
+/// Names the way that a preview answer falls short of the true game.
+const PREVIEW_MEAN_MATRIX_NOTE: &str =
+    "The search solved the mean matrix of the drawn worlds, so both players play one strategy \
+     for every world. A real opponent reads its own hidden stats and can pick another lead.";
+
+/// The belief to search when the position is the team preview.
+///
+/// The tracker records a real battle, and the first `leads` line puts both
+/// sides on the field. Before that line the position is the bring-and-lead
+/// choice, and the preview belief is the only description of it.
+///
+/// A mid-battle double faint also empties both sides, so the turn number
+/// guards the branch. Only turn zero is the preview.
+fn preview_position(inputs: &LadderInputs) -> Option<&UnknownTeamPreviewState> {
+    let is_preview = position_is_team_preview(
+        inputs.belief.p1_active_mons.is_empty(),
+        inputs.belief.p2_active_mons.is_empty(),
+        inputs.turn_number,
+    );
+    is_preview.then_some(inputs.preview_belief.as_ref()).flatten()
+}
+
+/// True when the position is the team preview.
+///
+/// Both sides must have no active Pokemon, and no turn can have run.
+fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u16) -> bool {
+    p1_is_empty && p2_is_empty && turn_number == 0
+}
+
+/// The battle configuration of every cell below a preview choice.
+///
+/// A sampling profile carries no [`SolveConfig`], because the preview search
+/// solves each cell with the exact search. The rung therefore builds one from
+/// the depth and the physics of that profile.
+fn preview_battle_config(search: BotSearchConfig, deadline: Duration) -> SolveConfig {
+    let sampled = |mcts: poke_rust::solver::mcts::MctsConfig| SolveConfig {
+        depth: mcts.depth,
+        damage_rolls: mcts.damage_rolls,
+        consider_crit: mcts.consider_crit,
+        max_actions_per_player: mcts.max_actions_per_player,
+        deadline: Some(deadline),
+        ..SolveConfig::default()
+    };
+    match search {
+        BotSearchConfig::Exact(config) => SolveConfig {
+            deadline: Some(deadline),
+            ..config
+        },
+        BotSearchConfig::Mcts(config) => sampled(config),
+        BotSearchConfig::Ismcts(config) => sampled(config.search),
+        BotSearchConfig::Mccfr(config) => sampled(config.search),
+    }
+}
+
+/// How many worlds the preview rung draws.
+///
+/// A belief profile already asks for several worlds, so the rung caps that
+/// count at [`MAX_PREVIEW_WORLDS`]. Every other profile reads one world.
+fn preview_worlds(search: BotSearchConfig) -> usize {
+    match search {
+        BotSearchConfig::Ismcts(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
+        BotSearchConfig::Mccfr(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
+        _ => 1,
+    }
+}
+
+/// Searches the team preview and publishes one rung.
+///
+/// The preview search runs double oracle one time over the whole choice
+/// matrix, so it has no depth ladder. Each depth would repeat the complete run,
+/// and the cell cache cannot carry a value from one depth to another.
+fn run_preview_rung(
+    inputs: &LadderInputs,
+    belief: &UnknownTeamPreviewState,
+    meta: &MetaDex,
+    started: Instant,
+    cancel: &CancelFlag,
+    hooks: &LadderHooks,
+) -> Result<(), String> {
+    let Some(remaining) = remaining_time(inputs.time_ms, started.elapsed()) else {
+        return no_time_left(false);
+    };
+    let battle = preview_battle_config(inputs.search, remaining);
+    let depth = battle.depth;
+    (hooks.note_rung)(depth, remaining);
+
+    let config = OpenListConfig {
+        preview: PreviewConfig {
+            battle,
+            deadline: Some(remaining),
+        },
+        worlds: preview_worlds(inputs.search),
+        seed: inputs.seed,
+    };
+    let determinize = belief_draw_config(inputs);
+
+    // A solver panic must not poison the session mutex, so catch it here and
+    // report it as an ordinary job failure.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solve_open_list_preview_cancellable(
+            belief,
+            meta,
+            &inputs.dexes.pokemon_dex,
+            &inputs.dexes.move_dex,
+            &config,
+            &determinize,
+            Some(cancel),
+        )
+    }));
+    let result = match caught {
+        Ok(outcome) => outcome.map_err(engine_error)?,
+        Err(payload) => return Err(panic_message(payload)),
+    };
+    // A cancelled search returns the work that finished, which is not a
+    // complete rung.
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+
+    let elapsed = started.elapsed();
+    let mut warnings = warning_lines(&result.warnings);
+    warnings.push(PREVIEW_MEAN_MATRIX_NOTE.to_string());
+    warnings.push(preview_worlds_note(result.sampling.worlds));
+    if let Some(line) = sampling_error_line(result.sampling.worlds, result.sampling.standard_error)
+    {
+        warnings.push(line);
+    }
+    if !result.draw_warnings.is_empty() {
+        warnings.push(format!(
+            "The determinizer reported {} warning(s) while it drew the opponent.",
+            result.draw_warnings.len()
+        ));
+    }
+    if let Some(line) = overrun_line(inputs.time_ms, elapsed) {
+        warnings.push(line);
+    }
+
+    (hooks.publish)(TrackerAnalysisCheckpoint {
+        generation: inputs.generation,
+        turn_number: inputs.turn_number,
+        position: PositionKind::TeamPreview,
+        depth_reached: depth,
+        p1_win_odds: result.p1_win_odds,
+        p2_win_odds: result.p2_win_odds,
+        p1_strategy: preview_rows(&belief.p1_mons, &result.p1_strategy),
+        p2_strategy: preview_rows(&belief.p2_mons, &result.p2_strategy),
+        // Each row is one bring-and-lead choice of the mean matrix, so the row
+        // list is one strategy. `PREVIEW_MEAN_MATRIX_NOTE` names its limit.
+        p2_strategy_is_playable: true,
+        elapsed,
+        seed: inputs.seed,
+        warnings,
+    });
+    Ok(())
+}
+
+/// Names the guess that every preview cell rests on.
+///
+/// A battle rung says this with [`drawn_world_note`], and a preview rung needs
+/// its own line. The preview search reads concrete worlds rather than the
+/// belief, so no profile makes it a belief search, and a single world gives the
+/// complete answer one guess of the opponent's hidden data.
+///
+/// [`sampling_error_line`] measures the spread of two or more worlds, and one
+/// world has no spread, so this line is the only warning of a one-world rung.
+fn preview_worlds_note(worlds: usize) -> String {
+    if worlds == 1 {
+        "The search drew one world of the belief, so the whole answer assumes one guess of the \
+         opponent's hidden data. Only ismcts and mccfr draw more than one world."
+            .to_string()
+    } else {
+        format!(
+            "The search drew {worlds} worlds of the belief, so each cell is the mean of \
+             {worlds} guesses of the opponent's hidden data."
+        )
+    }
+}
+
+/// Reports how much the drawn worlds disagree about the win odds.
+///
+/// One world gives no spread to measure, so the line appears from two worlds.
+fn sampling_error_line(worlds: usize, standard_error: Option<f64>) -> Option<String> {
+    standard_error.map(|error| {
+        format!(
+            "The {worlds} drawn world(s) give a standard error of {:.1} points on the win odds.",
+            100.0 * error
+        )
+    })
+}
+
+/// The highest-rate preview choices of one player, rendered from its roster.
+fn preview_rows(
+    mons: &[UnknownPokemonState],
+    strategy: &[PreviewChoiceProb],
+) -> Vec<TrackerStrategyRow> {
+    let mut ordered: Vec<&PreviewChoiceProb> = strategy.iter().collect();
+    ordered.sort_by(|a, b| b.probability.total_cmp(&a.probability));
+    ordered.truncate(MAX_STRATEGY_ROWS);
+    ordered
+        .into_iter()
+        .map(|choice| TrackerStrategyRow {
+            commands: Vec::new(),
+            preview: Some(TrackerPreviewChoice {
+                leads: roster_names(mons, &choice.choice.active_indices),
+                back: roster_names(mons, &choice.choice.back_indices),
+            }),
+            probability: choice.probability,
+        })
+        .collect()
+}
+
+/// Names the roster entries that one index list selects.
+///
+/// The tracker user typed both rosters, so every species is known. An index
+/// outside the roster cannot happen, and the fallback keeps the row complete.
+fn roster_names(mons: &[UnknownPokemonState], indices: &[usize]) -> Vec<String> {
+    indices
+        .iter()
+        .map(|&index| match mons.get(index) {
+            Some(mon) => describe_unknown(&mon.possible_species),
+            None => "Unknown".to_string(),
+        })
+        .collect()
+}
+
 fn no_usage_cache() -> String {
     "The search draws the opponent's hidden data from usage data, and no usage cache is loaded \
      (see meta_scraper/README.md)."
@@ -789,6 +1155,7 @@ fn strategy_rows(
                     mapping::command_option(battle, player, slot_idx, command)
                 })
                 .collect(),
+            preview: None,
             probability: action.probability,
         })
         .collect()
@@ -818,12 +1185,37 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poke_rust::data::species::Species;
     use poke_rust::solver::SolveWarning;
-    use poke_rust::state::battle::{BattleCommand, SwitchCommand};
+    use poke_rust::state::battle::{BattleCommand, SwitchCommand, TeamPreviewCommand};
+    use std::sync::OnceLock;
+
+    static PREVIEW_ROSTER: OnceLock<Vec<UnknownPokemonState>> = OnceLock::new();
+
+    /// Four known roster entries, in the order that a preview index reads them.
+    fn preview_roster() -> Vec<UnknownPokemonState> {
+        PREVIEW_ROSTER
+            .get_or_init(|| {
+                let dex = poke_rust::state::dex_data::parse_pokemon_dex(
+                    "../pokemon_info/showdownDex.txt",
+                );
+                [
+                    Species::Pikachu,
+                    Species::Gengar,
+                    Species::Garchomp,
+                    Species::Snorlax,
+                ]
+                .into_iter()
+                .map(|species| UnknownPokemonState::from_opponent_species(species, &dex, 50))
+                .collect()
+            })
+            .clone()
+    }
 
     fn row(probability: f64) -> TrackerStrategyRow {
         TrackerStrategyRow {
             commands: Vec::new(),
+            preview: None,
             probability,
         }
     }
@@ -832,6 +1224,7 @@ mod tests {
         TrackerAnalysisCheckpoint {
             generation,
             turn_number: 3,
+            position: PositionKind::Battle,
             depth_reached: depth,
             p1_win_odds,
             p2_win_odds: 1.0 - p1_win_odds,
@@ -1026,8 +1419,8 @@ mod tests {
         assert!(json.contains("\"p2StrategyIsPlayable\":true"), "{json}");
     }
 
-    /// The tracker cannot search before the first `leads` line, and the message
-    /// has to tell the user which line to record.
+    /// The tracker cannot search a battle before the first `leads` line, and the
+    /// message has to tell the user which line to record.
     #[test]
     fn a_belief_with_no_leads_reports_a_clear_error() {
         for (p1_empty, p2_empty) in [(true, true), (true, false), (false, true)] {
@@ -1035,6 +1428,414 @@ mod tests {
             assert!(message.contains("leads"), "{message}");
         }
         assert!(leads_error(false, false).is_ok());
+    }
+
+    /// Only the position before the first turn is the team preview. One empty
+    /// side keeps the battle branch, and so does a mid-battle double faint.
+    #[test]
+    fn only_an_empty_field_on_turn_zero_is_the_team_preview() {
+        assert!(position_is_team_preview(true, true, 0));
+        assert!(!position_is_team_preview(true, false, 0));
+        assert!(!position_is_team_preview(false, true, 0));
+        assert!(!position_is_team_preview(false, false, 0));
+        // A double faint empties both sides part way through a battle.
+        assert!(!position_is_team_preview(true, true, 4));
+    }
+
+    /// The panel shows one bring-and-lead choice for each row, so the row must
+    /// name the lead species and the back species of that choice.
+    #[test]
+    fn a_preview_row_names_the_leads_and_the_back() {
+        let roster = preview_roster();
+        let strategy = vec![
+            PreviewChoiceProb {
+                choice: TeamPreviewCommand {
+                    active_indices: vec![2, 0],
+                    back_indices: vec![1, 3],
+                },
+                probability: 0.7,
+            },
+            PreviewChoiceProb {
+                choice: TeamPreviewCommand {
+                    active_indices: vec![0, 1],
+                    back_indices: vec![2, 3],
+                },
+                probability: 0.3,
+            },
+        ];
+
+        let rows = preview_rows(&roster, &strategy);
+
+        assert_eq!(rows.len(), 2);
+        let first = rows[0].preview.as_ref().expect("a preview row");
+        // The lead order is the order of the choice, not the roster order.
+        assert_eq!(first.leads, vec!["Garchomp", "Pikachu"]);
+        assert_eq!(first.back, vec!["Gengar", "Snorlax"]);
+        assert_eq!(rows[0].probability, 0.7);
+        assert!(rows[0].commands.is_empty());
+
+        let json = serde_json::to_string(&strategy_row_dto(&rows[0])).unwrap();
+        assert!(json.contains("\"leads\":[\"Garchomp\",\"Pikachu\"]"), "{json}");
+    }
+
+    /// A rate cut must keep the choices that the strategy plays most.
+    #[test]
+    fn the_preview_rows_keep_the_highest_rates() {
+        let roster = preview_roster();
+        let strategy: Vec<PreviewChoiceProb> = (0..20)
+            .map(|index| PreviewChoiceProb {
+                choice: TeamPreviewCommand {
+                    active_indices: vec![index % 4],
+                    back_indices: Vec::new(),
+                },
+                probability: f64::from(index as u32) / 100.0,
+            })
+            .collect();
+
+        let rows = preview_rows(&roster, &strategy);
+
+        assert_eq!(rows.len(), MAX_STRATEGY_ROWS);
+        assert_eq!(rows[0].probability, 0.19);
+    }
+
+    /// The panel needs a progress figure between two complete rungs, so the view
+    /// must report the depth and the budget of the rung that runs.
+    #[test]
+    fn the_view_reports_the_rung_that_runs() {
+        let mut state = TrackerAnalysisState::default();
+        assert!(state.view(Some(&profile())).rung.is_none());
+
+        let job = state.start();
+        assert!(
+            state.view(Some(&profile())).rung.is_none(),
+            "no rung has started yet"
+        );
+
+        state.note_rung(&job, 2, Duration::from_millis(4_000));
+        let rung = state.view(Some(&profile())).rung.expect("a running rung");
+        assert_eq!(rung.depth, 2);
+        assert_eq!(rung.budget_ms, 4_000);
+        assert!((0.0..=1.0).contains(&rung.fraction), "{}", rung.fraction);
+
+        // A finished job reports no rung, so the panel drops the bar.
+        state.finish(&job, Ok(()));
+        assert!(state.view(Some(&profile())).rung.is_none());
+    }
+
+    /// A replaced job must not move the progress record of the job that owns it.
+    #[test]
+    fn a_replaced_job_notes_no_rung() {
+        let mut state = TrackerAnalysisState::default();
+        let first = state.start();
+        let second = state.start();
+
+        state.note_rung(&first, 7, Duration::from_millis(1_000));
+        assert!(state.view(Some(&profile())).rung.is_none());
+
+        state.note_rung(&second, 1, Duration::from_millis(1_000));
+        assert_eq!(state.view(Some(&profile())).rung.unwrap().depth, 1);
+    }
+
+    /// A preview answer must say that both players play one strategy for every
+    /// drawn world, and it must report the spread of the drawn values.
+    #[test]
+    fn a_preview_rung_reports_its_sampling_limits() {
+        assert!(PREVIEW_MEAN_MATRIX_NOTE.contains("mean matrix"));
+        assert_eq!(sampling_error_line(1, None), None);
+        let line = sampling_error_line(8, Some(0.021)).unwrap();
+        assert!(line.contains("8 drawn world(s)"), "{line}");
+        assert!(line.contains("2.1 points"), "{line}");
+    }
+
+    /// A one-world rung has no spread to report, so the world note is the only
+    /// warning that the answer rests on a guess of the opponent's hidden data.
+    #[test]
+    fn a_preview_rung_names_the_number_of_drawn_worlds() {
+        let one = preview_worlds_note(1);
+        assert!(one.contains("one world"), "{one}");
+        assert!(one.contains("one guess"), "{one}");
+
+        let many = preview_worlds_note(8);
+        assert!(many.contains("8 worlds"), "{many}");
+        assert!(many.contains("8 guesses"), "{many}");
+    }
+
+    /// The preview search solves each cell with the exact search, so a sampling
+    /// profile must still supply a complete battle configuration.
+    #[test]
+    fn a_sampling_profile_builds_a_preview_battle_configuration() {
+        let deadline = Duration::from_millis(2_500);
+        for name in ["doubleOracle", "mcts", "ismcts", "mccfr"] {
+            let request = crate::bot::BotProfileRequest {
+                algorithm: Some(name.to_string()),
+                preset: Some("fast".to_string()),
+                ..Default::default()
+            };
+            let resolved = crate::bot::resolve("analysis", &request, 16, true).unwrap();
+
+            let config = preview_battle_config(resolved.search, deadline);
+
+            assert_eq!(config.depth, 1, "{name}");
+            assert_eq!(config.damage_rolls, 16, "{name}");
+            assert!(config.consider_crit, "{name}");
+            assert_eq!(config.deadline, Some(deadline), "{name}");
+        }
+    }
+
+    /// A belief profile draws several worlds, and the world count must stay
+    /// under the cap. Every other profile reads one world.
+    #[test]
+    fn the_world_count_stays_under_the_cap() {
+        for (name, preset, want) in [
+            ("doubleOracle", "strong", 1),
+            ("mcts", "strong", 1),
+            ("ismcts", "fast", 8),
+            ("mccfr", "strong", MAX_PREVIEW_WORLDS),
+        ] {
+            let request = crate::bot::BotProfileRequest {
+                algorithm: Some(name.to_string()),
+                preset: Some(preset.to_string()),
+                ..Default::default()
+            };
+            let resolved = crate::bot::resolve("analysis", &request, 16, true).unwrap();
+            assert_eq!(preview_worlds(resolved.search), want, "{name}");
+        }
+    }
+
+    // ── The ladder at a real preview position ────────────────────────────────
+
+    static SERVER_DEXES: OnceLock<Arc<Dexes>> = OnceLock::new();
+    static SERVER_META: OnceLock<Option<Arc<MetaDexes>>> = OnceLock::new();
+
+    fn server_dexes() -> Arc<Dexes> {
+        Arc::clone(SERVER_DEXES.get_or_init(|| {
+            Arc::new(Dexes {
+                pokemon_dex: poke_rust::state::dex_data::parse_pokemon_dex(
+                    "../pokemon_info/showdownDex.txt",
+                ),
+                move_dex: poke_rust::state::dex_data::parse_move_dex(
+                    "../pokemon_info/showdownMoves.txt",
+                ),
+                ability_dex: poke_rust::state::dex_data::parse_ability_dex(
+                    "../pokemon_info/showdownAbilities.txt",
+                ),
+                learnset_dex: poke_rust::state::dex_data::parse_learnset_dex(
+                    "../pokemon_info/showdownLearnsets.txt",
+                ),
+            })
+        }))
+    }
+
+    /// The singles usage cache of the repository, or `None` when it is absent.
+    fn server_meta() -> Option<Arc<MetaDexes>> {
+        SERVER_META
+            .get_or_init(|| {
+                let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../meta_scraper/data");
+                if !root.is_dir() {
+                    return None;
+                }
+                let singles =
+                    poke_rust::meta::MetaDex::load(&root, None, MetaFormat::Singles).ok()?;
+                Some(Arc::new(MetaDexes {
+                    singles: Some(singles),
+                    doubles: None,
+                }))
+            })
+            .clone()
+    }
+
+    const P1_TEAM: &str = "\
+Pikachu @ Light Ball
+Ability: Static
+Level: 50
+- Thunderbolt
+
+Snorlax @ Leftovers
+Ability: Thick Fat
+Level: 50
+- Body Slam
+";
+
+    const P2_TEAM: &str = "\
+Garchomp @ Life Orb
+Ability: Rough Skin
+Level: 50
+- Earthquake
+
+Gengar @ Focus Sash
+Ability: Cursed Body
+Level: 50
+- Shadow Ball
+";
+
+    /// The two beliefs of a fresh tracker session, built the way
+    /// `create_tracker` builds them.
+    fn preview_beliefs() -> (UnknownBattleState, UnknownTeamPreviewState) {
+        use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
+
+        let dexes = server_dexes();
+        let preview = poke_rust::simulator::team_preview_state_from_team_strings(
+            P1_TEAM,
+            P2_TEAM,
+            &dexes.pokemon_dex,
+            &dexes.move_dex,
+            1,
+            1,
+            true,
+        );
+        let mut belief = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &preview.p1_mons,
+            &preview.p2_mons,
+            &dexes.pokemon_dex,
+            1,
+            1,
+            50,
+            InformationMode::OpenTeamSheet,
+            false,
+        );
+        let UnknownMatchState::TeamPreview(preview_belief) = &mut belief else {
+            panic!("the constructor returned the wrong variant");
+        };
+        let all_p1: Vec<usize> = (0..preview.p1_mons.len()).collect();
+        let mut battle = preview_belief.into_battle_state(Player::P1, &[], &all_p1, &[], &[]);
+        battle.back_mons_per_side = 0;
+        (battle, preview_belief.clone())
+    }
+
+    /// The ladder inputs of a fresh tracker session, or `None` with no cache.
+    fn preview_inputs(algorithm: &str, time_ms: u64) -> Option<LadderInputs> {
+        let meta = server_meta()?;
+        let dexes = server_dexes();
+        let request = crate::bot::BotProfileRequest {
+            algorithm: Some(algorithm.to_string()),
+            preset: Some("fast".to_string()),
+            time_ms: Some(time_ms),
+            ..Default::default()
+        };
+        let resolved = crate::bot::resolve("analysis", &request, 4, false).unwrap();
+        let (battle, preview) = preview_beliefs();
+        Some(LadderInputs {
+            search: resolved.search,
+            seed: 7,
+            time_ms,
+            target_depth: resolved.view.depth,
+            generation: 0,
+            turn_number: battle.turn_number,
+            belief: battle,
+            preview_belief: Some(preview),
+            inference: InferenceConfig {
+                learnset_dex: dexes.learnset_dex.clone(),
+                ..InferenceConfig::default()
+            },
+            dexes,
+            meta,
+            format: MetaFormat::Singles,
+        })
+    }
+
+    /// Runs one ladder and reports every rung it published.
+    fn run_and_collect(
+        inputs: &LadderInputs,
+        cancel: &CancelFlag,
+    ) -> (Result<(), String>, Vec<TrackerAnalysisCheckpoint>, Vec<u8>) {
+        let published = Mutex::new(Vec::new());
+        let noted = Mutex::new(Vec::new());
+        let outcome = {
+            let publish = |checkpoint: TrackerAnalysisCheckpoint| {
+                published.lock().unwrap().push(checkpoint);
+            };
+            let note_rung = |depth: u8, _budget: Duration| noted.lock().unwrap().push(depth);
+            let hooks = LadderHooks {
+                publish: &publish,
+                note_rung: &note_rung,
+            };
+            run_ladder(inputs, cancel, &hooks)
+        };
+        (
+            outcome,
+            published.into_inner().unwrap(),
+            noted.into_inner().unwrap(),
+        )
+    }
+
+    /// Before the first `leads` line the ladder must answer the bring-and-lead
+    /// question rather than report that the field is empty.
+    #[test]
+    fn the_ladder_answers_the_team_preview_before_the_first_leads_line() {
+        let Some(inputs) = preview_inputs("doubleOracle", 8_000) else {
+            return;
+        };
+        let cancel = CancelFlag::new();
+
+        let (outcome, rungs, noted) = run_and_collect(&inputs, &cancel);
+
+        outcome.expect("the preview position is searchable");
+        assert_eq!(rungs.len(), 1, "the preview answers with one rung");
+        assert_eq!(rungs[0].position, PositionKind::TeamPreview);
+        assert_eq!(rungs[0].turn_number, 0);
+        assert_eq!(noted, vec![inputs.target_depth]);
+        for row in rungs[0].p1_strategy.iter().chain(&rungs[0].p2_strategy) {
+            let choice = row.preview.as_ref().expect("a preview row");
+            assert_eq!(choice.leads.len(), 1, "{choice:?}");
+            assert!(choice.back.is_empty(), "{choice:?}");
+        }
+        // Each row names its own side's roster, so a swap would show the other
+        // side's species.
+        let leads = |rows: &[TrackerStrategyRow]| -> Vec<String> {
+            rows.iter()
+                .map(|row| row.preview.as_ref().unwrap().leads[0].clone())
+                .collect()
+        };
+        for name in leads(&rungs[0].p1_strategy) {
+            assert!(["Pikachu", "Snorlax"].contains(&name.as_str()), "{name}");
+        }
+        for name in leads(&rungs[0].p2_strategy) {
+            assert!(["Garchomp", "Gengar"].contains(&name.as_str()), "{name}");
+        }
+    }
+
+    /// Every rung must say that the opponent's hidden data came from a draw.
+    /// An exact profile draws one world and has no spread to report, so without
+    /// this line its answer names no guess at all.
+    #[test]
+    fn a_preview_rung_discloses_its_drawn_worlds() {
+        for (algorithm, worlds) in [("doubleOracle", 1usize), ("ismcts", 8)] {
+            let Some(inputs) = preview_inputs(algorithm, 8_000) else {
+                return;
+            };
+            let cancel = CancelFlag::new();
+
+            let (outcome, rungs, _) = run_and_collect(&inputs, &cancel);
+
+            outcome.expect("the preview position is searchable");
+            let warnings = &rungs[0].warnings;
+            assert!(
+                warnings.contains(&preview_worlds_note(worlds)),
+                "{algorithm} published {warnings:#?}"
+            );
+            assert!(
+                warnings.iter().any(|line| line.contains("hidden data")),
+                "{algorithm} published {warnings:#?}"
+            );
+        }
+    }
+
+    /// A committed turn cancels the running preview search, and a cancelled run
+    /// publishes nothing.
+    #[test]
+    fn a_cancelled_preview_ladder_publishes_no_rung() {
+        let Some(inputs) = preview_inputs("doubleOracle", 8_000) else {
+            return;
+        };
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+
+        let (outcome, rungs, _) = run_and_collect(&inputs, &cancel);
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(rungs.is_empty(), "a cancelled ladder published a rung");
     }
 
     /// An engine error names a drawn species, which is a guess about the live

@@ -1177,6 +1177,7 @@ mod tests {
         TrackerSession {
             initial_belief: belief.clone(),
             belief,
+            preview_belief: None,
             script: Vec::new(),
             active_per_side: 2,
             brought_per_side: 4,

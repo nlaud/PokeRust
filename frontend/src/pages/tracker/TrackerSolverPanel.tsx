@@ -4,6 +4,7 @@ import type {
   BotAlgorithm,
   BotPreset,
   TrackerAnalysisCheckpoint,
+  TrackerAnalysisRung,
   TrackerStrategyRow,
 } from '../../api/types'
 import { useTracker } from '../../store/trackerStore'
@@ -63,8 +64,11 @@ const EXACT_ALGORITHMS: BotAlgorithm[] = ['doubleOracle', 'serializedBounds', 'b
 const EXACT_TIME_NOTE =
   'An exact algorithm enumerates every damage roll, so it reaches a smaller depth in the same time. The time limit stops a turn that already runs, and the search scores that position from its evaluator.'
 
-/** How often the panel reads the newest rung while a search runs. */
-const POLL_MS = 1000
+/** How often the panel reads the newest rung while a search runs.
+ *
+ * The progress bar moves on each read, so the interval also sets how smooth
+ * that bar looks. */
+const POLL_MS = 500
 
 /** Renders one probability as a whole-percent label. */
 function percent(odds: number): string {
@@ -78,10 +82,49 @@ function deltaLabel(current: number, previous: number): string {
   return `${change > 0 ? '+' : ''}${change.toFixed(1)} pts`
 }
 
-/** Renders one joint action as its per-slot descriptions. */
+/** Renders one strategy row.
+ *
+ * A team-preview row names the leads and the back Pokemon. A battle row names
+ * one command for each active slot. */
 function actionLabel(row: TrackerStrategyRow): string {
+  if (row.preview) {
+    const leads = row.preview.leads.join(' + ')
+    if (row.preview.back.length === 0) return `Lead ${leads}`
+    return `Lead ${leads} · back ${row.preview.back.join(' + ')}`
+  }
   if (row.commands.length === 0) return 'No action'
   return row.commands.map((option) => option.description).join(' · ')
+}
+
+/** Shows the depth in progress and the spent part of its time budget.
+ *
+ * The server reports no node count while a search runs, so this figure is a
+ * time estimate. The label says so. */
+function RungProgress({ rung, targetDepth }: { rung: TrackerAnalysisRung; targetDepth: number | null }) {
+  const percent = Math.round(100 * rung.fraction)
+  return (
+    <div className="mt-1" data-testid="tracker-solver-progress">
+      <div className="flex items-baseline justify-between gap-2 text-ink-muted">
+        <span>
+          Searching depth {rung.depth}
+          {targetDepth !== null ? ` of ${targetDepth}` : ''} · about {percent}% of its{' '}
+          {(rung.budgetMs / 1000).toFixed(1)} s budget
+        </span>
+        <span className="shrink-0 font-mono">{(rung.elapsedMs / 1000).toFixed(1)} s</span>
+      </div>
+      <div className="mt-0.5 h-1 w-full overflow-hidden rounded-card bg-subtle">
+        <div
+          className="h-full bg-primary"
+          style={{ width: `${percent}%` }}
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="Search progress toward the next depth"
+        />
+      </div>
+    </div>
+  )
 }
 
 /** Shows the strategy of one player, highest rate first. */
@@ -119,6 +162,7 @@ function CheckpointBody({
   targetDepth: number | null
 }) {
   const [showWarnings, setShowWarnings] = useState(false)
+  const teamPreview = checkpoint.position === 'teamPreview'
   return (
     <div className="mt-2 border-t border-subtle pt-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -138,7 +182,8 @@ function CheckpointBody({
         )}
         <span className="ml-auto text-ink-muted" data-testid="tracker-solver-depth">
           Depth {checkpoint.depthReached}
-          {targetDepth !== null ? ` of ${targetDepth}` : ''} · turn {checkpoint.turnNumber} ·{' '}
+          {targetDepth !== null ? ` of ${targetDepth}` : ''} ·{' '}
+          {teamPreview ? 'team preview' : `turn ${checkpoint.turnNumber}`} ·{' '}
           {(checkpoint.elapsedMs / 1000).toFixed(1)} s
         </span>
       </div>
@@ -151,15 +196,17 @@ function CheckpointBody({
 
       <div className="mt-2 flex flex-col gap-3 sm:flex-row">
         <StrategyList
-          title="Your best strategy"
+          title={teamPreview ? 'Your best bring and lead' : 'Your best strategy'}
           rows={checkpoint.p1Strategy}
           testId="tracker-solver-p1-strategy"
         />
         <StrategyList
           title={
-            checkpoint.p2StrategyIsPlayable
-              ? "Opponent's best strategy"
-              : 'Opponent action summary'
+            teamPreview
+              ? "Opponent's best bring and lead"
+              : checkpoint.p2StrategyIsPlayable
+                ? "Opponent's best strategy"
+                : 'Opponent action summary'
           }
           rows={checkpoint.p2Strategy}
           testId="tracker-solver-p2-strategy"
@@ -189,15 +236,19 @@ function CheckpointBody({
 }
 
 /**
- * Shows the solver answer for the last committed tracker turn.
+ * Shows the solver answer for the current tracker position.
  *
- * The tracker holds a belief, so the server draws one world from it and
- * searches that world. The panel shows the win odds and the best strategy of
- * both players, because the tracker user typed both rosters.
+ * Before the first `leads` line the position is the team preview, and the
+ * answer is one bring-and-lead choice for each player. Every later position is
+ * a battle, and the answer is one command for each active slot.
  *
- * The server runs one search for each depth, so the numbers move while the
- * search goes deeper. This component reads the newest answer once each second
- * while a search runs.
+ * The tracker holds a belief, so the server draws worlds from it and searches
+ * them. The panel shows the win odds and the best strategy of both players,
+ * because the tracker user typed both rosters.
+ *
+ * A battle search runs one rung for each depth, so the numbers move while the
+ * search goes deeper. This component reads the newest answer and the progress
+ * of the running rung twice each second.
  */
 export default function TrackerSolverPanel() {
   const { analysis, analysisError, startAnalysis, stopAnalysis, refreshAnalysis } = useTracker()
@@ -251,8 +302,12 @@ export default function TrackerSolverPanel() {
         </span>
       </button>
 
+      {/* The panel grows upward, because the input bar sits at the bottom of
+          the arena. The cap is the height of the window, less the room of that
+          bar, so the controls and the answer need no scroll. Only an answer
+          taller than the window scrolls. */}
       {open && (
-        <div className="mt-1 max-h-72 overflow-y-auto rounded-card border border-subtle bg-card px-2 py-2">
+        <div className="mt-1 max-h-[calc(100vh-11rem)] overflow-y-auto rounded-card border border-subtle bg-card px-2 py-2">
           <div className="flex flex-wrap items-end gap-2">
             <label className="min-w-[11rem] flex-1">
               <span className="mb-0.5 block text-ink-muted">Algorithm</span>
@@ -311,8 +366,12 @@ export default function TrackerSolverPanel() {
           )}
           {on && !checkpoint && !analysis?.error && (
             <p className="mt-1 text-ink-muted">
-              {running ? 'Searching the last committed turn…' : 'No answer yet.'}
+              {running ? 'Searching this position…' : 'No answer yet.'}
             </p>
+          )}
+
+          {running && analysis?.rung && (
+            <RungProgress rung={analysis.rung} targetDepth={analysis.targetDepth ?? null} />
           )}
 
           {checkpoint && (

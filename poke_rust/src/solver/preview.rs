@@ -82,7 +82,7 @@ use crate::state::dex_data::{MoveData, PokemonData};
 use super::chance::ChanceMode;
 use super::eval::EvalContext;
 use super::matrix::{self, EPS, OracleLimits, OracleSeed};
-use super::{SolveConfig, SolveWarning, solve};
+use super::{CancelFlag, SolveConfig, SolveWarning};
 
 /// P1's utility when P1 loses, and when P1 wins.
 const LOSS: f64 = 0.0;
@@ -417,6 +417,25 @@ pub fn solve_team_preview(
     solve_team_preview_cached(state, pokemon_dex, move_dex, config, &mut cache)
 }
 
+/// [`solve_team_preview`], with a cooperative stop signal.
+///
+/// The solve reads `cancel` before each cell, and every battle solve below a
+/// cell reads it too. A raised flag scores each later cell as even and ends the
+/// solve. The result then carries [`SolveWarning::Cancelled`], so a caller can
+/// drop it.
+///
+/// `None` gives the behavior of [`solve_team_preview`].
+pub fn solve_team_preview_cancellable(
+    state: &TeamPreviewState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &PreviewConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<PreviewResult, PreviewError> {
+    let mut cache = PreviewCellCache::new();
+    solve_preview_with_cancel(state, pokemon_dex, move_dex, config, &mut cache, cancel)
+}
+
 /// [`solve_team_preview`], reading and writing `cache`.
 ///
 /// The solve reads every cell that `cache` already holds. It writes every exact
@@ -428,7 +447,20 @@ pub fn solve_team_preview_cached(
     config: &PreviewConfig,
     cache: &mut PreviewCellCache,
 ) -> Result<PreviewResult, PreviewError> {
+    solve_preview_with_cancel(state, pokemon_dex, move_dex, config, cache, None)
+}
+
+/// The body of every single-world preview solve.
+fn solve_preview_with_cancel(
+    state: &TeamPreviewState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &PreviewConfig,
+    cache: &mut PreviewCellCache,
+    cancel: Option<&CancelFlag>,
+) -> Result<PreviewResult, PreviewError> {
     let mut ctx = PreviewContext::new(state, pokemon_dex, move_dex, config, cache)?;
+    ctx.cancel = cancel;
     let rows = ctx.p1.len();
     let cols = ctx.p2.len();
 
@@ -525,6 +557,7 @@ pub fn preview_cell_value(
         stats: PreviewStats::default(),
         started: Instant::now(),
         deadline_hit: false,
+        cancel: None,
         warnings: Vec::new(),
     };
     ctx.cell_value(0, 0)
@@ -729,6 +762,35 @@ pub fn solve_open_list_preview(
     config: &OpenListConfig,
     determinize: &DeterminizeConfig,
 ) -> Result<OpenListResult, OpenListError> {
+    solve_open_list_preview_cancellable(
+        belief,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        config,
+        determinize,
+        None,
+    )
+}
+
+/// [`solve_open_list_preview`], with a cooperative stop signal.
+///
+/// Every world reads `cancel` before each cell. A raised flag scores each later
+/// cell as even and ends the run, and the result carries
+/// [`SolveWarning::Cancelled`]. The world draws run before the first cell, so a
+/// flag that rises during a draw stops the run at the first cell.
+///
+/// `None` gives the behavior of [`solve_open_list_preview`].
+#[allow(clippy::too_many_arguments)]
+pub fn solve_open_list_preview_cancellable(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &OpenListConfig,
+    determinize: &DeterminizeConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<OpenListResult, OpenListError> {
     let started = Instant::now();
     let drawn = open_list_worlds(belief, meta_dex, pokemon_dex, move_dex, config, determinize)?;
 
@@ -752,6 +814,7 @@ pub fn solve_open_list_preview(
             PreviewContext::new(&sample.state, pokemon_dex, move_dex, &config.preview, cache)
                 .map_err(|error| OpenListError::Preview { world, error })?;
         ctx.started = started;
+        ctx.cancel = cancel;
         contexts.push(ctx);
     }
 
@@ -902,6 +965,9 @@ struct PreviewContext<'a> {
     stats: PreviewStats,
     started: Instant,
     deadline_hit: bool,
+    /// The stop signal of the caller. `None` means that no caller can stop this
+    /// solve.
+    cancel: Option<&'a CancelFlag>,
     warnings: Vec<SolveWarning>,
 }
 
@@ -937,12 +1003,20 @@ impl<'a> PreviewContext<'a> {
             stats: PreviewStats::default(),
             started: Instant::now(),
             deadline_hit: false,
+            cancel: None,
             warnings: Vec::new(),
         })
     }
 
     /// The value of one cell, from the cache when the cache holds it.
     fn cell_value(&mut self, row: usize, col: usize) -> f64 {
+        // A cancelled solve computes no more cells. The even value costs no turn
+        // simulation, so double oracle ends at once. The warning tells the
+        // caller that the answer holds only the work that finished.
+        if super::cancel_requested(self.cancel) {
+            merge_warning(&mut self.warnings, SolveWarning::Cancelled);
+            return EVEN;
+        }
         let key = (self.preview_key, self.config_key, self.dex_key, row, col);
         if self.cacheable
             && let Some(cell) = self.cache.values.get(&key).cloned()
@@ -957,6 +1031,13 @@ impl<'a> PreviewContext<'a> {
         // Read once, so that the whole cell uses one answer. A cell that mixes a
         // searched branch with an evaluated branch would be neither exact nor
         // reproducible.
+        //
+        // A flag that rises inside this cell gives the battle solve below it a
+        // partial value, and the write below still stores that value. No read
+        // can reach it: the check above runs before the cache lookup, and a
+        // flag never falls again. A cancellable entry point must therefore keep
+        // its own cache, or it must drop a cell whose warnings hold
+        // `SolveWarning::Cancelled`.
         let expired = self.deadline_expired();
         let (value, cell_warnings) = self.evaluate(row, col, expired);
         self.stats.cells_evaluated += 1;
@@ -1033,7 +1114,15 @@ impl<'a> PreviewContext<'a> {
             return self.score(battle);
         }
 
-        match solve(child, self.pokemon_dex, self.move_dex, &self.config.battle) {
+        // `super::solve` is this call with no stop signal, so a `None` flag
+        // keeps the value of every earlier caller.
+        match super::search::run(
+            child,
+            self.pokemon_dex,
+            self.move_dex,
+            &self.config.battle,
+            self.cancel,
+        ) {
             Ok(result) => {
                 self.stats.battles_solved += 1;
                 self.stats.turns_simulated += result.stats.turns_simulated;

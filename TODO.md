@@ -109,15 +109,24 @@ in `accept` drops a result that a state change has already made old.
 the last complete checkpoint in place.
 
 The server draws P2's command and returns it as `p2Reveal`. The client sends no
-`p2` field for a bot session. It waits for the current analysis job before it
-submits a battle command. A timeout or a failed job uses the uniform draw.
-`P2RevealPanel` shows the wait line during the search, and the drawn command
-after the turn resolves.
+`p2` field for a bot session. It waits for the current analysis job until that
+job stops, and no client timeout ends the wait. `P2RevealPanel` shows the wait
+line, the elapsed time, and a "Change my move" button during the search, and it
+shows the drawn command after the turn resolves. A job that ends with no answer
+blocks one submission and reports the reason. The next submission plays the
+turn.
 
-- [ ] "The search needs both leads on the field. Record a 'leads' line first." Searching should work for team preview as well...
-  - [ ] The solver UX is quite poor. I should not have to scroll down to see other options or dropdowns, it should just resize and take up more room.
-  - [ ] Searcher should show more fine grained progress like an approximate percent to the next depth or something.
-  - [ ] In simulate mode, if the solver is not done it should wait, with the ability for player one to go back and switch their own move with a loading screen until the solving is done. None of "The search had no answer for this position, so Player 2 picked one legal command at random."
+The wait does not remove the uniform draw. `draw_p2_command` also drops a
+checkpoint whose strategy read data that the fog of war hides, which an exact
+or `mcts` profile does in every fog-of-war battle.
+
+- [ ] Make the default simulate profile play its own search. The setup panel
+      defaults to `doubleOracle`, and the default information mode hides data,
+      so `strategy_respects_fog` rejects every answer and P2 draws at random on
+      every turn.
+  - [ ] Default the P2 algorithm to a belief search, or warn in the picker when
+        the chosen algorithm cannot play under the selected information mode.
+
 - [ ] Searching in tracker mode should be from player 1's perspective. This means that leads should have the back pokemon for player 1 and that information should be used for the tracking. 
 
 `simulator::scoped_abort_signal` carries the deadline and the cancel flag into one
@@ -129,8 +138,14 @@ signal, and a cell whose simulation stops takes a static score.
 `tracker_analysis.rs` runs the same profile for a tracker session. It draws one
 world from the belief, then runs one search for each depth from one through the
 configured depth. Each depth publishes a complete answer, so the panel moves
-while the search goes deeper. `TrackerSolverPanel` shows the win odds and the
-best strategy of both players below the event input instructions.
+while the search goes deeper. Each rung also records its depth and its time
+budget, so the panel shows an approximate progress figure between two answers.
+`TrackerSolverPanel` shows the win odds and the best strategy of both players
+below the event input instructions.
+
+A position with no lead on either side is the team preview. The same module
+then searches the stored team-preview belief with `solve_open_list_preview`,
+and it publishes one rung of bring-and-lead choices.
 
 ## Parallel search
 

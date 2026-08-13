@@ -37,7 +37,8 @@ use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Wid
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
-    solve_team_preview, solve_team_preview_cached,
+    solve_open_list_preview_cancellable, solve_team_preview, solve_team_preview_cached,
+    solve_team_preview_cancellable,
 };
 use crate::solver::{
     CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning,
@@ -5926,4 +5927,135 @@ fn an_abort_does_not_leak_into_the_next_solve() {
         "a solve with no limit must warn about nothing: {:?}",
         exact.warnings
     );
+}
+
+// ── Cancellation of the preview search ──────────────────────────────────────
+
+/// The tracker panel searches team preview, and a committed turn must stop that
+/// search. A raised flag must therefore end the solve with no turn simulation,
+/// and the answer must say that a cancel produced it.
+#[test]
+fn a_cancelled_preview_solve_reports_the_cancel() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    let result = solve_team_preview_cancellable(
+        &small_preview(),
+        pokemon_dex,
+        move_dex,
+        &preview_config(),
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "the cancelled solve did not report the cancel: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.stats.turns_simulated, 0);
+    assert_eq!(result.stats.battles_solved, 0);
+    assert!((0.0..=1.0).contains(&result.value));
+}
+
+/// The flag that [`raise_the_flag_then_score`] raises.
+static PREVIEW_MID_RUN_CANCEL: OnceLock<CancelFlag> = OnceLock::new();
+
+/// Scores one position, and raises [`PREVIEW_MID_RUN_CANCEL`] first.
+///
+/// The battle solve below a preview cell calls this at its depth horizon, so
+/// the flag rises inside a search that already runs.
+fn raise_the_flag_then_score(state: &BattleState, ctx: &eval::EvalContext<'_>) -> f64 {
+    PREVIEW_MID_RUN_CANCEL
+        .get()
+        .expect("the test installed the flag")
+        .cancel();
+    eval::fitted(state, ctx)
+}
+
+/// A commit cancels a preview search that already runs, so the flag has to
+/// reach the battle solve below a cell, not only the cell loop above it.
+#[test]
+fn a_preview_solve_stops_inside_a_running_battle_solve() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = PREVIEW_MID_RUN_CANCEL.get_or_init(CancelFlag::new).clone();
+    assert!(!flag.is_cancelled(), "another test used the shared flag");
+    let config = PreviewConfig {
+        battle: SolveConfig {
+            eval: raise_the_flag_then_score,
+            ..base_config()
+        },
+        deadline: None,
+    };
+
+    let result =
+        solve_team_preview_cancellable(&small_preview(), pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("a cancel returns an answer, never an error");
+
+    assert!(flag.is_cancelled(), "the evaluator never ran");
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "the cancelled solve did not report the cancel: {:?}",
+        result.warnings
+    );
+    // The matrix holds four cells. The flag rises inside the first one, so
+    // every later cell has to take the even value with no work at all.
+    assert_eq!(result.stats.cells_total, 4);
+    assert_eq!(result.stats.cells_evaluated, 1, "{:?}", result.stats);
+    assert!(result.stats.turns_simulated > 0, "{:?}", result.stats);
+}
+
+/// The new parameter must not change the answer of a caller that passes no flag.
+#[test]
+fn a_preview_solve_with_no_flag_keeps_its_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let config = preview_config();
+
+    let plain =
+        solve_team_preview(&state, pokemon_dex, move_dex, &config).expect("the state is solvable");
+    let flag = CancelFlag::new();
+    let watched =
+        solve_team_preview_cancellable(&state, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("the state is solvable");
+    let unwatched = solve_team_preview_cancellable(&state, pokemon_dex, move_dex, &config, None)
+        .expect("the state is solvable");
+
+    for other in [&watched, &unwatched] {
+        assert_eq!(other.value, plain.value);
+        assert_eq!(other.stats.turns_simulated, plain.stats.turns_simulated);
+        assert_eq!(other.stats.battles_solved, plain.stats.battles_solved);
+        assert!(!other.warnings.contains(&SolveWarning::Cancelled));
+    }
+    assert!(!flag.is_cancelled());
+}
+
+/// The tracker searches the open-list entry point, so the flag must reach every
+/// drawn world.
+#[test]
+fn a_cancelled_open_list_preview_reports_the_cancel() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    let result = solve_open_list_preview_cancellable(
+        &open_list_belief_1v1(),
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(2),
+        &open_list_determinize_config(),
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "the cancelled solve did not report the cancel: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.stats.turns_simulated, 0);
+    assert!((0.0..=1.0).contains(&result.value));
 }
