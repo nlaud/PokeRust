@@ -71,6 +71,42 @@ const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string 
   },
 ]
 
+// An algorithm reads the true position, or it reads a belief.
+// A session hides the data of the other player, or it hides nothing.
+// A combination plays only when the two answers agree.
+// `strategy_respects_fog` and `belief_search_inputs` in
+// `poke_rust/src/bin/server/analysis.rs` hold the same rule.
+// A new algorithm needs one entry here and one arm there.
+const BELIEF_ALGORITHMS: BotAlgorithm[] = ['ismcts', 'mccfr']
+
+/** True when this information mode hides data from P2. */
+function hidesData(mode: InformationMode): boolean {
+  return mode !== 'perfect'
+}
+
+/** True when this algorithm can control P2 under this information mode. */
+function canPlay(algorithm: BotAlgorithm, mode: InformationMode): boolean {
+  return BELIEF_ALGORITHMS.includes(algorithm) === hidesData(mode)
+}
+
+/** The algorithm that plays under this information mode. */
+function defaultAlgorithmFor(mode: InformationMode): BotAlgorithm {
+  return hidesData(mode) ? 'ismcts' : 'doubleOracle'
+}
+
+/**
+ * Names the reason that a combination cannot play.
+ *
+ * Call this only when `canPlay` is false. The mode then names the direction of
+ * the mismatch, because the algorithm holds the other answer.
+ */
+function algorithmWarning(mode: InformationMode): string {
+  const cause = hidesData(mode)
+    ? 'This algorithm reads the true position, and the fog of war hides that position.'
+    : 'This algorithm searches a belief, and Perfect Information holds no belief.'
+  return `${cause} The search cannot control P2, so P2 draws one legal command at random.`
+}
+
 type TeamSource = 'saved' | 'meta'
 
 const TEAM_SOURCE_OPTIONS: { value: TeamSource; label: string }[] = [
@@ -100,13 +136,35 @@ export default function SetupPanel() {
   )
   const [team1Source, setTeam1Source] = useState<TeamSource>(saved?.team1Source ?? 'saved')
   const [team2Source, setTeam2Source] = useState<TeamSource>(saved?.team2Source ?? 'saved')
-  const [informationMode, setInformationMode] = useState<InformationMode>(
-    saved?.informationMode ?? 'closedSheet',
-  )
+  const defaultInformationMode = saved?.informationMode ?? 'closedSheet'
+  const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
   const [botPreset, setBotPreset] = useState<BotChoice>(saved?.botPreset ?? 'off')
+  const savedAlgorithm = saved?.botAlgorithm
+  const savedAlgorithmIsExplicit = saved?.botAlgorithmExplicit === true
+  // The old picker stored Double Oracle as its default for a fogged session.
+  // Replace that legacy mismatch, but keep a mismatch selected in the new picker.
+  const initialBotAlgorithm =
+    savedAlgorithm && (canPlay(savedAlgorithm, defaultInformationMode) || savedAlgorithmIsExplicit)
+      ? savedAlgorithm
+      : defaultAlgorithmFor(defaultInformationMode)
   const [botAlgorithm, setBotAlgorithm] = useState<BotAlgorithm>(
-    saved?.botAlgorithm ?? 'doubleOracle',
+    initialBotAlgorithm,
   )
+  const [botAlgorithmExplicit, setBotAlgorithmExplicit] = useState(savedAlgorithmIsExplicit)
+
+  // A mode change replaces an algorithm that cannot play in the new mode.
+  const changeInformationMode = (mode: InformationMode) => {
+    setInformationMode(mode)
+    if (!canPlay(botAlgorithm, mode)) {
+      setBotAlgorithm(defaultAlgorithmFor(mode))
+      setBotAlgorithmExplicit(false)
+    }
+  }
+
+  const changeBotAlgorithm = (algorithm: BotAlgorithm) => {
+    setBotAlgorithm(algorithm)
+    setBotAlgorithmExplicit(true)
+  }
 
   useEffect(() => {
     saveBattleSetup({
@@ -118,6 +176,7 @@ export default function SetupPanel() {
       informationMode,
       botPreset,
       botAlgorithm,
+      botAlgorithmExplicit,
     })
   }, [
     formatId,
@@ -128,6 +187,7 @@ export default function SetupPanel() {
     informationMode,
     botPreset,
     botAlgorithm,
+    botAlgorithmExplicit,
   ])
 
   const format = formats.find((f) => f.id === formatId)
@@ -213,7 +273,7 @@ export default function SetupPanel() {
           <Select
             value={informationMode}
             options={INFO_MODE_OPTIONS}
-            onChange={(v) => setInformationMode(v as InformationMode)}
+            onChange={(v) => changeInformationMode(v as InformationMode)}
           />
         </label>
 
@@ -231,11 +291,16 @@ export default function SetupPanel() {
               <Select
                 value={botAlgorithm}
                 options={BOT_ALGORITHM_OPTIONS}
-                onChange={(v) => setBotAlgorithm(v as BotAlgorithm)}
+                onChange={(v) => changeBotAlgorithm(v as BotAlgorithm)}
               />
               <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-hint">
                 {algorithmHint}
               </p>
+              {!canPlay(botAlgorithm, informationMode) && (
+                <p className="mt-1 text-xs text-warning" data-testid="bot-algorithm-warning">
+                  {algorithmWarning(informationMode)}
+                </p>
+              )}
               <p className="mt-1 text-xs text-ink-muted">
                 P2 uses this solver profile after Player 1 locks a command.
               </p>

@@ -112,26 +112,38 @@ test.describe('Simulate mode', () => {
     await expect(picker.getByRole('button', { name: 'None' })).toBeVisible()
     await picker.getByRole('button', { name: 'None' }).click()
     await openOption('Fast').click()
-    await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
-    await openOption('ISMCTS (sampled belief)').click()
+    // The default information mode hides data, so the default algorithm is the
+    // belief search that plays under that mode.
+    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
     await expect(picker).toContainText('P2 uses this solver profile')
 
     // The picker explains what the chosen algorithm does, on the page and in a
     // tooltip on the list-box trigger.
     const hint = picker.getByTestId('bot-algorithm-hint')
+    const warning = picker.getByTestId('bot-algorithm-warning')
     await expect(hint).toContainText('Sampled')
     await expect(hint).toContainText('respects the fog of war')
+    await expect(warning).toHaveCount(0)
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
     ).toHaveAttribute('title', /Sampled/)
 
-    // An exact algorithm gets its own explanation.
+    // An exact algorithm gets its own explanation. It cannot play under the fog
+    // of war, so the picker also warns about the random draw.
     await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
     await openOption('Double Oracle (exact)').click()
     await expect(hint).toContainText('Exact')
     await expect(hint).toContainText('sees through the fog of war')
+    await expect(warning).toContainText('reads the true position')
+    await expect(warning).toContainText('draws one legal command at random')
+    await page.screenshot({
+      path: testInfo.outputPath('bot-picker-warning.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
     await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
     await openOption('ISMCTS (sampled belief)').click()
+    await expect(warning).toHaveCount(0)
 
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
@@ -266,6 +278,49 @@ test.describe('Simulate mode', () => {
     })
   })
 
+  test('the P2 solver picker migrates only legacy incompatible defaults', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => {
+      localStorage.setItem(
+        'pokerust.battleSetup.v1',
+        JSON.stringify({
+          formatId: 'champions-s2-doubles',
+          team1Id: '',
+          team2Id: '',
+          informationMode: 'closedSheet',
+          botPreset: 'fast',
+          botAlgorithm: 'doubleOracle',
+        }),
+      )
+    })
+    await page.goto('/simulate')
+
+    const picker = page.getByTestId('bot-picker')
+    const openOption = (name: string) =>
+      picker.locator('div.relative:has(> button[aria-expanded="true"])').getByRole('option', { name })
+
+    // The old picker stored its incompatible default without an explicit marker.
+    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
+    await expect(picker.getByTestId('bot-algorithm-warning')).toHaveCount(0)
+
+    // The new picker marks a user selection and restores it after a reload.
+    await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
+    await openOption('Double Oracle (exact)').click()
+    await expect(picker.getByTestId('bot-algorithm-warning')).toBeVisible()
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = localStorage.getItem('pokerust.battleSetup.v1')
+          return raw ? JSON.parse(raw).botAlgorithmExplicit : null
+        }),
+      )
+      .toBe(true)
+
+    await page.reload()
+    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
+    await expect(picker.getByTestId('bot-algorithm-warning')).toBeVisible()
+  })
+
   test('the reveal names the solver strategy under perfect information', async ({
     page,
   }, testInfo) => {
@@ -284,7 +339,11 @@ test.describe('Simulate mode', () => {
         .getByRole('option', { name })
     await picker.getByRole('button', { name: 'None' }).click()
     await openOption('Fast').click()
+    // Perfect Information holds no belief, so the mode change repairs the
+    // algorithm. The picker selects the exact search and shows no warning.
+    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
     await expect(picker.getByTestId('bot-algorithm-hint')).toContainText('Exact')
+    await expect(picker.getByTestId('bot-algorithm-warning')).toHaveCount(0)
 
     await page.getByRole('button', { name: 'Start Battle' }).click()
     const previewMons = page.getByTestId('preview-mon')

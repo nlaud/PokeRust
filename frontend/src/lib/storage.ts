@@ -145,6 +145,9 @@ export interface BattleSetup {
    * `off` and an absent value store no profile. */
   botPreset?: 'off' | BotPreset
   botAlgorithm?: BotAlgorithm
+  /** True when the user selected `botAlgorithm` in the compatibility-aware picker.
+   * An absent value identifies a setup from the old picker. */
+  botAlgorithmExplicit?: boolean
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

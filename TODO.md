@@ -120,13 +120,6 @@ The wait does not remove the uniform draw. `draw_p2_command` also drops a
 checkpoint whose strategy read data that the fog of war hides, which an exact
 or `mcts` profile does in every fog-of-war battle.
 
-- [ ] Make the default simulate profile play its own search. The setup panel
-      defaults to `doubleOracle`, and the default information mode hides data,
-      so `strategy_respects_fog` rejects every answer and P2 draws at random on
-      every turn.
-  - [ ] Default the P2 algorithm to a belief search, or warn in the picker when
-        the chosen algorithm cannot play under the selected information mode.
-
 - [ ] Searching in tracker mode should be from player 1's perspective. This means that leads should have the back pokemon for player 1 and that information should be used for the tracking. 
 
 `simulator::scoped_abort_signal` carries the deadline and the cancel flag into one
