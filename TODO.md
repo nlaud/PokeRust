@@ -7,13 +7,15 @@ and the analysis jobs.
 # Fixes
 
 ## Solver Bugs
-
-- [ ] Search is returning no solution for end of turn switches and switches from parting shot etc.
-  - [ ] We want to support different time limits / depth settings for these, since they are a simpler decision. 
-  - [ ] Add a configuration to the solver settings that represents whether the user should be able to see the current best strategy of the opponent.
+- [ ] Do all of the following.
+  - [ ] We want to support different depth settings for end of turn switches, since they are a simpler decision (No opponent choice here). 
+  - [ ] Add a configuration to the solver settings that represents whether the user should be able to see the current found strategy of the opponent, this should also show the full strategy that the move was sampled from.
+  - [ ] Update the UI for both surfaces of the solver so that it is not two separate containers it is juts one with a dropdown
   - [ ] Solver settings in tracker should not allow for exact solvers, since that doesnt make sense within context of not having all the information
   - [ ] Simulator bots should not have to think when there is only one possible move -- It should just pick that move
-- [ ] SOlver solutions are generally not better than random guessing especially on high modes, you should investigate this and come up with a solution yourself.
+  - [ ] SOlver solutions are generally not better than random guessing especially on high modes, you should investigate this and come up with a solution yourself. Running out of time is currently really bad, especially when you run out on lower depths. We should double the time limit for high effort. 
+  - [ ]I think generally we should remove the time cap, support a choose current move that just ends the search early using the current latest found strategy, and use these as time estimates instead. They should still be doubled I think
+- [ ] Play several games against the bot using playwright (use the best settings). I want you to evaluate each of its moves and strategies, and understand why some moves it makes are completely nonsensical or understand why it is making each of the moves it makes. Return a file to me about this in depth.
 
 # New features
 
