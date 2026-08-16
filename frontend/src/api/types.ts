@@ -282,6 +282,13 @@ export interface BotProfileRequest {
    * The maximum value is `Number.MAX_SAFE_INTEGER`. */
   seed?: number
   maxActionsPerPlayer?: number
+  /** Shows Player 2's strategy to this client. Defaults to false.
+   *
+   * A battle session reads this field, and it is the fog-of-war boundary of
+   * both battle endpoints: without it, no response carries a Player 2 strategy
+   * row. A tracker session already returns both strategies, so it ignores the
+   * field. */
+  revealStrategy?: boolean
 }
 
 /** The resolved profile that the server returns. */
@@ -301,6 +308,8 @@ export interface BotProfileView {
   particles: number | null
   seed: number | null
   maxActionsPerPlayer: number | null
+  /** True when this client may read Player 2's strategy. */
+  revealStrategy: boolean
   /** Each reason that the result can differ from the exact answer. */
   approximations: string[]
   /** Each knob that the server changed away from the preset value. */
@@ -378,11 +387,59 @@ export interface TurnResponse {
   p2Reveal?: P2Reveal
 }
 
+// ── Strategy rows ───────────────────────────────────────────────────────────
+// A strategy row renders one joint action of one mixed strategy. The tracker
+// panel shows both players, and a battle session shows Player 2 only when its
+// profile carries `revealStrategy`.
+
+/** One bring-and-lead choice of a team-preview strategy. */
+export interface PreviewChoice {
+  /** The lead species, in slot order. */
+  leads: string[]
+  /** The other brought species, in roster order. */
+  back: string[]
+}
+
+/** One joint action of a strategy, with its rate. */
+export interface StrategyRow {
+  /** One command for each active slot, in slot order.
+   * A team-preview row holds no command. */
+  commands: CommandOption[]
+  /** The bring-and-lead choice of a team-preview row.
+   * `null` in a battle row. */
+  preview: PreviewChoice | null
+  /** How often the strategy plays this joint action, from 0 through 1. */
+  probability: number
+}
+
+/** Player 2's mixed strategy at one battle position.
+ *
+ * A battle response carries this block only when the session profile holds
+ * `revealStrategy`. Without that setting the field is absent, so a default
+ * session reads no part of Player 2's plan. */
+export interface P2Strategy {
+  /** Which question this block answers.
+   * A `teamPreview` block answers the bring-and-lead choice. */
+  position: 'battle' | 'teamPreview'
+  /** All positive-rate rows, highest first.
+   * A row with a rate of zero does not appear. */
+  rows: StrategyRow[]
+  /** How many positive-rate rows the strategy holds. */
+  total: number
+  /** The index in `rows` of the row that supplied the drawn command.
+   *
+   * Absent in a checkpoint block, which names no draw. */
+  drawnIndex?: number
+}
+
 /** The drawn P2 command of one bot turn.
  *
  * The reveal carries one action and nothing else of P2's plan: no probability
  * of that action, no second action, and no win odds. The server returns it only
- * with the resolved turn, so both commands are already locked. */
+ * with the resolved turn, so both commands are already locked.
+ *
+ * A session with `revealStrategy` also carries `strategy`, which holds the
+ * whole mixed strategy that the draw sampled from. */
 export interface P2Reveal {
   /** The drawn command of each active slot, rendered against the position
    * before the turn.
@@ -397,6 +454,11 @@ export interface P2Reveal {
   /** The replay record of the search that supplied the strategy.
    * Absent for either uniform draw. */
   replay?: AnalysisReplay
+  /** The strategy that the draw sampled from.
+   *
+   * Absent unless the session profile holds `revealStrategy`, and absent for
+   * either uniform draw, which reads no strategy. */
+  strategy?: P2Strategy
 }
 
 /** The data that repeats one analysis search. */
@@ -443,13 +505,22 @@ export interface AnalysisCheckpoint {
   seed: number
   /** Every reason that the answer is approximate. */
   warnings: string[]
+  /** Player 2's strategy at the position that this checkpoint answers.
+   *
+   * Absent unless the session profile holds `revealStrategy`. Also absent
+   * while the checkpoint is stale, because a stale strategy names actions of
+   * an older position. */
+  p2Strategy?: P2Strategy
 }
 
 /** The private progress of the P2 analysis job.
  *
  * `GET /api/battles/{id}/analysis` returns progress alone. It carries no P2
  * action, no P2 strategy, and no P2 win odds, because P1 reads the same
- * endpoint during a hotseat battle. */
+ * endpoint during a hotseat battle.
+ *
+ * One session breaks that rule on purpose: a profile with `revealStrategy`
+ * asks for P2's strategy, and the checkpoint then carries it. */
 export interface AnalysisProgressResponse {
   /** The generation of the current position.
    * Every state change raises it by one. */
@@ -476,26 +547,6 @@ export type TrackerAnalysisRequest = BotProfileRequest
 /** The phase of the tracker solver panel.
  * `off` means that the session holds no profile. */
 export type TrackerAnalysisPhase = 'off' | 'idle' | 'running' | 'complete' | 'failed'
-
-/** One bring-and-lead choice of a team-preview strategy. */
-export interface TrackerPreviewChoice {
-  /** The lead species, in slot order. */
-  leads: string[]
-  /** The other brought species, in roster order. */
-  back: string[]
-}
-
-/** One joint action of a strategy, with its rate. */
-export interface TrackerStrategyRow {
-  /** One command for each active slot, in slot order.
-   * A team-preview row holds no command. */
-  commands: CommandOption[]
-  /** The bring-and-lead choice of a team-preview row.
-   * `null` in a battle row. */
-  preview: TrackerPreviewChoice | null
-  /** How often the strategy plays this joint action, from 0 through 1. */
-  probability: number
-}
 
 /** Which question one rung answers. */
 export type TrackerAnalysisPosition = 'battle' | 'teamPreview'
@@ -532,9 +583,9 @@ export interface TrackerAnalysisCheckpoint {
   /** Player 2's odds of winning. The game is zero-sum. */
   p2WinOdds: number
   /** The highest-rate joint actions of Player 1. */
-  p1Strategy: TrackerStrategyRow[]
+  p1Strategy: StrategyRow[]
   /** The highest-rate joint actions of Player 2. */
-  p2Strategy: TrackerStrategyRow[]
+  p2Strategy: StrategyRow[]
   /** True when the Player 2 rows form one strategy for one private state. */
   p2StrategyIsPlayable: boolean
   /** Every reason that the answer is approximate. */

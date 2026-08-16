@@ -163,6 +163,33 @@ The panel marks a uniform draw with a warning.
 `poke_rust/src/solver/README.md` explains when the server falls back to that
 draw.
 
+### Show the opponent strategy
+
+The setup panel holds one checkbox under the P2 solver profile.
+The checkbox sets `botP2.revealStrategy` on the create request.
+The setting is off by default.
+
+The server is the gate.
+A session without the setting sends no P2 strategy row.
+A hotseat battle holds no profile, so it never sends one.
+
+A session with the setting reads two strategies:
+
+1. `GET /api/battles/{id}/analysis` carries the strategy of the current
+   position. `P2RevealPanel.tsx` reads it once each second.
+2. `POST /api/battles/{id}/turn` carries the strategy that supplied the drawn
+   command. The response also names the row of that command.
+
+The rows sort by rate, highest first.
+A row with a rate of zero does not appear.
+The response includes every positive-rate row.
+
+Only a checkpoint of the current position carries rows.
+A stale answer names actions of an older position.
+
+This setting shows you what P2 plans.
+Keep it off for a fair battle.
+
 ## Tracker mode
 
 Tracker mode records a battle that occurs outside the simulator.

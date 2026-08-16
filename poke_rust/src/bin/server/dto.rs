@@ -638,11 +638,66 @@ pub struct TurnResponse {
     pub p2_reveal: Option<P2RevealDto>,
 }
 
+// ── Strategy rows ────────────────────────────────────────────────────────────
+// A strategy row renders one joint action of one mixed strategy. The tracker
+// panel shows both players, and a battle session shows Player 2 only when its
+// profile carries `revealStrategy`.
+
+/// One bring-and-lead choice of a team-preview strategy.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewChoiceDto {
+    /// The lead species, in slot order.
+    pub leads: Vec<String>,
+    /// The other brought species, in roster order.
+    pub back: Vec<String>,
+}
+
+/// One joint action of a strategy, with its rate.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyRowDto {
+    /// One command for each active slot, in slot order.
+    /// A team-preview row holds no command.
+    pub commands: Vec<CommandOptionDto>,
+    /// The bring-and-lead choice of a team-preview row.
+    /// `None` in a battle row.
+    pub preview: Option<PreviewChoiceDto>,
+    /// How often the strategy plays this joint action, from 0 through 1.
+    pub probability: f64,
+}
+
+/// Player 2's mixed strategy at one battle position.
+///
+/// A battle response carries this block only when the session profile holds
+/// `revealStrategy`. Without that setting the field is absent, so a default
+/// session sends no part of Player 2's plan.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct P2StrategyDto {
+    /// One of `battle` or `teamPreview`.
+    /// A `teamPreview` block answers the bring-and-lead choice.
+    pub position: String,
+    /// All positive-rate rows, highest first.
+    /// A row with a rate of zero does not appear.
+    pub rows: Vec<StrategyRowDto>,
+    /// How many positive-rate rows the strategy holds.
+    pub total: usize,
+    /// The index in `rows` of the row that supplied the drawn command.
+    ///
+    /// Absent in a checkpoint block, which names no draw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawn_index: Option<usize>,
+}
+
 /// The drawn P2 command of one bot turn.
 ///
 /// The reveal carries one action and nothing else of P2's plan: no probability
 /// of that action, no second action, and no win odds. The server returns it
 /// only with the resolved turn, so both commands are already locked.
+///
+/// A session with `revealStrategy` also carries `strategy`, which holds the
+/// whole mixed strategy that the draw sampled from.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct P2RevealDto {
@@ -661,6 +716,12 @@ pub struct P2RevealDto {
     /// Absent for either uniform draw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<AnalysisReplayDto>,
+    /// The strategy that the draw sampled from.
+    ///
+    /// Absent unless the session profile holds `revealStrategy`, and absent for
+    /// either uniform draw, which reads no strategy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<P2StrategyDto>,
 }
 
 /// The data that repeats one analysis search.
@@ -723,6 +784,9 @@ pub struct AnalysisProgressDto {
 /// The row carries wall-clock cost alone. A node count or a turn-simulation
 /// count divides by P1's own action count to give P2's, so neither appears
 /// here — the same rule that scrubs the action cap out of each warning.
+///
+/// A session with `revealStrategy` also carries `p2Strategy`. That setting is
+/// the one way a strategy row reaches this response.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisCheckpointDto {
@@ -738,6 +802,13 @@ pub struct AnalysisCheckpointDto {
     pub seed: u64,
     /// Every reason that the answer is approximate.
     pub warnings: Vec<String>,
+    /// Player 2's strategy at the position that this checkpoint answers.
+    ///
+    /// Absent unless the session profile holds `revealStrategy`. Also absent
+    /// while the checkpoint is stale, because a stale strategy names actions of
+    /// an older position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p2_strategy: Option<P2StrategyDto>,
 }
 
 // ── Tracker mode ─────────────────────────────────────────────────────────────
@@ -842,33 +913,9 @@ pub struct TrackerCompletionsDto {
 }
 
 // ── Tracker analysis ─────────────────────────────────────────────────────────
-// The tracker has one user, and that user typed both rosters. These rows
+// The tracker has one user, and that user typed both rosters. Its rows
 // therefore carry the strategy and the win odds of both players. The battle
 // endpoints keep their own privacy rules — see `AnalysisProgressDto`.
-
-/// One bring-and-lead choice of a team-preview strategy.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TrackerPreviewChoiceDto {
-    /// The lead species, in slot order.
-    pub leads: Vec<String>,
-    /// The other brought species, in roster order.
-    pub back: Vec<String>,
-}
-
-/// One joint action of a strategy, with its rate.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TrackerStrategyRowDto {
-    /// One command for each active slot, in slot order.
-    /// A team-preview row holds no command.
-    pub commands: Vec<CommandOptionDto>,
-    /// The bring-and-lead choice of a team-preview row.
-    /// `None` in a battle row.
-    pub preview: Option<TrackerPreviewChoiceDto>,
-    /// How often the strategy plays this joint action, from 0 through 1.
-    pub probability: f64,
-}
 
 /// The answer of one complete ladder rung.
 #[derive(Serialize, Clone)]
@@ -893,9 +940,9 @@ pub struct TrackerAnalysisCheckpointDto {
     /// Player 2's odds of winning. The game is zero-sum.
     pub p2_win_odds: f64,
     /// The highest-rate joint actions of Player 1.
-    pub p1_strategy: Vec<TrackerStrategyRowDto>,
+    pub p1_strategy: Vec<StrategyRowDto>,
     /// The highest-rate joint actions of Player 2.
-    pub p2_strategy: Vec<TrackerStrategyRowDto>,
+    pub p2_strategy: Vec<StrategyRowDto>,
     /// True when the P2 rows form one strategy for one private state.
     pub p2_strategy_is_playable: bool,
     /// Every reason that the answer is approximate.

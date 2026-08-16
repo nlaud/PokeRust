@@ -24,6 +24,15 @@
 //! [`draw_p2_command`] draws the command that P2 plays. The turn response
 //! reveals that one command after the turn resolves, so both commands are
 //! already locked. See [`P2Draw`] for what the reveal carries.
+//!
+//! # The reveal setting
+//!
+//! `botP2.revealStrategy` opens both responses. A session with that setting
+//! reads P2's whole mixed strategy: [`progress_dto`] renders the strategy of the
+//! current position, and [`reveal_dto`] renders the strategy that supplied the
+//! drawn command. The setting defaults to false, and this module is the only
+//! place that renders those rows, so a session without it sends no strategy row
+//! at all. The rules above still hold for every session that keeps the default.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -47,7 +56,8 @@ use poke_rust::state::battle::{
 
 use crate::bot::{BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
-    AnalysisCheckpointDto, AnalysisProgressDto, AnalysisReplayDto, P2RevealDto, PlayerCommandDto,
+    AnalysisCheckpointDto, AnalysisProgressDto, AnalysisReplayDto, P2RevealDto, P2StrategyDto,
+    PlayerCommandDto, PreviewChoiceDto, StrategyRowDto,
 };
 use crate::mapping;
 use crate::session::{self, BattleSession, Dexes, MetaDexes};
@@ -357,6 +367,9 @@ fn complete_line(job: &JobTicket, checkpoint: &AnalysisCheckpoint) -> String {
 /// The row carries the wall-clock cost of the search, never the strategy and
 /// never a count that divides out an action-set size. See
 /// [`AnalysisCheckpoint::turns_simulated`].
+///
+/// [`progress_dto`] adds the strategy afterwards, and only for a session whose
+/// profile holds `reveal_strategy`.
 fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisCheckpointDto {
     AnalysisCheckpointDto {
         generation: checkpoint.generation,
@@ -366,7 +379,148 @@ fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisC
         elapsed_ms: checkpoint.elapsed.as_millis() as u64,
         seed: checkpoint.seed,
         warnings: checkpoint.warnings.clone(),
+        p2_strategy: None,
     }
+}
+
+/// The analysis response of one session.
+///
+/// [`AnalysisState::progress`] builds the private view, which every session
+/// gets. A session whose profile holds `reveal_strategy` then also gets P2's
+/// strategy at the current position.
+///
+/// Only a checkpoint of the current position carries rows. A stale checkpoint
+/// names actions of an older position, and [`strategy_dto`] would render them
+/// against a field that no longer holds those Pokemon.
+pub fn progress_dto(session: &BattleSession) -> AnalysisProgressDto {
+    let mut view = session.analysis.progress();
+    if !reveals_strategy(session) {
+        return view;
+    }
+    let Some(checkpoint) = session.analysis.current_checkpoint() else {
+        return view;
+    };
+    if let Some(row) = view.checkpoint.as_mut() {
+        row.p2_strategy = strategy_dto(&session.state, &checkpoint.p2_strategy, None);
+    }
+    view
+}
+
+/// True when the client of this session may read P2's strategy.
+///
+/// A hotseat session holds no profile, so it never reveals a strategy. This is
+/// the whole gate: no other call site renders a P2 strategy row.
+fn reveals_strategy(session: &BattleSession) -> bool {
+    session
+        .bot_p2
+        .as_ref()
+        .is_some_and(|profile| profile.view.reveal_strategy)
+}
+
+// ── The revealed strategy ────────────────────────────────────────────────────
+
+/// Renders P2's strategy against the position that the search read.
+///
+/// `drawn` is the index in `strategy` of the row that supplied a drawn command.
+/// The rendered block reports where that row landed after the sort.
+///
+/// Returns `None` when the strategy and the position disagree, because a battle
+/// row cannot render against a preview roster and a preview row cannot render
+/// against a field. [`draw_p2_command`] applies the same rule.
+fn strategy_dto(
+    state: &MatchState,
+    strategy: &P2Strategy,
+    drawn: Option<usize>,
+) -> Option<P2StrategyDto> {
+    match (state, strategy) {
+        (MatchState::BattleState(battle), P2Strategy::Battle(rows)) => {
+            let (kept, total) = ranked(rows, |row| row.probability);
+            Some(P2StrategyDto {
+                position: "battle".to_string(),
+                drawn_index: drawn_index(&kept, drawn),
+                rows: kept
+                    .iter()
+                    .map(|(_, action)| StrategyRowDto {
+                        commands: action
+                            .commands
+                            .iter()
+                            .enumerate()
+                            .map(|(slot_idx, command)| {
+                                mapping::command_option(battle, Player::P2, slot_idx, command)
+                            })
+                            .collect(),
+                        preview: None,
+                        probability: action.probability,
+                    })
+                    .collect(),
+                total,
+            })
+        }
+        (MatchState::TeamPreviewState(preview), P2Strategy::Preview(rows)) => {
+            let (kept, total) = ranked(rows, |row| row.probability);
+            Some(P2StrategyDto {
+                position: "teamPreview".to_string(),
+                drawn_index: drawn_index(&kept, drawn),
+                rows: kept
+                    .iter()
+                    .map(|(_, row)| StrategyRowDto {
+                        commands: Vec::new(),
+                        preview: Some(PreviewChoiceDto {
+                            leads: roster_names(&preview.p2_mons, &row.choice.active_indices),
+                            back: roster_names(&preview.p2_mons, &row.choice.back_indices),
+                        }),
+                        probability: row.probability,
+                    })
+                    .collect(),
+                total,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The rows that one response carries, highest rate first.
+///
+/// Each entry keeps its index in the source strategy, so [`drawn_index`] can
+/// name the drawn row after the sort. A row with a rate of zero never plays, so
+/// it does not appear and it does not count toward the total. `sort_by` is
+/// stable, so a tie keeps the order that the solver returned.
+///
+/// Returns all positive rows and their count.
+fn ranked<T>(rows: &[T], weight: impl Fn(&T) -> f64) -> (Vec<(usize, &T)>, usize) {
+    let mut ordered: Vec<(usize, &T)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            let value = weight(row);
+            value.is_finite() && value > 0.0
+        })
+        .collect();
+    ordered.sort_by(|a, b| weight(b.1).total_cmp(&weight(a.1)));
+    let total = ordered.len();
+    (ordered, total)
+}
+
+/// Where the drawn row landed in the rendered list.
+///
+/// Returns `None` when the caller named no draw or named a nonpositive row.
+fn drawn_index<T>(kept: &[(usize, &T)], drawn: Option<usize>) -> Option<usize> {
+    let drawn = drawn?;
+    kept.iter().position(|(index, _)| *index == drawn)
+}
+
+/// Names the roster entries that one index list selects.
+///
+/// The session holds P2's own team, so every species is known. An index outside
+/// the roster cannot happen, and the fallback keeps the row complete.
+fn roster_names(mons: &[poke_rust::state::pokemon::PokemonState], indices: &[usize]) -> Vec<String> {
+    indices
+        .iter()
+        .map(|&index| match mons.get(index) {
+            Some(mon) => mon.species.to_string(),
+            None => "Unknown".to_string(),
+        })
+        .collect()
 }
 
 /// Starts one analysis job for the current position.
@@ -1060,6 +1214,10 @@ impl DrawSource {
 /// The record holds one action. It holds no probability of that action and no
 /// other action of the strategy, so the reveal that [`reveal_dto`] builds shows
 /// P2's choice and nothing else of P2's plan.
+///
+/// A session with `reveal_strategy` also fills `strategy`, which holds the whole
+/// mixed strategy that the draw sampled from. That field is the one exception,
+/// and the setting is its only source.
 pub struct P2Draw {
     pub command: PlayerCommand,
     pub source: DrawSource,
@@ -1068,6 +1226,11 @@ pub struct P2Draw {
     /// The replay record of the checkpoint that supplied the strategy.
     /// `None` for either uniform draw.
     pub replay: Option<AnalysisReplay>,
+    /// The strategy that this draw sampled from.
+    ///
+    /// `None` unless the session profile holds `reveal_strategy`, and `None` for
+    /// either uniform draw, which reads no strategy.
+    pub strategy: Option<P2StrategyDto>,
 }
 
 /// Draws the command that P2 plays this turn.
@@ -1106,7 +1269,7 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
                 generation,
                 "the strategy holds no action with a positive weight for this position",
             ),
-            Some(commands) => match accept(session, dexes, commands) {
+            Some((index, commands)) => match accept(session, dexes, commands) {
                 None => {
                     uniform_draw_line(generation, "the legality check rejected the sampled action")
                 }
@@ -1116,6 +1279,7 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
                         source: DrawSource::Strategy,
                         seed,
                         replay: Some(checkpoint.replay.clone()),
+                        strategy: revealed_strategy(session, checkpoint, index),
                     });
                 }
             },
@@ -1143,8 +1307,24 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
             source: DrawSource::Uniform,
             seed,
             replay: None,
+            strategy: None,
         })
         .ok_or_else(|| "P2 has no legal command right now".to_string())
+}
+
+/// The strategy that one draw sampled from, for a session that reveals it.
+///
+/// Returns `None` for every session that keeps the default setting, so the
+/// reveal then carries the drawn command alone.
+fn revealed_strategy(
+    session: &BattleSession,
+    checkpoint: &AnalysisCheckpoint,
+    drawn: usize,
+) -> Option<P2StrategyDto> {
+    if !reveals_strategy(session) {
+        return None;
+    }
+    strategy_dto(&session.state, &checkpoint.p2_strategy, Some(drawn))
 }
 
 /// The checkpoint that may supply P2's command at the current position.
@@ -1215,7 +1395,7 @@ fn draw_preview_command(
                 generation,
                 "the strategy holds no choice with a positive weight for this position",
             ),
-            Some(choice) => match accept_preview(session, dexes, choice) {
+            Some((index, choice)) => match accept_preview(session, dexes, choice) {
                 None => {
                     uniform_draw_line(generation, "the legality check rejected the sampled choice")
                 }
@@ -1225,6 +1405,7 @@ fn draw_preview_command(
                         source: DrawSource::Strategy,
                         seed,
                         replay: Some(checkpoint.replay.clone()),
+                        strategy: revealed_strategy(session, checkpoint, index),
                     });
                 }
             },
@@ -1244,6 +1425,7 @@ fn draw_preview_command(
             source: DrawSource::TeamPreview,
             seed,
             replay: None,
+            strategy: None,
         })
         .ok_or_else(|| "P2 has no legal team-preview choice".to_string())
 }
@@ -1252,9 +1434,13 @@ fn draw_preview_command(
 ///
 /// `state` must be the position before the turn, so each description names the
 /// Pokemon that acted.
+///
+/// The strategy block comes from the draw, which fills it only for a session
+/// with `reveal_strategy`. A preview draw of such a session therefore names
+/// P2's back picks, which is what that session asked for.
 pub fn reveal_dto(state: &MatchState, draw: &P2Draw) -> P2RevealDto {
-    // Team preview renders nothing: the leads appear on the field of their own
-    // accord, and the back picks stay hidden under the fog of war.
+    // Team preview renders no command: the leads appear on the field of their
+    // own accord, and the back picks stay hidden under the fog of war.
     let commands = match (state, &draw.command) {
         (MatchState::BattleState(battle), PlayerCommand::Battle(commands)) => commands
             .iter()
@@ -1270,6 +1456,7 @@ pub fn reveal_dto(state: &MatchState, draw: &P2Draw) -> P2RevealDto {
         source: draw.source.as_str().to_string(),
         draw_seed: draw.seed,
         replay: draw.replay.as_ref().map(replay_dto),
+        strategy: draw.strategy.clone(),
     }
 }
 
@@ -1323,49 +1510,59 @@ fn mix_draw_seed(profile_seed: Option<u64>, generation: u64) -> u64 {
 
 /// Draws one joint action from a mixed strategy.
 ///
-/// Returns `None` for an empty strategy. A negative weight counts as zero, and
-/// a total that falls short of one still returns an action, so a rounding loss
-/// never drops the draw.
+/// Returns the index and the drawn row, so a reveal can identify it.
+/// Returns `None` when no finite positive weight exists.
 fn sample_strategy<'a>(
     strategy: &'a [JointActionProb],
     rng: &mut StdRng,
-) -> Option<&'a [BattleCommand]> {
+) -> Option<(usize, &'a [BattleCommand])> {
     sample_weighted(strategy, |action| action.probability, rng)
-        .map(|action| action.commands.as_slice())
+        .map(|(index, action)| (index, action.commands.as_slice()))
 }
 
 /// Draws one bring-and-lead choice from a preview strategy.
 ///
-/// The weight rules are those of [`sample_strategy`].
+/// The index and the weight rules are those of [`sample_strategy`].
 fn sample_preview<'a>(
     strategy: &'a [PreviewChoiceProb],
     rng: &mut StdRng,
-) -> Option<&'a TeamPreviewCommand> {
-    sample_weighted(strategy, |row| row.probability, rng).map(|row| &row.choice)
+) -> Option<(usize, &'a TeamPreviewCommand)> {
+    sample_weighted(strategy, |row| row.probability, rng).map(|(index, row)| (index, &row.choice))
 }
 
 /// Draws one row of a mixed strategy.
 ///
-/// Returns `None` for an empty list. A negative weight counts as zero, and a
-/// total that falls short of one still returns a row, so a rounding loss never
-/// drops the draw.
+/// Returns the index and the drawn row.
+/// Returns `None` when no finite positive weight exists.
+/// A negative weight counts as zero.
 fn sample_weighted<'a, T>(
     rows: &'a [T],
     weight: impl Fn(&T) -> f64,
     rng: &mut StdRng,
-) -> Option<&'a T> {
-    let total: f64 = rows.iter().map(|row| weight(row).max(0.0)).sum();
+) -> Option<(usize, &'a T)> {
+    let mut total = 0.0;
+    for row in rows {
+        let value = weight(row);
+        if !value.is_finite() {
+            return None;
+        }
+        total += value.max(0.0);
+    }
     if !total.is_finite() || total <= 0.0 {
-        return rows.first();
+        return None;
     }
     let mut roll = rng.gen_range(0.0..1.0) * total;
-    for row in rows {
-        roll -= weight(row).max(0.0);
-        if roll <= 0.0 {
-            return Some(row);
+    for (index, row) in rows.iter().enumerate() {
+        let value = weight(row).max(0.0);
+        if value > 0.0 && roll < value {
+            return Some((index, row));
         }
+        roll -= value;
     }
-    rows.last()
+    rows.iter()
+        .enumerate()
+        .rev()
+        .find(|(_, row)| weight(row) > 0.0)
 }
 
 /// The first joint action that the legality check accepts.
@@ -1888,7 +2085,9 @@ mod tests {
             .collect()
     }
 
-    fn drawn_index(commands: &[BattleCommand]) -> usize {
+    /// The party index of one drawn switch row.
+    fn drawn_party_index(drawn: (usize, &[BattleCommand])) -> usize {
+        let commands = drawn.1;
         match &commands[0] {
             BattleCommand::Switch(switch) => switch.party_index,
             other => panic!("the fixture draws a switch, got {other:?}"),
@@ -1902,11 +2101,11 @@ mod tests {
 
         let first = {
             let mut rng = StdRng::seed_from_u64(4_242);
-            drawn_index(sample_strategy(&strategy, &mut rng).unwrap())
+            drawn_party_index(sample_strategy(&strategy, &mut rng).unwrap())
         };
         for _ in 0..20 {
             let mut rng = StdRng::seed_from_u64(4_242);
-            let again = drawn_index(sample_strategy(&strategy, &mut rng).unwrap());
+            let again = drawn_party_index(sample_strategy(&strategy, &mut rng).unwrap());
             assert_eq!(again, first);
         }
     }
@@ -1920,32 +2119,35 @@ mod tests {
         let mut counts = [0u32; 2];
 
         for _ in 0..20_000 {
-            counts[drawn_index(sample_strategy(&strategy, &mut rng).unwrap())] += 1;
+            counts[drawn_party_index(sample_strategy(&strategy, &mut rng).unwrap())] += 1;
         }
 
         let second = f64::from(counts[1]) / 20_000.0;
         assert!((second - 0.25).abs() < 0.02, "{counts:?}");
     }
 
-    /// A solver can return weights that do not total one, and a rounding loss
-    /// must never drop the draw.
+    /// A short total can draw, but an invalid strategy must use the fallback.
     #[test]
-    fn a_short_or_broken_weight_total_still_draws() {
+    fn a_short_total_draws_and_an_invalid_total_does_not() {
         let mut rng = StdRng::seed_from_u64(9);
 
         // Weights that fall short of one.
         let short = strategy(&[0.4, 0.4]);
         assert!(sample_strategy(&short, &mut rng).is_some());
 
-        // Every weight zero.
+        // A zero total has no strategy row to draw.
         let zeroed = strategy(&[0.0, 0.0]);
-        assert_eq!(drawn_index(sample_strategy(&zeroed, &mut rng).unwrap()), 0);
+        assert!(sample_strategy(&zeroed, &mut rng).is_none());
+
+        // A non-finite total cannot define a mixed strategy.
+        let non_finite = strategy(&[f64::NAN, 1.0]);
+        assert!(sample_strategy(&non_finite, &mut rng).is_none());
 
         // A negative weight counts as zero, so the positive action wins.
         let negative = strategy(&[-1.0, 1.0]);
         for _ in 0..50 {
             assert_eq!(
-                drawn_index(sample_strategy(&negative, &mut rng).unwrap()),
+                drawn_party_index(sample_strategy(&negative, &mut rng).unwrap()),
                 1
             );
         }
@@ -2045,6 +2247,7 @@ mod tests {
             source: DrawSource::Strategy,
             seed: 31,
             replay: Some(checkpoint.replay.clone()),
+            strategy: None,
         };
         // The fixture strategy holds one action; a real one holds more. Build
         // the reveal from the draw alone, which is the whole point.
@@ -2053,6 +2256,7 @@ mod tests {
             source: draw.source.as_str().to_string(),
             draw_seed: draw.seed,
             replay: draw.replay.as_ref().map(replay_dto),
+            strategy: None,
         };
 
         let json = serde_json::to_string(&reveal).unwrap();
@@ -2125,7 +2329,7 @@ mod tests {
         let mut counts = [0u32; 2];
 
         for _ in 0..20_000 {
-            counts[sample_preview(&strategy, &mut rng).unwrap().active_indices[0]] += 1;
+            counts[sample_preview(&strategy, &mut rng).unwrap().1.active_indices[0]] += 1;
         }
 
         let second = f64::from(counts[1]) / 20_000.0;
@@ -2136,6 +2340,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(seed);
             sample_preview(&strategy, &mut rng)
                 .unwrap()
+                .1
                 .active_indices
                 .clone()
         };
@@ -2240,5 +2445,317 @@ mod tests {
         let joined = checkpoint.warnings.join("\n");
         assert!(joined.contains("action cap"), "{joined}");
         assert!(joined.contains("depth 1 of the 3"), "{joined}");
+    }
+
+    // ── The revealed strategy ───────────────────────────────────────────────
+    // `botP2.revealStrategy` is the fog-of-war boundary of both battle
+    // endpoints. These tests hold that boundary shut by default and check what
+    // one open session reads.
+
+    mod reveal {
+        use super::*;
+        use crate::bot::{BotProfile, BotProfileRequest};
+        use crate::session::SessionConfig;
+        use poke_rust::simulator::{simulate_turn, team_preview_state_from_team_strings};
+        use poke_rust::state::battle::{AttackCommand, BattleState};
+        use poke_rust::state::dex_data::{
+            MoveData, PokemonData, parse_move_dex, parse_pokemon_dex,
+        };
+        use poke_rust::data::pokemon_move::PokemonMove;
+        use poke_rust::data::species::Species;
+        use std::sync::OnceLock;
+
+        const TEAM_P1: &str = "Pikachu\nAbility: Static\nLevel: 50\n- Thunderbolt\n- Protect\n\n\
+             Charizard\nAbility: Blaze\nLevel: 50\n- Flamethrower\n- Protect\n";
+        const TEAM_P2: &str = "Snorlax\nAbility: Immunity\nLevel: 50\n- Body Slam\n- Protect\n\n\
+             Gengar\nAbility: Levitate\nLevel: 50\n- Shadow Ball\n- Protect\n";
+
+        static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
+        static MOVE_DEX: OnceLock<HashMap<PokemonMove, MoveData>> = OnceLock::new();
+
+        fn pokemon_dex() -> &'static HashMap<Species, PokemonData> {
+            POKEMON_DEX.get_or_init(|| parse_pokemon_dex("../pokemon_info/showdownDex.txt"))
+        }
+
+        fn move_dex() -> &'static HashMap<PokemonMove, MoveData> {
+            MOVE_DEX.get_or_init(|| parse_move_dex("../pokemon_info/showdownMoves.txt"))
+        }
+
+        /// A singles preview of two two-Pokemon rosters.
+        fn preview_state() -> TeamPreviewState {
+            team_preview_state_from_team_strings(
+                TEAM_P1,
+                TEAM_P2,
+                pokemon_dex(),
+                move_dex(),
+                1,
+                2,
+                true,
+            )
+        }
+
+        /// The battle that follows the preview when both sides lead with their
+        /// first Pokemon.
+        fn battle_state() -> BattleState {
+            let lead = PlayerCommand::TeamPreview(TeamPreviewCommand {
+                active_indices: vec![0],
+                back_indices: vec![1],
+            });
+            let branches = simulate_turn(
+                &MatchState::TeamPreviewState(preview_state()),
+                &lead,
+                &lead,
+                move_dex(),
+                pokemon_dex(),
+                false,
+                1,
+                None,
+            );
+            match &branches[0].0 {
+                MatchState::BattleState(battle) => battle.clone(),
+                other => panic!("a resolved preview gives a battle: {other:?}"),
+            }
+        }
+
+        /// One battle strategy: attack, switch, then attack again.
+        fn battle_strategy(weights: [f64; 3]) -> P2Strategy {
+            P2Strategy::Battle(vec![
+                JointActionProb {
+                    commands: vec![BattleCommand::Attack(AttackCommand {
+                        move_slot: 0,
+                        target: None,
+                        terastallize: false,
+                        mega_evolve: false,
+                    })],
+                    probability: weights[0],
+                },
+                JointActionProb {
+                    commands: vec![BattleCommand::Switch(SwitchCommand { party_index: 1 })],
+                    probability: weights[1],
+                },
+                JointActionProb {
+                    commands: vec![BattleCommand::Attack(AttackCommand {
+                        move_slot: 1,
+                        target: None,
+                        terastallize: false,
+                        mega_evolve: false,
+                    })],
+                    probability: weights[2],
+                },
+            ])
+        }
+
+        /// A session at `state` whose profile reveals the strategy or hides it.
+        fn session(state: MatchState, reveal: bool) -> BattleSession {
+            let request = BotProfileRequest {
+                algorithm: Some("doubleOracle".to_string()),
+                reveal_strategy: Some(reveal),
+                ..BotProfileRequest::default()
+            };
+            let profile: BotProfile = crate::bot::resolve("botP2", &request, 16, true).unwrap();
+            BattleSession {
+                state,
+                config: SessionConfig {
+                    active_per_side: 1,
+                    brought_per_side: 2,
+                    consider_crit: false,
+                    damage_rolls: 1,
+                    information_mode:
+                        poke_rust::information::unknowns::InformationMode::PerfectInformation,
+                },
+                log_p1: Vec::new(),
+                log_p2: Vec::new(),
+                belief_p1: None,
+                belief_p2: None,
+                inference_config: None,
+                bot_p2: Some(profile),
+                analysis: AnalysisState::default(),
+            }
+        }
+
+        /// Stores one complete checkpoint of the current position.
+        fn store(session: &mut BattleSession, strategy: P2Strategy) {
+            let job = session.analysis.start();
+            let stored = AnalysisCheckpoint {
+                p2_strategy: strategy,
+                ..checkpoint(session.analysis.generation(), 1)
+            };
+            session.analysis.accept(&job, Ok(stored));
+        }
+
+        /// The default session must send no part of P2's plan, which is the rule
+        /// that held before this setting existed.
+        #[test]
+        fn a_hidden_session_sends_no_strategy_row() {
+            let mut hidden = session(MatchState::BattleState(battle_state()), false);
+            store(&mut hidden, battle_strategy([0.5, 0.3, 0.2]));
+
+            let json = serde_json::to_string(&progress_dto(&hidden)).unwrap();
+
+            assert!(!json.contains("p2Strategy"), "{json}");
+            assert!(!json.to_lowercase().contains("thunderbolt"), "{json}");
+            assert!(json.contains("elapsedMs"), "{json}");
+        }
+
+        /// A hotseat session holds no profile at all, so the gate stays shut
+        /// however the request was written.
+        #[test]
+        fn a_hotseat_session_reveals_nothing() {
+            let mut hotseat = session(MatchState::BattleState(battle_state()), true);
+            hotseat.bot_p2 = None;
+            store(&mut hotseat, battle_strategy([1.0, 0.0, 0.0]));
+
+            assert!(!reveals_strategy(&hotseat));
+            let json = serde_json::to_string(&progress_dto(&hotseat)).unwrap();
+            assert!(!json.contains("p2Strategy"), "{json}");
+        }
+
+        /// The open session reads the strategy of the position it is playing.
+        #[test]
+        fn a_revealed_session_sends_the_rows_of_the_current_position() {
+            let mut open = session(MatchState::BattleState(battle_state()), true);
+            store(&mut open, battle_strategy([0.5, 0.3, 0.2]));
+
+            let view = progress_dto(&open);
+            let strategy = view
+                .checkpoint
+                .as_ref()
+                .and_then(|row| row.p2_strategy.as_ref())
+                .expect("an open session reads the strategy");
+
+            assert_eq!(strategy.position, "battle");
+            assert_eq!(strategy.total, 3);
+            assert_eq!(strategy.rows.len(), 3);
+            // The checkpoint names no draw.
+            assert_eq!(strategy.drawn_index, None);
+            // Highest rate first.
+            let rates: Vec<f64> = strategy.rows.iter().map(|row| row.probability).collect();
+            assert_eq!(rates, vec![0.5, 0.3, 0.2]);
+            // Each row renders one command of one slot against the field.
+            assert_eq!(strategy.rows[0].commands.len(), 1);
+            assert!(strategy.rows[0].commands[0].description.len() > 1);
+        }
+
+        /// A stale answer names actions of an older position, so rendering it
+        /// against the current field would describe the wrong Pokemon.
+        #[test]
+        fn a_stale_checkpoint_sends_no_strategy_row() {
+            let mut open = session(MatchState::BattleState(battle_state()), true);
+            store(&mut open, battle_strategy([0.5, 0.3, 0.2]));
+            open.analysis.invalidate();
+
+            let view = progress_dto(&open);
+
+            assert!(view.checkpoint.as_ref().unwrap().stale);
+            assert!(view.checkpoint.unwrap().p2_strategy.is_none());
+        }
+
+        /// A row that the strategy never plays tells the reader nothing, so the
+        /// list drops it and the total counts only the rows that remain.
+        #[test]
+        fn the_rows_drop_a_zero_rate() {
+            let state = MatchState::BattleState(battle_state());
+            let strategy = strategy_dto(&state, &battle_strategy([0.7, 0.0, 0.3]), None).unwrap();
+
+            assert_eq!(strategy.total, 2);
+            let rates: Vec<f64> = strategy.rows.iter().map(|row| row.probability).collect();
+            assert_eq!(rates, vec![0.7, 0.3]);
+        }
+
+        /// The response includes every positive row and identifies a low-rate draw.
+        #[test]
+        fn the_response_keeps_the_full_strategy_and_the_drawn_row() {
+            let state = MatchState::BattleState(battle_state());
+            let row_count = 57;
+            let rows = vec![
+                JointActionProb {
+                    commands: vec![BattleCommand::Switch(SwitchCommand { party_index: 1 })],
+                    probability: 0.01,
+                };
+                row_count
+            ];
+
+            let strategy =
+                strategy_dto(&state, &P2Strategy::Battle(rows), Some(row_count - 1)).unwrap();
+
+            assert_eq!(strategy.rows.len(), row_count);
+            assert_eq!(strategy.total, row_count);
+            assert_eq!(strategy.drawn_index, Some(row_count - 1));
+        }
+
+        /// The reveal must name the row that supplied the drawn command, after
+        /// the sort moved it.
+        #[test]
+        fn the_drawn_index_names_the_drawn_row() {
+            let state = MatchState::BattleState(battle_state());
+            // Source order 0, 1, 2 has rates 0.2, 0.5, 0.3, so the sort gives
+            // 1, 2, 0. Source row 0 therefore lands last.
+            let strategy =
+                strategy_dto(&state, &battle_strategy([0.2, 0.5, 0.3]), Some(0)).unwrap();
+
+            assert_eq!(strategy.drawn_index, Some(2));
+            assert_eq!(strategy.rows[2].probability, 0.2);
+
+            // A drawn row that the zero-rate rule removed has no place in the
+            // list, and the block says so rather than naming another row.
+            let dropped =
+                strategy_dto(&state, &battle_strategy([0.6, 0.0, 0.4]), Some(1)).unwrap();
+            assert_eq!(dropped.drawn_index, None);
+        }
+
+        /// A preview block names the leads and the back picks of Player 2. That
+        /// is hidden data, so only the open session reads it.
+        #[test]
+        fn a_preview_block_names_the_leads_and_the_back_picks() {
+            let state = MatchState::TeamPreviewState(preview_state());
+            let strategy = P2Strategy::Preview(vec![PreviewChoiceProb {
+                choice: TeamPreviewCommand {
+                    active_indices: vec![1],
+                    back_indices: vec![0],
+                },
+                probability: 1.0,
+            }]);
+
+            let rendered = strategy_dto(&state, &strategy, Some(0)).unwrap();
+
+            assert_eq!(rendered.position, "teamPreview");
+            assert_eq!(rendered.drawn_index, Some(0));
+            let choice = rendered.rows[0].preview.as_ref().unwrap();
+            assert_eq!(choice.leads, vec!["Gengar".to_string()]);
+            assert_eq!(choice.back, vec!["Snorlax".to_string()]);
+        }
+
+        /// A battle strategy cannot render against a preview roster, and a
+        /// preview strategy cannot render against a field. The draw applies the
+        /// same rule.
+        #[test]
+        fn a_strategy_of_the_other_position_renders_nothing() {
+            let battle = MatchState::BattleState(battle_state());
+            let preview = MatchState::TeamPreviewState(preview_state());
+            let preview_strategy = P2Strategy::Preview(Vec::new());
+
+            assert!(strategy_dto(&battle, &preview_strategy, None).is_none());
+            assert!(strategy_dto(&preview, &battle_strategy([1.0, 0.0, 0.0]), None).is_none());
+        }
+
+        /// The draw carries the strategy only for the open session, so the
+        /// reveal of a default session holds the drawn command alone.
+        #[test]
+        fn the_reveal_carries_the_strategy_of_the_open_session_alone() {
+            let strategy = battle_strategy([0.5, 0.3, 0.2]);
+            let mut hidden = session(MatchState::BattleState(battle_state()), false);
+            store(&mut hidden, strategy.clone());
+            let mut open = session(MatchState::BattleState(battle_state()), true);
+            store(&mut open, strategy);
+
+            let stored = |session: &BattleSession| {
+                let checkpoint = session.analysis.current_checkpoint().unwrap();
+                revealed_strategy(session, checkpoint, 1)
+            };
+
+            assert!(stored(&hidden).is_none());
+            let revealed = stored(&open).expect("an open session reveals the draw");
+            assert_eq!(revealed.drawn_index, Some(1));
+        }
     }
 }

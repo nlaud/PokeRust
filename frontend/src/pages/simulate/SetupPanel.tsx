@@ -108,6 +108,13 @@ function algorithmLimitNote(mode: InformationMode): string {
     : 'Perfect Information holds no belief, so only a search of the true position can control P2. Pick another information mode for a belief search.'
 }
 
+/** Names what the reveal setting opens.
+ *
+ * The setting removes the fog of war over Player 2's plan, so the battle stops
+ * being a fair game. It suits study and debugging. */
+const REVEAL_STRATEGY_NOTE =
+  'Reads P2 strategy for the current position while you choose, and the whole strategy that each played command came from. This shows you what P2 plans, so keep it off for a fair battle.'
+
 type TeamSource = 'saved' | 'meta'
 
 const TEAM_SOURCE_OPTIONS: { value: TeamSource; label: string }[] = [
@@ -140,6 +147,7 @@ export default function SetupPanel() {
   const defaultInformationMode = saved?.informationMode ?? 'closedSheet'
   const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
   const [botPreset, setBotPreset] = useState<BotChoice>(saved?.botPreset ?? 'off')
+  const [revealStrategy, setRevealStrategy] = useState(saved?.botRevealStrategy ?? false)
   const savedAlgorithm = saved?.botAlgorithm
   // A stored algorithm that cannot play under the stored mode creates a bot
   // that never answers, so the load path replaces it. A setup from an older
@@ -166,6 +174,7 @@ export default function SetupPanel() {
       informationMode,
       botPreset,
       botAlgorithm,
+      botRevealStrategy: revealStrategy,
     })
   }, [
     formatId,
@@ -176,6 +185,7 @@ export default function SetupPanel() {
     informationMode,
     botPreset,
     botAlgorithm,
+    revealStrategy,
   ])
 
   const format = formats.find((f) => f.id === formatId)
@@ -207,7 +217,10 @@ export default function SetupPanel() {
       informationMode,
       legalItems: legalItemsFor(format),
       // The server resolves the preset and returns every limit it applied.
-      botP2: botPreset === 'off' ? undefined : { algorithm: botAlgorithm, preset: botPreset },
+      botP2:
+        botPreset === 'off'
+          ? undefined
+          : { algorithm: botAlgorithm, preset: botPreset, revealStrategy },
     })
   }
 
@@ -296,6 +309,19 @@ export default function SetupPanel() {
               <p className="mt-1 text-xs text-ink-muted">
                 P2 uses this solver profile after Player 1 locks a command.
               </p>
+              <label className="mt-2 flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={revealStrategy}
+                  onChange={(e) => setRevealStrategy(e.target.checked)}
+                  data-testid="bot-reveal-strategy"
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium">Show the opponent strategy</span>
+                  <span className="block text-ink-muted">{REVEAL_STRATEGY_NOTE}</span>
+                </span>
+              </label>
             </>
           )}
         </div>

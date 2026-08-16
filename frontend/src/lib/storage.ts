@@ -148,6 +148,9 @@ export interface BattleSetup {
    * The setup panel replaces a value that cannot play under
    * `informationMode`, because a stored setup can hold an old pair. */
   botAlgorithm?: BotAlgorithm
+  /** Shows Player 2's strategy during the battle.
+   * An absent value hides it, which is the server default. */
+  botRevealStrategy?: boolean
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

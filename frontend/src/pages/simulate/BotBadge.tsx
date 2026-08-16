@@ -62,6 +62,14 @@ export default function BotBadge({ profile }: { profile: BotProfileView }) {
         >
           {profile.exact ? 'exact algorithm' : 'sampled algorithm'}
         </span>
+        {profile.revealStrategy && (
+          <span
+            data-testid="bot-badge-reveal"
+            className="rounded-card bg-warning/15 px-2 py-0.5 font-semibold text-warning"
+          >
+            strategy shown
+          </span>
+        )}
         <span aria-hidden className="ml-auto text-ink-muted">
           {open ? '▾' : '▸'}
         </span>
@@ -85,6 +93,12 @@ export default function BotBadge({ profile }: { profile: BotProfileView }) {
                 ))}
               </ul>
             </>
+          )}
+          {profile.revealStrategy && (
+            <p className="mb-2 text-warning">
+              This battle shows Player 2&rsquo;s strategy. The reveal panel holds the strategy of
+              the current position and the strategy of the last drawn command.
+            </p>
           )}
           {profile.seed !== null && <p className="mt-2 text-ink-muted">Seed {profile.seed}</p>}
         </div>

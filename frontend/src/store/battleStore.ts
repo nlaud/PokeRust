@@ -7,6 +7,7 @@ import type {
   EventNode,
   LegalCommands,
   P2Reveal,
+  P2Strategy,
   PlayerCommand,
   PlayerId,
   TurnLogEntry,
@@ -57,6 +58,12 @@ interface BattleStore {
   /** The command that the server drew for P2 on the last resolved turn.
    * `null` in a hotseat battle, and at team preview. */
   p2Reveal: P2Reveal | null
+  /** The strategy that the last complete search found for the current position.
+   *
+   * `null` unless the profile holds `revealStrategy`. The server sends no row
+   * without that setting, and it sends none while the answer is stale. The
+   * value is therefore the newest answer for the position on screen. */
+  p2Strategy: P2Strategy | null
   /** True while the client waits for the analysis job of the P2 bot. */
   waitingForBot: boolean
   /** How long the P2 search has run, while the client waits for it. */
@@ -88,6 +95,11 @@ interface BattleStore {
   goBack: () => void
   /** Stops the wait for the P2 search and returns the move choice. */
   cancelBotWait: () => void
+  /** Reads P2's strategy for the current position.
+   *
+   * Does nothing without a battle, and nothing without `revealStrategy`. The
+   * reveal panel calls it on a timer while Player 1 chooses a command. */
+  refreshP2Strategy: () => Promise<void>
   togglePreviewPick: (index: number) => void
   submitPreview: () => Promise<void>
   clearError: () => void
@@ -167,6 +179,9 @@ function appendDualLog(
 }
 
 export const useBattle = create<BattleStore>((set, get) => {
+  // A later request or position change invalidates every earlier strategy read.
+  let p2StrategyRequest = 0
+
   /** Submits one battle command pair and stores the resolved position. */
   async function submitBattleTurn(
     battleId: string,
@@ -176,6 +191,7 @@ export const useBattle = create<BattleStore>((set, get) => {
   ) {
     try {
       const response = await api.submitTurn(battleId, { p1, ...(p2 ? { p2 } : {}) })
+      p2StrategyRequest += 1
       set((s) => {
         const { logP1, logP2 } = appendDualLog(
           s.logP1,
@@ -200,6 +216,8 @@ export const useBattle = create<BattleStore>((set, get) => {
           busy: false,
           // A hotseat turn returns no reveal, so this also clears the last one.
           p2Reveal: response.p2Reveal ?? null,
+          // The new position has no answer yet. The poll reads the next one.
+          p2Strategy: null,
         }
       })
       if (response.state.phase !== 'gameOver') {
@@ -342,6 +360,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     log: [],
     botP2: null,
     p2Reveal: null,
+    p2Strategy: null,
     waitingForBot: false,
     botWaitMs: null,
     botWaitCancelled: false,
@@ -357,6 +376,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     previewPicks: [],
 
     createBattle: async (req) => {
+      p2StrategyRequest += 1
       set({ busy: true, error: null })
       try {
         const response = await api.createBattle(req)
@@ -372,6 +392,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           log: [],
           botP2: response.botP2,
           p2Reveal: null,
+          p2Strategy: null,
           waitingForBot: false,
           botWaitMs: null,
           botWaitCancelled: false,
@@ -391,6 +412,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     },
 
     restore: async (battleId) => {
+      p2StrategyRequest += 1
       try {
         const response = await api.getBattle(battleId)
         preloadBattleSprites(response.state)
@@ -405,6 +427,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           botP2: response.botP2,
           // A restore reads the session, and the session keeps no past reveal.
           p2Reveal: null,
+          p2Strategy: null,
           waitingForBot: false,
           botWaitMs: null,
           botWaitCancelled: false,
@@ -426,6 +449,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     },
 
     leave: () => {
+      p2StrategyRequest += 1
       sessionStorage.removeItem(BATTLE_ID_KEY)
       set({
         battleId: null,
@@ -437,6 +461,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         log: [],
         botP2: null,
         p2Reveal: null,
+        p2Strategy: null,
         waitingForBot: false,
         botWaitMs: null,
         botWaitCancelled: false,
@@ -514,6 +539,28 @@ export const useBattle = create<BattleStore>((set, get) => {
       }
     },
 
+    refreshP2Strategy: async () => {
+      const { battleId, botP2 } = get()
+      // The server hides every row without the setting, so a read would only
+      // cost a request.
+      if (!battleId || !botP2?.revealStrategy) return
+      const request = ++p2StrategyRequest
+      try {
+        const progress = await api.getAnalysis(battleId)
+        const current = get()
+        if (
+          request !== p2StrategyRequest ||
+          current.battleId !== battleId ||
+          !current.botP2?.revealStrategy
+        ) {
+          return
+        }
+        set({ p2Strategy: progress.checkpoint?.p2Strategy ?? null })
+      } catch {
+        // A failed read leaves the last answer in place. The next tick retries.
+      }
+    },
+
     cancelBotWait: () => {
       // The wait loop reads this flag between two reads of the job. The search
       // itself keeps running on the server, so the next submission can read its
@@ -587,6 +634,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           p1: currentPlayer === 'p1' ? command : (p1Commands ?? { kind: 'pass' }),
           ...(get().botP2 ? {} : { p2: command }),
         })
+        p2StrategyRequest += 1
         set((s) => {
           const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, 'Team Preview', response.events, response.eventsP2)
           return {
@@ -604,7 +652,10 @@ export const useBattle = create<BattleStore>((set, get) => {
             busy: false,
             // The preview reveal carries no command. The leads appear on the
             // field on their own, and the back picks stay under the fog of war.
-            p2Reveal: null,
+            // A session with `revealStrategy` still gets the strategy block,
+            // and the panel shows it.
+            p2Reveal: response.p2Reveal ?? null,
+            p2Strategy: null,
           }
         })
         await get().fetchCommands()

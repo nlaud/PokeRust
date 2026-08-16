@@ -672,13 +672,18 @@ pub async fn submit_turn(
 ///
 /// The response is progress alone. It never holds a P2 action, a P2 strategy,
 /// or the P2 win odds, because P1 reads the same endpoint during a hotseat
-/// battle. A later item reveals the sampled P2 action after both commands lock.
+/// battle. The turn response reveals the sampled P2 action after both commands
+/// lock.
+///
+/// One session breaks that rule on purpose: a profile with `revealStrategy`
+/// asks for P2's strategy, and `analysis::progress_dto` adds it. A hotseat
+/// session holds no profile, so it never reaches that path.
 pub async fn get_analysis(State(app): State<AppState>, Path(id): Path<String>) -> Response {
     let sessions = lock_sessions(&app);
     let Some(session) = sessions.get(&id) else {
         return not_found();
     };
-    Json(session.analysis.progress()).into_response()
+    Json(crate::analysis::progress_dto(session)).into_response()
 }
 
 pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {

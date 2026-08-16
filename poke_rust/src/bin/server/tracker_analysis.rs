@@ -68,7 +68,7 @@ use poke_rust::state::battle::{BattleState, MatchState, Player};
 use crate::bot::{BotProfile, BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
     TrackerAnalysisCheckpointDto, TrackerAnalysisDto, TrackerAnalysisRungDto,
-    TrackerPreviewChoiceDto, TrackerStrategyRowDto,
+    PreviewChoiceDto, StrategyRowDto,
 };
 use crate::mapping;
 use crate::session::{Dexes, MetaDexes};
@@ -412,10 +412,10 @@ fn checkpoint_dto(
     }
 }
 
-fn strategy_row_dto(row: &TrackerStrategyRow) -> TrackerStrategyRowDto {
-    TrackerStrategyRowDto {
+fn strategy_row_dto(row: &TrackerStrategyRow) -> StrategyRowDto {
+    StrategyRowDto {
         commands: row.commands.clone(),
-        preview: row.preview.as_ref().map(|choice| TrackerPreviewChoiceDto {
+        preview: row.preview.as_ref().map(|choice| PreviewChoiceDto {
             leads: choice.leads.clone(),
             back: choice.back.clone(),
         }),

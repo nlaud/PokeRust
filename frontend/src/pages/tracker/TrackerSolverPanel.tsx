@@ -3,9 +3,9 @@ import Select from '../../components/common/Select'
 import type {
   BotAlgorithm,
   BotPreset,
+  StrategyRow,
   TrackerAnalysisCheckpoint,
   TrackerAnalysisRung,
-  TrackerStrategyRow,
 } from '../../api/types'
 import { useTracker } from '../../store/trackerStore'
 
@@ -86,7 +86,7 @@ function deltaLabel(current: number, previous: number): string {
  *
  * A team-preview row names the leads and the back Pokemon. A battle row names
  * one command for each active slot. */
-function actionLabel(row: TrackerStrategyRow): string {
+function actionLabel(row: StrategyRow): string {
   if (row.preview) {
     const leads = row.preview.leads.join(' + ')
     if (row.preview.back.length === 0) return `Lead ${leads}`
@@ -134,7 +134,7 @@ function StrategyList({
   testId,
 }: {
   title: string
-  rows: TrackerStrategyRow[]
+  rows: StrategyRow[]
   testId: string
 }) {
   return (

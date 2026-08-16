@@ -368,29 +368,92 @@ test.describe('Simulate mode', () => {
     await expect(openOption('Double Oracle (exact)')).toBeEnabled()
     await page.keyboard.press('Escape')
 
+    const revealSetting = page.getByTestId('bot-reveal-strategy')
+    await revealSetting.check()
+    await expect(revealSetting).toBeChecked()
+    await page.screenshot({
+      path: testInfo.outputPath('opponent-strategy-setting.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+
     await page.getByRole('button', { name: 'Start Battle' }).click()
     const previewMons = page.getByTestId('preview-mon')
     await expect(previewMons.first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByTestId('bot-badge-reveal')).toHaveText('strategy shown')
+
+    // The first analysis answer shows the full preview strategy before P1 picks.
+    const reveal = page.getByTestId('p2-reveal')
+    await expect(reveal).toContainText('Player 2 strategy', { timeout: 20_000 })
+    await reveal.getByRole('button').first().click()
+    const detail = page.getByTestId('p2-reveal-detail')
+    const currentStrategy = page.getByTestId('p2-strategy-current')
+    await expect(currentStrategy).toContainText("Player 2's bring and lead now")
+    await expect(currentStrategy).toContainText('Lead')
+    await expect(currentStrategy).toContainText('%')
+    await page.screenshot({
+      path: testInfo.outputPath('opponent-strategy-preview.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+
     const count = await previewMons.count()
     for (let i = 0; i < count; i++) await previewMons.nth(i).click()
     await page.getByTestId('preview-confirm').click()
 
-    // The wait line replaces the reveal while the search runs.
+    // The resolved preview keeps its source strategy and starts the battle search.
     await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
+    const drawnStrategy = page.getByTestId('p2-strategy-drawn')
+    await expect(drawnStrategy).toContainText('The strategy of the last draw')
+    await expect(drawnStrategy).toContainText('\u25b8')
+    await expect(currentStrategy).toContainText("Player 2's strategy now", { timeout: 20_000 })
+    await page.screenshot({
+      path: testInfo.outputPath('opponent-strategy-battle.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+
+    // Hold one current-position response until the next position is on screen.
+    // The delayed response uses a sentinel command to expose a stale write.
+    let releaseHeldResponse!: () => void
+    const heldResponse = new Promise<void>((resolve) => {
+      releaseHeldResponse = resolve
+    })
+    let markResponseCaptured!: () => void
+    const responseCaptured = new Promise<void>((resolve) => {
+      markResponseCaptured = resolve
+    })
+    let holdNextResponse = true
+    await page.route('**/api/battles/*/analysis', async (route) => {
+      if (!holdNextResponse) {
+        await route.continue()
+        return
+      }
+      holdNextResponse = false
+      const response = await route.fetch()
+      const body = await response.json()
+      const firstCommand = body.checkpoint?.p2Strategy?.rows?.[0]?.commands?.[0]
+      if (firstCommand) firstCommand.description = 'STALE STRATEGY FROM THE PREVIOUS POSITION'
+      markResponseCaptured()
+      await heldResponse
+      await route.fulfill({ response, json: body })
+    })
+    await responseCaptured
+
+    // The wait line replaces the reveal while the search runs.
     await page.getByTestId('move-option').first().click()
     await expect(page.getByText('Turn 1', { exact: true })).toBeVisible({ timeout: 20_000 })
-
-    const reveal = page.getByTestId('p2-reveal')
+    releaseHeldResponse()
+    await page.waitForTimeout(150)
+    await expect(detail).not.toContainText('STALE STRATEGY FROM THE PREVIOUS POSITION')
     await expect(reveal).toContainText('from the solver strategy')
-    await reveal.getByRole('button').first().click()
-    const detail = page.getByTestId('p2-reveal-detail')
     await expect(detail).toContainText('doubleOracle')
     await expect(detail).toContainText('turn 1')
-    // The reveal carries one action. It must show no odds and no win rate.
-    await expect(detail).not.toContainText('%')
+    await expect(drawnStrategy).toContainText('%')
+    // The strategy contains action rates, but it contains no solver win odds.
     await expect(detail).not.toContainText(/win/i)
     await page.screenshot({
-      path: testInfo.outputPath('bot-reveal-strategy.png'),
+      path: testInfo.outputPath('opponent-strategy-drawn.png'),
       fullPage: true,
       animations: 'disabled',
     })

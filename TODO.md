@@ -8,7 +8,6 @@ and the analysis jobs.
 
 ## Solver Bugs
 - [ ] Do all of the following.
-  - [ ] Add a configuration to the solver settings that represents whether the user should be able to see the current found strategy of the opponent, this should also show the full strategy that the move was sampled from.
   - [ ] Update the UI for both surfaces of the solver so that it is not two separate containers it is juts one with a dropdown
   - [ ] Solver settings in tracker should not allow for exact solvers, since that doesnt make sense within context of not having all the information
   - [ ] Simulator bots should not have to think when there is only one possible move -- It should just pick that move

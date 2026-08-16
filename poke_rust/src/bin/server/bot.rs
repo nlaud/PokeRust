@@ -200,6 +200,13 @@ pub struct BotProfileRequest {
     /// The maximum is JavaScript's largest safe integer.
     pub seed: Option<u64>,
     pub max_actions_per_player: Option<usize>,
+    /// Shows Player 2's strategy to the client. Defaults to false.
+    ///
+    /// A battle session reads this field. It is the fog-of-war boundary of the
+    /// two battle endpoints: without it, no response carries a Player 2 strategy
+    /// row. A tracker session already returns both strategies, because the
+    /// tracker user typed both rosters, so it ignores the field.
+    pub reveal_strategy: Option<bool>,
 }
 
 /// The resolved profile as the client reads it.
@@ -221,6 +228,11 @@ pub struct BotProfileView {
     pub particles: Option<usize>,
     pub seed: Option<u64>,
     pub max_actions_per_player: Option<usize>,
+    /// True when the client may read Player 2's strategy.
+    ///
+    /// The two battle endpoints render a strategy row only for a true value.
+    /// See [`BotProfileRequest::reveal_strategy`].
+    pub reveal_strategy: bool,
     /// Each reason that the result can differ from the exact answer.
     /// The interface shows this list.
     pub approximations: Vec<String>,
@@ -516,6 +528,7 @@ pub fn resolve(
             particles,
             seed: req.seed,
             max_actions_per_player,
+            reveal_strategy: req.reveal_strategy.unwrap_or(false),
             approximations,
             adjustments,
         },
@@ -953,11 +966,30 @@ mod tests {
         assert_eq!(after.particles, before.particles);
     }
 
+    /// The reveal is a fog-of-war boundary, so an absent field must close it.
+    /// Every request that existed before this field keeps the answers it got.
+    #[test]
+    fn a_profile_hides_the_strategy_until_the_request_asks_for_it() {
+        let profile = resolve("botP2", &request("doubleOracle", "fast"), 16, true).unwrap();
+        assert!(!profile.view.reveal_strategy);
+
+        let mut req = request("doubleOracle", "fast");
+        req.reveal_strategy = Some(false);
+        assert!(!resolve("botP2", &req, 16, true).unwrap().view.reveal_strategy);
+
+        req.reveal_strategy = Some(true);
+        let revealed = resolve("botP2", &req, 16, true).unwrap();
+        assert!(revealed.view.reveal_strategy);
+        // The reveal is a display rule, not a limit, so it adjusts no preset.
+        assert!(revealed.view.adjustments.is_empty());
+    }
+
     #[test]
     fn an_empty_request_uses_the_default_names() {
         let profile = resolve("botP2", &BotProfileRequest::default(), 16, true).unwrap();
         assert_eq!(profile.view.algorithm, "doubleOracle");
         assert_eq!(profile.view.preset, "balanced");
         assert_eq!(profile.view.seed, None);
+        assert!(!profile.view.reveal_strategy);
     }
 }
