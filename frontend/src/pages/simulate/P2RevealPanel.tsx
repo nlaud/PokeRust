@@ -46,7 +46,7 @@ function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
  * odds. The wait line replaces the panel while the search runs.
  */
 export default function P2RevealPanel() {
-  const { botP2, p2Reveal, waitingForBot, botWaitMs, cancelBotWait } = useBattle()
+  const { view, botP2, p2Reveal, waitingForBot, botWaitMs, cancelBotWait } = useBattle()
   const [open, setOpen] = useState(false)
   if (!botP2) return null
 
@@ -76,7 +76,7 @@ export default function P2RevealPanel() {
             data-testid="bot-wait-cancel"
             className="lift shrink-0 rounded-card border border-subtle px-2 py-1 font-semibold text-ink-muted"
           >
-            Change my move
+            {view?.phase === 'teamPreview' ? 'Change my selection' : 'Change my move'}
           </button>
         </div>
         {percent !== null && (

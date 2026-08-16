@@ -96,7 +96,7 @@ export default function ControlPanel() {
                 key={mon.monId}
                 data-testid="preview-mon"
                 onClick={() => togglePreviewPick(i)}
-                disabled={!picked && previewPicks.length >= needed}
+                disabled={busy || (!picked && previewPicks.length >= needed)}
                 className={`lift relative flex w-28 flex-col items-center rounded-card p-2 ${
                   picked ? 'bg-subtle' : 'hover:bg-primary-soft'
                 } disabled:opacity-40`}
@@ -119,7 +119,7 @@ export default function ControlPanel() {
         </div>
 
         <div className="mt-3 flex items-center justify-between">
-          {backButton(currentPlayer === 'p1' && previewPicks.length === 0)}
+          {backButton(busy || (currentPlayer === 'p1' && previewPicks.length === 0))}
           <button
             data-testid="preview-confirm"
             onClick={() => void submitPreview()}

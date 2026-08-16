@@ -9,7 +9,7 @@ import P2RevealPanel from './P2RevealPanel'
 import TeamInfoSidebar from './TeamInfoSidebar'
 
 export default function BattleScreen() {
-  const { view, error, clearError, leave, botP2 } = useBattle()
+  const { view, error, clearError, leave, botP2, busy } = useBattle()
   const [confirmLeave, setConfirmLeave] = useState(false)
   if (!view) return null
 
@@ -41,7 +41,8 @@ export default function BattleScreen() {
         {view.phase !== 'gameOver' && (
           <button
             onClick={() => setConfirmLeave(true)}
-            className="lift absolute bottom-3 right-3 z-10 rounded-card border border-subtle bg-card px-3 py-1.5 text-xs font-semibold text-ink-muted shadow-sm hover:text-danger"
+            disabled={busy}
+            className="lift absolute bottom-3 right-3 z-10 rounded-card border border-subtle bg-card px-3 py-1.5 text-xs font-semibold text-ink-muted shadow-sm hover:text-danger disabled:opacity-40"
           >
             New battle
           </button>

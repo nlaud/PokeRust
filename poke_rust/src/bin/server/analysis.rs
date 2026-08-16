@@ -1,8 +1,10 @@
 //! The private P2 analysis job of a battle session.
 //!
-//! A session with a resolved P2 profile starts one search after each resolved
-//! turn. The search runs on a blocking thread, so it never holds the session
-//! lock. Each job carries a generation and a job ID.
+//! A session with a resolved P2 profile starts one search when the session
+//! begins and one search after each resolved turn. The first position is the
+//! team preview, so the bot picks its leads from a solved strategy rather than
+//! at random. The search runs on a blocking thread, so it never holds the
+//! session lock. Each job carries a generation and a job ID.
 //!
 //! [`AnalysisState::invalidate`] raises the generation and cancels the running
 //! job. [`AnalysisState::accept`] drops a result when its generation or job ID
@@ -34,8 +36,14 @@ use poke_rust::information::determinize::DeterminizeConfig;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::UnknownMatchState;
 use poke_rust::meta::{MetaDex, MetaFormat};
+use poke_rust::solver::preview::{
+    OpenListConfig, PreviewChoiceProb, PreviewConfig, solve_open_list_preview_cancellable,
+    solve_team_preview_cancellable,
+};
 use poke_rust::solver::{self, CancelFlag, JointActionProb};
-use poke_rust::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
+use poke_rust::state::battle::{
+    BattleCommand, MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
+};
 
 use crate::bot::{BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
@@ -43,6 +51,7 @@ use crate::dto::{
 };
 use crate::mapping;
 use crate::session::{self, BattleSession, Dexes, MetaDexes};
+use crate::tracker_analysis::{preview_battle_config, preview_worlds};
 
 /// The completed answer of one job.
 ///
@@ -63,7 +72,7 @@ pub struct AnalysisCheckpoint {
     ///
     /// No endpoint returns this list. [`draw_p2_command`] draws one action from
     /// it, and the turn response reveals that one action alone.
-    pub p2_strategy: Vec<JointActionProb>,
+    pub p2_strategy: P2Strategy,
     /// The depth that the search reached.
     /// A sampling search reports its configured depth.
     pub depth_reached: u8,
@@ -90,6 +99,32 @@ pub struct AnalysisCheckpoint {
     pub strategy_is_playable: bool,
     /// Every reason that the answer is approximate.
     pub warnings: Vec<String>,
+}
+
+/// P2's mixed strategy, and the position that it belongs to.
+///
+/// A battle position and a team preview take different command types, so one
+/// list cannot serve both. The variant names the position that the search read.
+/// [`draw_p2_command`] reads only the arm of the position that it draws for, so
+/// a checkpoint of the other arm sends the draw to its uniform case.
+#[derive(Debug, Clone)]
+pub enum P2Strategy {
+    /// One joint action for each battle slot.
+    Battle(Vec<JointActionProb>),
+    /// One bring-and-lead choice.
+    Preview(Vec<PreviewChoiceProb>),
+}
+
+impl P2Strategy {
+    /// True when the strategy holds no action.
+    ///
+    /// [`complete_line`] reports this one bit, and no count. See the note there.
+    fn is_empty(&self) -> bool {
+        match self {
+            P2Strategy::Battle(rows) => rows.is_empty(),
+            P2Strategy::Preview(rows) => rows.is_empty(),
+        }
+    }
 }
 
 /// The data that repeats one analysis search.
@@ -334,9 +369,11 @@ fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisC
 
 /// Starts one analysis job for the current position.
 ///
-/// Does nothing when the session holds no P2 profile, and nothing outside a
-/// battle position. The caller holds the session lock, so this call only spawns
-/// the task. The task takes the lock itself after the search returns.
+/// Does nothing when the session holds no P2 profile, and nothing after the
+/// game ends. A team preview and a battle both get a job, so the bot searches
+/// its leads as it searches every later turn. The caller holds the session
+/// lock, so this call only spawns the task. The task takes the lock itself
+/// after the search returns.
 pub fn start_job(
     battle_id: &str,
     session: &mut BattleSession,
@@ -347,18 +384,12 @@ pub fn start_job(
     let Some(profile) = session.bot_p2.as_ref() else {
         return;
     };
-    if !matches!(session.state, MatchState::BattleState(_)) {
-        // `routes::turn` calls this after the turn resolves, so a finished game
-        // is the only position that reaches this exit. That exit is correct,
-        // and the client asks for no further turn. Name the two cases apart, so
-        // the line does not report a normal end as a skipped job.
-        let reason = if matches!(session.state, MatchState::GameOverState { .. }) {
-            "the battle is over"
-        } else {
-            "the position is not a battle"
-        };
+    if matches!(session.state, MatchState::GameOverState { .. }) {
+        // `routes::submit_turn` calls this after the turn resolves, so a
+        // finished game reaches this exit. That exit is correct, and the client
+        // asks for no further turn. Report a normal end as a normal end.
         eprintln!(
-            "analysis: no job started at generation {}, because {reason}",
+            "analysis: no job started at generation {}, because the battle is over",
             session.analysis.generation()
         );
         return;
@@ -517,14 +548,25 @@ fn run_search(
 ) -> Result<AnalysisCheckpoint, String> {
     let turn_number = match state {
         MatchState::BattleState(battle) => battle.turn_number,
-        _ => return Err("the analysis job runs only on a battle position".to_string()),
+        // The preview runs before turn one, so it carries turn zero.
+        MatchState::TeamPreviewState(_) => 0,
+        _ => {
+            return Err(
+                "the analysis job runs only on a preview position or a battle position".to_string(),
+            );
+        }
     };
     let started = Instant::now();
 
     // A solver panic must not poison the session mutex, so catch it here and
     // report it as an ordinary job failure.
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        one_search(search, seed, state, belief_p2, dexes, meta, inference, cancel)
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match state {
+        MatchState::TeamPreviewState(preview) => one_preview_search(
+            search, seed, time_ms, preview, belief_p2, dexes, meta, inference, cancel,
+        ),
+        _ => one_search(
+            search, seed, state, belief_p2, dexes, meta, inference, cancel,
+        ),
     }));
     let mut checkpoint = match caught {
         Ok(result) => result?,
@@ -588,7 +630,7 @@ fn one_search(
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
-                result.p2_strategy,
+                P2Strategy::Battle(result.p2_strategy),
                 result.depth_reached,
                 result.stats.turns_simulated,
                 result.stats.nodes_expanded,
@@ -609,7 +651,7 @@ fn one_search(
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
-                result.p2_strategy,
+                P2Strategy::Battle(result.p2_strategy),
                 config.depth,
                 result.stats.turns_simulated,
                 result.stats.nodes_created,
@@ -634,7 +676,7 @@ fn one_search(
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
-                result.p2_strategy,
+                P2Strategy::Battle(result.p2_strategy),
                 config.search.depth,
                 result.stats.turns_simulated,
                 result.stats.nodes_created,
@@ -659,7 +701,7 @@ fn one_search(
             .map_err(engine_error)?;
             Ok(partial_checkpoint(
                 result.p2_win_odds,
-                result.p2_strategy,
+                P2Strategy::Battle(result.p2_strategy),
                 config.search.depth,
                 result.stats.turns_simulated,
                 result.stats.nodes_created,
@@ -669,6 +711,139 @@ fn one_search(
             ))
         }
     }
+}
+
+/// The wall-clock limit of a preview search when the profile carries none.
+///
+/// `bot::resolve` fills `time_ms` for every profile, so this value is a guard
+/// rather than a normal path. A doubles preview holds 32,400 cells, and an
+/// unbounded solve of that matrix can run for hours.
+const PREVIEW_FALLBACK_MS: u64 = 2_000;
+
+/// Names the guess that a one-world preview search rests on.
+///
+/// The preview solver reads concrete worlds rather than the belief, so a
+/// fog-of-war session with one world scores every cell against one guess of
+/// P1's hidden data. The line names the algorithm names that the client already
+/// holds through the profile, and no state of either side.
+const PREVIEW_ONE_WORLD_NOTE: &str = "The search drew one world of the belief, so the whole \
+     answer assumes one guess of the opponent's hidden data. Only ismcts and mccfr draw more \
+     than one world.";
+
+/// Names the limit that a many-world preview answer carries.
+///
+/// The open-list solve takes the mean cell value across the drawn worlds, so
+/// one strategy covers every world. A real opponent conditions on its own
+/// hidden data, which this answer cannot.
+const PREVIEW_MEAN_MATRIX_NOTE: &str = "The preview search solved the mean matrix of the \
+     drawn worlds, so one strategy covers every world. A real opponent can play a different \
+     lead in each world.";
+
+/// Runs one preview search and converts its result to a checkpoint.
+///
+/// The position selects the entry point:
+///
+/// - A fog-of-war session with `ismcts` or `mccfr` solves P2's preview belief
+///   through the open list, so the answer reads only what P2 may hold.
+/// - Every other session solves the true preview state. On a fog-of-war session
+///   [`strategy_respects_fog`] then marks the answer as not playable, and
+///   [`draw_p2_command`] falls through to its uniform case. This is the rule
+///   that a battle position already applies.
+///
+/// The preview solver has no depth ladder, so the checkpoint reports the depth
+/// of the battle solve below each cell.
+#[allow(clippy::too_many_arguments)]
+fn one_preview_search(
+    search: BotSearchConfig,
+    seed: u64,
+    time_ms: Option<u64>,
+    preview: &TeamPreviewState,
+    belief_p2: Option<&UnknownMatchState>,
+    dexes: &Dexes,
+    meta: Option<&MetaDex>,
+    inference: Option<InferenceConfig>,
+    cancel: &CancelFlag,
+) -> Result<AnalysisCheckpoint, String> {
+    let deadline = Duration::from_millis(time_ms.unwrap_or(PREVIEW_FALLBACK_MS));
+    let battle = preview_battle_config(search, deadline);
+    let depth = battle.depth;
+    let config = PreviewConfig {
+        battle,
+        deadline: Some(deadline),
+    };
+
+    // Only a belief algorithm reads the belief, and a belief algorithm reads
+    // nothing else. A battle position takes the same two rules through
+    // `belief_search_inputs`, so a missing belief is an error rather than a
+    // silent fall through to the true state.
+    if matches!(
+        search,
+        BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
+    ) {
+        let Some(UnknownMatchState::TeamPreview(belief)) = belief_p2 else {
+            return Err(NO_FOG_OF_WAR.to_string());
+        };
+        let Some(inference) = inference else {
+            return Err(NO_FOG_OF_WAR.to_string());
+        };
+        let meta = meta.ok_or_else(unsupported_meta)?;
+        let worlds = preview_worlds(search);
+        let open_list = OpenListConfig {
+            preview: config,
+            worlds,
+            seed,
+        };
+        let determinize = DeterminizeConfig {
+            inference,
+            observer: Player::P2,
+            ..DeterminizeConfig::default()
+        };
+        let result = solve_open_list_preview_cancellable(
+            belief,
+            meta,
+            &dexes.pokemon_dex,
+            &dexes.move_dex,
+            &open_list,
+            &determinize,
+            Some(cancel),
+        )
+        .map_err(engine_error)?;
+        let mut checkpoint = partial_checkpoint(
+            result.p2_win_odds,
+            P2Strategy::Preview(result.p2_strategy),
+            depth,
+            result.stats.turns_simulated,
+            result.stats.cells_evaluated,
+            result.stats.elapsed,
+            &result.warnings,
+            &result.draw_warnings,
+        );
+        checkpoint.warnings.push(if worlds == 1 {
+            PREVIEW_ONE_WORLD_NOTE.to_string()
+        } else {
+            PREVIEW_MEAN_MATRIX_NOTE.to_string()
+        });
+        return Ok(checkpoint);
+    }
+
+    let result = solve_team_preview_cancellable(
+        preview,
+        &dexes.pokemon_dex,
+        &dexes.move_dex,
+        &config,
+        Some(cancel),
+    )
+    .map_err(engine_error)?;
+    Ok(partial_checkpoint(
+        result.p2_win_odds,
+        P2Strategy::Preview(result.p2_strategy),
+        depth,
+        result.stats.turns_simulated,
+        result.stats.cells_evaluated,
+        result.stats.elapsed,
+        &result.warnings,
+        &[],
+    ))
 }
 
 /// Reports a search that read more than the fog of war allows.
@@ -698,6 +873,14 @@ fn strategy_respects_fog(search: BotSearchConfig, fogged: bool) -> bool {
         )
 }
 
+/// Reports a belief search that this session cannot serve.
+///
+/// A belief search draws its worlds from the belief of the observer, and a
+/// perfect-information session builds no belief. The line names the profile
+/// field alone.
+const NO_FOG_OF_WAR: &str =
+    "botP2: this algorithm needs a fog-of-war battle, and this session has none";
+
 /// The belief and the draw rules of a belief search.
 ///
 /// P2 is the observer, so the determinizer copies P2's own side and samples
@@ -712,12 +895,11 @@ fn belief_search_inputs(
     ),
     String,
 > {
-    let message = "botP2: this algorithm needs a fog-of-war battle, and this session has none";
     let Some(UnknownMatchState::Battle(belief)) = belief_p2 else {
-        return Err(message.to_string());
+        return Err(NO_FOG_OF_WAR.to_string());
     };
     let Some(inference) = inference else {
-        return Err(message.to_string());
+        return Err(NO_FOG_OF_WAR.to_string());
     };
     let determinize = DeterminizeConfig {
         inference,
@@ -811,7 +993,7 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
 #[allow(clippy::too_many_arguments)]
 fn partial_checkpoint(
     p2_win_odds: f64,
-    p2_strategy: Vec<JointActionProb>,
+    p2_strategy: P2Strategy,
     depth_reached: u8,
     turns_simulated: u64,
     nodes: u64,
@@ -887,61 +1069,44 @@ pub struct P2Draw {
 
 /// Draws the command that P2 plays this turn.
 ///
-/// The three cases run in this order:
+/// A position with a checkpoint of that same position draws from the mixed
+/// strategy of the checkpoint. Every other case draws one legal command with a
+/// uniform weight. The uniform case covers a job that has not finished, a job
+/// that failed, a strategy that read data the fog of war hides, and a strategy
+/// whose command the legality check rejects.
 ///
-/// 1. A team-preview position draws one choice with a uniform weight.
-/// 2. A battle position with a checkpoint of the current position draws one
-///    joint action from the mixed strategy of that checkpoint.
-/// 3. Every other case draws one legal joint action with a uniform weight.
-///
-/// Case 3 covers a job that has not finished, a job that failed, and a strategy
-/// whose action the legality check rejects. [`P2Draw::source`] names the case
-/// that ran, so the client can show which one it was.
+/// [`P2Draw::source`] names the case that ran, so the client can show which one
+/// it was. A uniform preview draw reports [`DrawSource::TeamPreview`], which
+/// tells it apart from a uniform battle draw.
 pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw, String> {
     let seed = draw_seed(session);
     let mut rng = StdRng::seed_from_u64(seed);
 
     if let MatchState::TeamPreviewState(preview) = &session.state {
-        let choices = solver::preview::preview_choices(preview, Player::P2);
-        if choices.is_empty() {
-            return Err("P2 has no legal team-preview choice".to_string());
-        }
-        let pick = choices[rng.gen_range(0..choices.len())].clone();
-        return Ok(P2Draw {
-            command: PlayerCommand::TeamPreview(pick),
-            source: DrawSource::TeamPreview,
-            seed,
-            replay: None,
-        });
+        return draw_preview_command(session, dexes, preview, seed, &mut rng);
     }
 
     let MatchState::BattleState(battle) = &session.state else {
         return Err("battle is already over".to_string());
     };
 
-    // Case 2 has four exits, and three of them fall through to the uniform draw
-    // of case 3. Name the exit on the console. The reason reads P2's plan, so it
-    // never reaches the client. See `engine_error`.
+    // The strategy case has five exits, and four of them fall through to the
+    // uniform draw. Name the exit on the console. The reason reads P2's plan, so
+    // it never reaches the client. See `engine_error`.
     let generation = session.analysis.generation();
-    match session.analysis.current_checkpoint() {
-        None => eprintln!(
-            "analysis draw (generation {generation}): the draw is uniform, \
-             because no checkpoint covers this position"
-        ),
-        Some(checkpoint) if !checkpoint.strategy_is_playable => eprintln!(
-            "analysis draw (generation {generation}): the draw is uniform, \
-             because the strategy read data that the fog of war hides"
-        ),
-        Some(checkpoint) => match sample_strategy(&checkpoint.p2_strategy, &mut rng) {
-            None => eprintln!(
-                "analysis draw (generation {generation}): the draw is uniform, \
-                 because the strategy holds no action with a positive weight"
+    match playable_checkpoint(&session.analysis) {
+        Err(reason) => uniform_draw_line(generation, reason),
+        Ok(checkpoint) => match battle_rows(&checkpoint.p2_strategy)
+            .and_then(|rows| sample_strategy(rows, &mut rng))
+        {
+            None => uniform_draw_line(
+                generation,
+                "the strategy holds no action with a positive weight for this position",
             ),
             Some(commands) => match accept(session, dexes, commands) {
-                None => eprintln!(
-                    "analysis draw (generation {generation}): the draw is uniform, \
-                     because the legality check rejected the sampled action"
-                ),
+                None => {
+                    uniform_draw_line(generation, "the legality check rejected the sampled action")
+                }
                 Some(command) => {
                     return Ok(P2Draw {
                         command,
@@ -977,6 +1142,107 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
             replay: None,
         })
         .ok_or_else(|| "P2 has no legal command right now".to_string())
+}
+
+/// The checkpoint that may supply P2's command at the current position.
+///
+/// Two rules reject a checkpoint. A checkpoint of an older position names
+/// commands that the current position can no longer play. A strategy that read
+/// data the fog of war hides must not control P2, whatever the position.
+///
+/// The error text is the console reason of the uniform draw. Both draws apply
+/// these rules, so the preview position cannot become an exemption from either.
+fn playable_checkpoint(analysis: &AnalysisState) -> Result<&AnalysisCheckpoint, &'static str> {
+    match analysis.current_checkpoint() {
+        None => Err("no checkpoint covers this position"),
+        Some(checkpoint) if !checkpoint.strategy_is_playable => {
+            Err("the strategy read data that the fog of war hides")
+        }
+        Some(checkpoint) => Ok(checkpoint),
+    }
+}
+
+/// Writes the console reason of one uniform draw.
+///
+/// The reason reads P2's plan, so it never reaches the client. See
+/// [`engine_error`].
+fn uniform_draw_line(generation: u64, reason: &str) {
+    eprintln!("analysis draw (generation {generation}): the draw is uniform, because {reason}");
+}
+
+/// The battle rows of a strategy.
+///
+/// A preview checkpoint returns `None`, so the battle draw falls through to its
+/// uniform case rather than reading a choice that a battle turn cannot play.
+fn battle_rows(strategy: &P2Strategy) -> Option<&[JointActionProb]> {
+    match strategy {
+        P2Strategy::Battle(rows) => Some(rows),
+        P2Strategy::Preview(_) => None,
+    }
+}
+
+/// The preview rows of a strategy.
+///
+/// A battle checkpoint returns `None`, for the reason [`battle_rows`] gives.
+fn preview_rows(strategy: &P2Strategy) -> Option<&[PreviewChoiceProb]> {
+    match strategy {
+        P2Strategy::Preview(rows) => Some(rows),
+        P2Strategy::Battle(_) => None,
+    }
+}
+
+/// Draws the bring-and-lead choice that P2 plays.
+///
+/// The exits match the battle draw. A checkpoint of this preview supplies the
+/// choice, and every other case draws one legal choice with a uniform weight.
+fn draw_preview_command(
+    session: &BattleSession,
+    dexes: &Dexes,
+    preview: &TeamPreviewState,
+    seed: u64,
+    rng: &mut StdRng,
+) -> Result<P2Draw, String> {
+    let generation = session.analysis.generation();
+    match playable_checkpoint(&session.analysis) {
+        Err(reason) => uniform_draw_line(generation, reason),
+        Ok(checkpoint) => match preview_rows(&checkpoint.p2_strategy)
+            .and_then(|rows| sample_preview(rows, rng))
+        {
+            None => uniform_draw_line(
+                generation,
+                "the strategy holds no choice with a positive weight for this position",
+            ),
+            Some(choice) => match accept_preview(session, dexes, choice) {
+                None => {
+                    uniform_draw_line(generation, "the legality check rejected the sampled choice")
+                }
+                Some(command) => {
+                    return Ok(P2Draw {
+                        command,
+                        source: DrawSource::Strategy,
+                        seed,
+                        replay: Some(checkpoint.replay.clone()),
+                    });
+                }
+            },
+        },
+    }
+
+    let choices = solver::preview::preview_choices(preview, Player::P2);
+    if choices.is_empty() {
+        return Err("P2 has no legal team-preview choice".to_string());
+    }
+    let start = rng.gen_range(0..choices.len());
+    (0..choices.len())
+        .map(|offset| &choices[(start + offset) % choices.len()])
+        .find_map(|choice| accept_preview(session, dexes, choice))
+        .map(|command| P2Draw {
+            command,
+            source: DrawSource::TeamPreview,
+            seed,
+            replay: None,
+        })
+        .ok_or_else(|| "P2 has no legal team-preview choice".to_string())
 }
 
 /// Renders one drawn P2 command for the turn response.
@@ -1060,21 +1326,42 @@ fn sample_strategy<'a>(
     strategy: &'a [JointActionProb],
     rng: &mut StdRng,
 ) -> Option<&'a [BattleCommand]> {
-    let total: f64 = strategy
-        .iter()
-        .map(|action| action.probability.max(0.0))
-        .sum();
+    sample_weighted(strategy, |action| action.probability, rng)
+        .map(|action| action.commands.as_slice())
+}
+
+/// Draws one bring-and-lead choice from a preview strategy.
+///
+/// The weight rules are those of [`sample_strategy`].
+fn sample_preview<'a>(
+    strategy: &'a [PreviewChoiceProb],
+    rng: &mut StdRng,
+) -> Option<&'a TeamPreviewCommand> {
+    sample_weighted(strategy, |row| row.probability, rng).map(|row| &row.choice)
+}
+
+/// Draws one row of a mixed strategy.
+///
+/// Returns `None` for an empty list. A negative weight counts as zero, and a
+/// total that falls short of one still returns a row, so a rounding loss never
+/// drops the draw.
+fn sample_weighted<'a, T>(
+    rows: &'a [T],
+    weight: impl Fn(&T) -> f64,
+    rng: &mut StdRng,
+) -> Option<&'a T> {
+    let total: f64 = rows.iter().map(|row| weight(row).max(0.0)).sum();
     if !total.is_finite() || total <= 0.0 {
-        return strategy.first().map(|action| action.commands.as_slice());
+        return rows.first();
     }
     let mut roll = rng.gen_range(0.0..1.0) * total;
-    for action in strategy {
-        roll -= action.probability.max(0.0);
+    for row in rows {
+        roll -= weight(row).max(0.0);
         if roll <= 0.0 {
-            return Some(&action.commands);
+            return Some(row);
         }
     }
-    strategy.last().map(|action| action.commands.as_slice())
+    rows.last()
 }
 
 /// The first joint action that the legality check accepts.
@@ -1106,6 +1393,22 @@ fn accept(
     session::reconstruct_player_command(session, dexes, Player::P2, &dto).ok()
 }
 
+/// Runs one drawn preview choice through the legality check of the server.
+///
+/// The check is the one that a submitted choice takes, for the reason
+/// [`accept`] gives.
+fn accept_preview(
+    session: &BattleSession,
+    dexes: &Dexes,
+    choice: &TeamPreviewCommand,
+) -> Option<PlayerCommand> {
+    let dto = PlayerCommandDto::TeamPreview {
+        active_indices: choice.active_indices.clone(),
+        back_indices: choice.back_indices.clone(),
+    };
+    session::reconstruct_player_command(session, dexes, Player::P2, &dto).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1116,10 +1419,10 @@ mod tests {
             generation,
             turn_number,
             p2_win_odds: 0.75,
-            p2_strategy: vec![JointActionProb {
+            p2_strategy: P2Strategy::Battle(vec![JointActionProb {
                 commands: vec![BattleCommand::Pass],
                 probability: 1.0,
-            }],
+            }]),
             depth_reached: 2,
             turns_simulated: 40,
             nodes: 12,
@@ -1324,7 +1627,13 @@ mod tests {
         let mut wide = AnalysisState::default();
         let job = wide.start();
         let mut many = checkpoint(0, 4);
-        many.p2_strategy = vec![many.p2_strategy[0].clone(); 12];
+        many.p2_strategy = P2Strategy::Battle(vec![
+            JointActionProb {
+                commands: vec![BattleCommand::Pass],
+                probability: 1.0,
+            };
+            12
+        ]);
         let long = wide.accept(&job, Ok(many));
 
         assert_eq!(short, long, "the line counts P2's actions");
@@ -1339,7 +1648,7 @@ mod tests {
         let mut state = AnalysisState::default();
         let job = state.start();
         let mut empty = checkpoint(0, 4);
-        empty.p2_strategy.clear();
+        empty.p2_strategy = P2Strategy::Battle(Vec::new());
 
         let line = state.accept(&job, Ok(empty));
 
@@ -1470,7 +1779,7 @@ mod tests {
     fn a_warning_line_holds_no_player_and_no_action_count() {
         let checkpoint = partial_checkpoint(
             0.5,
-            Vec::new(),
+            P2Strategy::Battle(Vec::new()),
             1,
             0,
             0,
@@ -1516,7 +1825,7 @@ mod tests {
         let both = |player_a, player_b| {
             partial_checkpoint(
                 0.5,
-                Vec::new(),
+                P2Strategy::Battle(Vec::new()),
                 1,
                 0,
                 0,
@@ -1545,7 +1854,7 @@ mod tests {
         // P1 alone truncated. The view must not tell the two cases apart.
         let one = partial_checkpoint(
             0.5,
-            Vec::new(),
+            P2Strategy::Battle(Vec::new()),
             1,
             0,
             0,
@@ -1752,13 +2061,152 @@ mod tests {
         assert_eq!(reveal.source, "strategy");
     }
 
+    // ── The preview draw ────────────────────────────────────────────────────
+
+    fn preview_choice(index: usize) -> TeamPreviewCommand {
+        TeamPreviewCommand {
+            active_indices: vec![index],
+            back_indices: vec![index + 1],
+        }
+    }
+
+    fn preview_strategy(weights: &[f64]) -> Vec<PreviewChoiceProb> {
+        weights
+            .iter()
+            .enumerate()
+            .map(|(index, probability)| PreviewChoiceProb {
+                choice: preview_choice(index),
+                probability: *probability,
+            })
+            .collect()
+    }
+
+    fn preview_checkpoint(generation: u64, weights: &[f64]) -> AnalysisCheckpoint {
+        AnalysisCheckpoint {
+            p2_strategy: P2Strategy::Preview(preview_strategy(weights)),
+            ..checkpoint(generation, 0)
+        }
+    }
+
+    /// A preview strategy names bring-and-lead choices, which a battle turn
+    /// cannot play. The battle draw must therefore read none of it and fall
+    /// through to its uniform case.
+    #[test]
+    fn a_preview_checkpoint_supplies_no_battle_strategy() {
+        let preview = preview_checkpoint(0, &[0.6, 0.4]);
+
+        assert!(battle_rows(&preview.p2_strategy).is_none());
+        assert!(preview_rows(&preview.p2_strategy).is_some());
+    }
+
+    /// The mirror rule. A battle strategy names slot commands, which the
+    /// preview turn cannot play.
+    #[test]
+    fn a_battle_checkpoint_supplies_no_preview_strategy() {
+        let battle = checkpoint(0, 3);
+
+        assert!(preview_rows(&battle.p2_strategy).is_none());
+        assert!(battle_rows(&battle.p2_strategy).is_some());
+    }
+
+    /// The preview draw must follow the mixed strategy, exactly as the battle
+    /// draw does. A solver that leads with its second choice at 25% has to
+    /// reach that rate at the table.
+    #[test]
+    fn the_preview_draw_follows_the_strategy_weights() {
+        let strategy = preview_strategy(&[0.75, 0.25]);
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut counts = [0u32; 2];
+
+        for _ in 0..20_000 {
+            counts[sample_preview(&strategy, &mut rng).unwrap().active_indices[0]] += 1;
+        }
+
+        let second = f64::from(counts[1]) / 20_000.0;
+        assert!((second - 0.25).abs() < 0.02, "{counts:?}");
+
+        // One seed must give one answer, so an operator can repeat a battle.
+        let lead = |seed: u64| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            sample_preview(&strategy, &mut rng)
+                .unwrap()
+                .active_indices
+                .clone()
+        };
+        let first = lead(88);
+        for _ in 0..20 {
+            assert_eq!(lead(88), first);
+        }
+
+        // An empty strategy sends the caller to the uniform case.
+        assert!(sample_preview(&[], &mut rng).is_none());
+    }
+
+    /// A fog-of-war session with an exact algorithm searches the true preview
+    /// state, so its leads read P1's hidden team data. That answer must not
+    /// control P2, and the preview position is no exemption from the rule.
+    #[test]
+    fn a_fogged_preview_answer_from_an_exact_search_cannot_control_p2() {
+        for search in [
+            BotSearchConfig::Exact(Default::default()),
+            BotSearchConfig::Mcts(Default::default()),
+        ] {
+            assert!(!strategy_respects_fog(search, true));
+        }
+
+        let mut state = AnalysisState::default();
+        let job = state.start();
+        let mut fogged = preview_checkpoint(0, &[1.0]);
+        fogged.strategy_is_playable =
+            strategy_respects_fog(BotSearchConfig::Exact(Default::default()), true);
+        state.accept(&job, Ok(fogged));
+
+        // The checkpoint is current, and the gate still rejects it.
+        assert!(state.current_checkpoint().is_some());
+        assert_eq!(
+            playable_checkpoint(&state).err(),
+            Some("the strategy read data that the fog of war hides")
+        );
+    }
+
+    /// A belief algorithm is the one case that may read the preview belief, so
+    /// its answer controls P2 under the fog of war.
+    #[test]
+    fn a_fogged_preview_answer_from_a_belief_search_controls_p2() {
+        let mut state = AnalysisState::default();
+        let job = state.start();
+        let mut playable = preview_checkpoint(0, &[1.0]);
+        playable.strategy_is_playable =
+            strategy_respects_fog(BotSearchConfig::Ismcts(Default::default()), true);
+        state.accept(&job, Ok(playable));
+
+        let checkpoint = playable_checkpoint(&state).expect("a belief answer is playable");
+        assert!(preview_rows(&checkpoint.p2_strategy).is_some());
+    }
+
+    /// A stale checkpoint of either position must not reach a draw.
+    #[test]
+    fn the_gate_rejects_a_checkpoint_of_an_older_position() {
+        let mut state = AnalysisState::default();
+        let job = state.start();
+        state.accept(&job, Ok(preview_checkpoint(0, &[1.0])));
+        assert!(playable_checkpoint(&state).is_ok());
+
+        state.invalidate();
+
+        assert_eq!(
+            playable_checkpoint(&state).err(),
+            Some("no checkpoint covers this position")
+        );
+    }
+
     /// The collapse must keep every distinct line, so a real second reason
     /// still reaches the client.
     #[test]
     fn the_collapse_keeps_each_distinct_warning() {
         let checkpoint = partial_checkpoint(
             0.5,
-            Vec::new(),
+            P2Strategy::Battle(Vec::new()),
             1,
             0,
             0,

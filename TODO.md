@@ -6,9 +6,14 @@ and the analysis jobs.
 
 # Fixes
 
-## The solver does not think before team preview
+## Solver Bugs
 
-- [ ] The solver does not stop to think for the team preview turn unlike other turns when it finishes thinking, it is somehow instantly able to choose leads.
+- [ ] Search is returning no solution for end of turn switches and switches from parting shot etc.
+  - [ ] We want to support different time limits / depth settings for these, since they are a simpler decision. 
+  - [ ] Add a configuration to the solver settings that represents whether the user should be able to see the current best strategy of the opponent.
+  - [ ] Solver settings in tracker should not allow for exact solvers, since that doesnt make sense within context of not having all the information
+  - [ ] Simulator bots should not have to think when there is only one possible move -- It should just pick that move
+- [ ] SOlver solutions are generally not better than random guessing especially on high modes, you should investigate this and come up with a solution yourself.
 
 # New features
 

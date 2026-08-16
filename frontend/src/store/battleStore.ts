@@ -100,9 +100,12 @@ const ANALYSIS_POLL_MS = 100
 /** What one wait for the Player 2 search produced. */
 type BotWaitResult = 'answered' | 'noAnswer' | 'cancelled'
 
-/** The message that a search with no answer shows to Player 1. */
+/** The message that a search with no answer shows to Player 1.
+ *
+ * The team preview and a battle turn both show it, so the line names no
+ * command type. */
 const BOT_NO_ANSWER =
-  'The search produced no answer for this position. Submit again to play the turn with a random Player 2 command, or change your move.'
+  'The search produced no answer for this position. Submit again to play it with a random Player 2 choice, or change your selection.'
 
 /**
  * Waits for the search that supplies Player 2's strategy.
@@ -548,7 +551,37 @@ export const useBattle = create<BattleStore>((set, get) => {
         return
       }
 
-      set({ busy: true, error: null })
+      // Player 2 has no hotseat step at team preview either, so the client
+      // waits for the search that supplies Player 2's leads. The exits match
+      // the battle turn: a cancelled wait returns the picks to Player 1, and a
+      // search with no answer lets the next submission play the preview with a
+      // uniform draw. The picks stay in place, so that submission is one click.
+      if (get().botP2 && !get().botNoAnswer) {
+        set({
+          busy: true,
+          error: null,
+          waitingForBot: true,
+          botWaitCancelled: false,
+          botWaitMs: null,
+          p2Reveal: null,
+        })
+        const outcome = await waitForBotAnalysis(
+          battleId,
+          () => get().botWaitCancelled,
+          (elapsed) => set({ botWaitMs: elapsed }),
+        ).catch((): BotWaitResult => 'noAnswer')
+        set({ waitingForBot: false, botWaitMs: null })
+        if (outcome === 'cancelled') {
+          set({ busy: false, botWaitCancelled: false })
+          return
+        }
+        if (outcome === 'noAnswer') {
+          set({ busy: false, botNoAnswer: true, error: BOT_NO_ANSWER })
+          return
+        }
+      }
+
+      set({ busy: true, error: null, botNoAnswer: false })
       try {
         const response = await api.submitTurn(battleId, {
           p1: currentPlayer === 'p1' ? command : (p1Commands ?? { kind: 'pass' }),

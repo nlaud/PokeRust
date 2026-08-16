@@ -102,6 +102,13 @@ test.describe('Simulate mode', () => {
       request.botP2.timeMs = 1
       await route.continue({ postData: JSON.stringify(request) })
     })
+    let holdPreviewAnalysis = true
+    await page.route('**/api/battles/*/analysis', async (route) => {
+      if (holdPreviewAnalysis) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      await route.continue()
+    })
 
     // The profile section uses a span label. Scope each list box by its test ID.
     const picker = page.getByTestId('bot-picker')
@@ -212,12 +219,23 @@ test.describe('Simulate mode', () => {
     await expect(detail).toHaveCount(0)
     await page.setViewportSize({ width: 1280, height: 800 })
 
-    // P1 locks the preview command. The server draws P2's command immediately.
+    // P1 locks the preview command. The client locks all input during the wait.
     const previewMons = page.getByTestId('preview-mon')
     const p1Count = await previewMons.count()
     for (let i = 0; i < p1Count; i++) await previewMons.nth(i).click()
     await expect(page.getByTestId('preview-confirm')).toHaveText('Start Battle')
     await page.getByTestId('preview-confirm').click()
+    await expect(page.getByTestId('bot-wait-line')).toBeVisible()
+    await expect(page.getByTestId('bot-wait-cancel')).toHaveText('Change my selection')
+    for (let i = 0; i < p1Count; i++) await expect(previewMons.nth(i)).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Back', exact: false })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'New battle' })).toBeDisabled()
+    await page.screenshot({
+      path: testInfo.outputPath('bot-preview-input-locked.png'),
+      fullPage: true,
+      animations: 'disabled',
+    })
+    holdPreviewAnalysis = false
     await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
     expect(turnRequests).toHaveLength(1)
     expect(turnRequests[0]).not.toHaveProperty('p2')

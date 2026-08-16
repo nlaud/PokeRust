@@ -523,7 +523,23 @@ pub async fn create_battle(
     let view = session.view(Player::P1);
     let view_p2 = session.view(Player::P2);
     let bot_view = session.bot_p2.as_ref().map(|p| p.view.clone());
-    lock_sessions(&app).insert(battle_id.clone(), session);
+    {
+        // The first position is the team preview, and a bot session searches it
+        // as it searches every later turn. The route inserts the session first,
+        // because the task reads the session back by its ID. `start_job` only
+        // spawns the search, so this lock does not hold the search.
+        let mut sessions = lock_sessions(&app);
+        sessions.insert(battle_id.clone(), session);
+        if let Some(session) = sessions.get_mut(&battle_id) {
+            crate::analysis::start_job(
+                &battle_id,
+                session,
+                Arc::clone(&app.dexes),
+                Arc::clone(&app.meta),
+                Arc::clone(&app.sessions),
+            );
+        }
+    }
 
     Json(CreateBattleResponse {
         battle_id,

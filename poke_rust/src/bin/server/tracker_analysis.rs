@@ -861,7 +861,10 @@ fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u
 /// A sampling profile carries no [`SolveConfig`], because the preview search
 /// solves each cell with the exact search. The rung therefore builds one from
 /// the depth and the physics of that profile.
-fn preview_battle_config(search: BotSearchConfig, deadline: Duration) -> SolveConfig {
+///
+/// `analysis.rs` calls this for the preview position of a bot battle, which
+/// takes the same profile and the same solver.
+pub(crate) fn preview_battle_config(search: BotSearchConfig, deadline: Duration) -> SolveConfig {
     let sampled = |mcts: poke_rust::solver::mcts::MctsConfig| SolveConfig {
         depth: mcts.depth,
         damage_rolls: mcts.damage_rolls,
@@ -885,7 +888,9 @@ fn preview_battle_config(search: BotSearchConfig, deadline: Duration) -> SolveCo
 ///
 /// A belief profile already asks for several worlds, so the rung caps that
 /// count at [`MAX_PREVIEW_WORLDS`]. Every other profile reads one world.
-fn preview_worlds(search: BotSearchConfig) -> usize {
+///
+/// `analysis.rs` calls this for the preview position of a bot battle.
+pub(crate) fn preview_worlds(search: BotSearchConfig) -> usize {
     match search {
         BotSearchConfig::Ismcts(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
         BotSearchConfig::Mccfr(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
