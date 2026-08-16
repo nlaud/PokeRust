@@ -12,6 +12,7 @@ Use strict mode unless the user requests another mode.
 - `poke_rust/src/information/README.md` explains fog-of-war inference.
 - `meta_scraper/README.md` explains the usage-data cache.
 - `poke_rust/benches/RESULTS.md` records benchmark results.
+- `poke_rust/src/solver/README.md` explains the search targets and algorithms.
 - `poke_rust/src/solver/TRAINING.md` explains how to retrain the evaluator.
 
 ## Project state
@@ -178,6 +179,8 @@ Do not normalize move rates as a complete distribution.
 - Keep returned probabilities comparable only within one belief.
 
 ## Solver
+
+Read `poke_rust/src/solver/README.md` before you change this module.
 
 The solver computes a mixed Nash strategy for a concrete state.
 It models each turn as a simultaneous stochastic game.

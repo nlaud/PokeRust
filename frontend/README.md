@@ -132,6 +132,27 @@ This prevents layout changes during a run.
 `pages/benchmark/glossary.ts` defines benchmark terms.
 Update the glossary after a related engine change.
 
+## Bot opponent
+
+A bot session lets the server choose the P2 command.
+The client sends no `p2` field for that session.
+The server returns the drawn command as `p2Reveal`.
+
+`P2RevealPanel.tsx` shows both states of that draw:
+
+- During the search it shows a wait line, the elapsed time, an approximate
+  progress figure, and a "Change my move" button.
+- After the turn resolves it shows the drawn command and the draw source.
+
+The client waits for the current analysis job until that job stops.
+No client timeout ends the wait.
+A job that ends with no answer blocks one submission and reports the reason.
+The next submission plays the turn.
+
+The panel marks a uniform draw with a warning.
+`poke_rust/src/solver/README.md` explains when the server falls back to that
+draw.
+
 ## Tracker mode
 
 Tracker mode records a battle that occurs outside the simulator.

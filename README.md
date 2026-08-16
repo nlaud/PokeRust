@@ -111,5 +111,6 @@ The labels come from a search that scores its own horizon with the committed wei
 
 - `frontend/README.md` explains the web interface and tracker grammar.
 - `poke_rust/src/information/README.md` explains the fog-of-war inference engine.
+- `poke_rust/src/solver/README.md` explains the solver targets, algorithms, and analysis jobs.
 - `meta_scraper/README.md` explains the competitive usage-statistics cache.
 - `poke_rust/benches/RESULTS.md` contains benchmark results and analysis.
