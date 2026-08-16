@@ -8,6 +8,7 @@
 //! - Targeted moves must name each target.
 //! - A charge turn can omit its target.
 //! - `leads` sends out one or both sides together.
+//! - The opening `leads` line can also declare what Player 1 brought.
 //! - Consecutive lead lines merge into one `SimultaneousSwitch` event.
 //! - HP values use the current belief to determine damage or healing.
 //! - An unchanged HP value creates `SetHp`.
@@ -38,6 +39,18 @@ pub struct ParseError {
 #[derive(Debug)]
 pub enum TrackerLine {
     Event(InformationEvent),
+    /// A `leads` line that also declares what Player 1 brought.
+    ///
+    /// `back` holds the species that Player 1 brought but did not lead. The
+    /// tracker owner knows this fact at team preview, and the opening `leads`
+    /// line is the only place to state it. `tracker.rs::cut_p1_roster_to_bring`
+    /// then removes every roster member that stayed at home.
+    ///
+    /// A `leads` line with no `back` clause stays an ordinary `Event`.
+    LeadsWithBack {
+        event: InformationEvent,
+        back: Vec<Species>,
+    },
     /// A reaction belonging to the terminal `EndOfTurn` node.
     EndOfTurnReaction(InformationEvent),
     EndOfTurn,
@@ -236,6 +249,23 @@ fn leads_side_marker(tok: &str) -> Option<Player> {
         "o" | "o1" | "opponent" => Some(Player::P2),
         _ => None,
     }
+}
+
+/// True when `belief` still sits before the opening `leads` line.
+///
+/// The `back` clause cuts the Player 1 roster, and that cut moves every later
+/// flat `mon_idx`. Only the opening belief holds no `mon_idx` reference, so the
+/// clause belongs there and nowhere else.
+///
+/// A mid-battle double faint also empties both sides, so the turn number guards
+/// the test. This rule matches `position_is_team_preview` in
+/// `tracker_analysis.rs`.
+///
+/// `parse_tracker_text` reads the belief of the whole submission, so this test
+/// cannot see a later turn inside that submission.
+/// `tracker.rs::cut_p1_roster_to_bring` repeats it against the working belief.
+pub(crate) fn leads_is_the_opening(belief: &UnknownBattleState) -> bool {
+    belief.turn_number == 0 && belief.p1_active_mons.is_empty() && belief.p2_active_mons.is_empty()
 }
 
 pub(crate) fn opposing_active_slots(
@@ -733,6 +763,10 @@ fn parse_line(
             slot_species,
         )? {
             TrackerLine::Event(event) => Ok(TrackerLine::EndOfTurnReaction(event)),
+            TrackerLine::LeadsWithBack { .. } => Err(err(
+                line_no,
+                "a leads line with a 'back' clause cannot be an end-of-turn reaction",
+            )),
             TrackerLine::EndOfTurn | TrackerLine::EndOfTurnReaction(_) => {
                 Err(err(line_no, "invalid nested end-of-turn marker"))
             }
@@ -805,6 +839,12 @@ fn parse_line(
         // `SimultaneousSwitch` covering every named mon (both sides if both
         // appear); `fold_leads_and_entry_abilities` still folds a
         // following entry-ability reveal (`p1 sandstream`) into it.
+        //
+        // The `p` side also accepts one optional `back <species>...` clause,
+        // which names the Pokemon that Player 1 brought but did not lead:
+        // `leads p tyranitar back gengar snorlax o charizard`. See
+        // `TrackerLine::LeadsWithBack`. The opponent's bring is hidden
+        // information, so the `o` side never accepts the clause.
         "leads" => {
             let rest = &tokens[1..];
             if rest.is_empty() {
@@ -816,10 +856,37 @@ fn parse_line(
             let mut switches: Vec<SwitchState> = Vec::new();
             let mut current_side: Option<Player> = None;
             let mut next_slot_index: u8 = 0;
+            let mut back: Vec<Species> = Vec::new();
+            let mut has_back_clause = false;
+            let mut in_back_clause = false;
+            // Player 1 owns a distinct species for each roster member, so a
+            // repeat on this side always names the same Pokemon twice.
+            let mut p1_named: Vec<Species> = Vec::new();
             for tok in rest {
                 if let Some(side) = leads_side_marker(tok) {
                     current_side = Some(side);
                     next_slot_index = 0;
+                    in_back_clause = false;
+                    continue;
+                }
+                if norm(tok) == "back" {
+                    if current_side != Some(Player::P1) {
+                        return Err(err(
+                            line_no,
+                            "'back' requires the 'p' side — the opponent's bring is hidden",
+                        ));
+                    }
+                    if has_back_clause {
+                        return Err(err(line_no, "leads accepts one 'back' clause"));
+                    }
+                    if !leads_is_the_opening(belief) {
+                        return Err(err(
+                            line_no,
+                            "'back' belongs on the opening leads line only",
+                        ));
+                    }
+                    has_back_clause = true;
+                    in_back_clause = true;
                     continue;
                 }
                 let Some(player) = current_side else {
@@ -831,6 +898,25 @@ fn parse_line(
                 let species = Species::from_str(tok);
                 if matches!(species, Species::Unknown(_)) {
                     return Err(err(line_no, format!("unrecognized species '{tok}'")));
+                }
+                if player == Player::P1 {
+                    if p1_named.contains(&species) {
+                        return Err(err(
+                            line_no,
+                            format!("leads names '{tok}' twice on the 'p' side"),
+                        ));
+                    }
+                    p1_named.push(species.clone());
+                }
+                if in_back_clause {
+                    if find_roster_mon(belief, Player::P1, &species).is_none() {
+                        return Err(err(
+                            line_no,
+                            format!("'{tok}' is not on the Player 1 roster"),
+                        ));
+                    }
+                    back.push(species);
+                    continue;
                 }
                 let lead_slot = FieldSlot {
                     player,
@@ -845,10 +931,26 @@ fn parse_line(
             if switches.is_empty() {
                 return Err(err(line_no, "leads requires at least one species"));
             }
-            return Ok(TrackerLine::Event(InformationEvent {
+            let event = InformationEvent {
                 kind: EventKind::SimultaneousSwitch { switches },
                 reactions: Vec::new(),
-            }));
+            };
+            if !has_back_clause {
+                return Ok(TrackerLine::Event(event));
+            }
+            // The bench size of the format is exact, so a short or long clause
+            // is a typing error rather than partial knowledge.
+            let expected = belief.back_mons_per_side as usize;
+            if back.len() != expected {
+                return Err(err(
+                    line_no,
+                    format!(
+                        "'back' needs {expected} species for this format — got {}",
+                        back.len()
+                    ),
+                ));
+            }
+            return Ok(TrackerLine::LeadsWithBack { event, back });
         }
         "side" => {
             let side_tok = tokens
@@ -2452,7 +2554,9 @@ mod tests {
         let events: Vec<InformationEvent> = lines
             .into_iter()
             .map(|l| match l {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => ev,
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => ev,
                 TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
             })
             .collect();
@@ -2515,7 +2619,9 @@ mod tests {
         let events: Vec<InformationEvent> = lines
             .into_iter()
             .map(|l| match l {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => ev,
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => ev,
                 TrackerLine::EndOfTurn => panic!("no endofturn in this test"),
             })
             .collect();
@@ -2566,7 +2672,9 @@ mod tests {
         let mut turn_events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => turn_events.push(ev),
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => turn_events.push(ev),
                 TrackerLine::EndOfTurn => turn_events.push(leaf(EventKind::EndOfTurn)),
             }
         }
@@ -2898,7 +3006,9 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),
@@ -2973,7 +3083,9 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),
@@ -3008,7 +3120,9 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),

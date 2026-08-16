@@ -120,8 +120,6 @@ The wait does not remove the uniform draw. `draw_p2_command` also drops a
 checkpoint whose strategy read data that the fog of war hides, which an exact
 or `mcts` profile does in every fog-of-war battle.
 
-- [ ] Searching in tracker mode should be from player 1's perspective. This means that leads should have the back pokemon for player 1 and that information should be used for the tracking. 
-
 `simulator::scoped_abort_signal` carries the deadline and the cancel flag into one
 turn simulation. The hit loop, the target loop, and the action queue read it. The
 hit loop and the target loop also merge their equal branches after each step, so

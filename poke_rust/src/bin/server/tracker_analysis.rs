@@ -619,6 +619,9 @@ fn run_ladder(
         if let Some(line) = overrun_line(inputs.time_ms, elapsed) {
             warnings.push(line);
         }
+        if let Some(line) = unknown_bring_line(&inputs.belief) {
+            warnings.push(line);
+        }
         warnings.push(drawn_world_note(inputs.search));
 
         (hooks.publish)(TrackerAnalysisCheckpoint {
@@ -1074,6 +1077,30 @@ fn drawn_world_note(search: BotSearchConfig) -> String {
     }
 }
 
+/// Names the cost of a Player 1 bring that the tracker never learned.
+///
+/// `create_tracker` gives the whole Player 1 sheet to the belief, because the
+/// `leads` line arrives later. A `back` clause on the opening `leads` line cuts
+/// that sheet to the bring. Without the clause the drawn world gives Player 1 a
+/// bench that the real game does not hold, so the rows can name a switch that
+/// Player 1 cannot make.
+///
+/// Returns `None` once the roster matches the bring of the format.
+fn unknown_bring_line(belief: &UnknownBattleState) -> Option<String> {
+    let roster = belief.p1_active_mons.len()
+        + belief.p1_known_back_mons.len()
+        + belief.p1_possible_back_mons.len()
+        + belief.p1_fainted_mons.len();
+    let brought = belief.active_per_side as usize + belief.back_mons_per_side as usize;
+    (roster > brought).then(|| {
+        format!(
+            "The Player 1 roster holds {roster} Pokemon, and this format brings {brought}. The \
+             search can therefore read a switch to a Pokemon that Player 1 did not bring. Add a \
+             'back' clause to the opening leads line to state the bring."
+        )
+    })
+}
+
 /// True when the P2 rows describe one private state.
 fn p2_strategy_is_playable(search: BotSearchConfig) -> bool {
     !matches!(
@@ -1440,6 +1467,23 @@ mod tests {
         assert!(!position_is_team_preview(false, false, 0));
         // A double faint empties both sides part way through a battle.
         assert!(!position_is_team_preview(true, true, 4));
+    }
+
+    /// A Player 1 roster that is larger than the bring makes the drawn world
+    /// give Player 1 a bench that the real game does not hold, so the panel has
+    /// to name that gap. A roster that matches the bring adds no warning.
+    #[test]
+    fn an_unknown_player_one_bring_adds_a_warning() {
+        let (mut belief, _) = preview_beliefs();
+        // `preview_beliefs` leaves the whole sheet on the bench, and the format
+        // of that helper brings one Pokemon.
+        assert!(belief.p1_known_back_mons.len() > 1);
+        let line = unknown_bring_line(&belief).expect("the panel must name the unknown bring");
+        assert!(line.contains("did not bring"), "{line}");
+
+        belief.p1_active_mons = vec![belief.p1_known_back_mons.remove(0)];
+        belief.p1_known_back_mons.clear();
+        assert!(unknown_bring_line(&belief).is_none());
     }
 
     /// The panel shows one bring-and-lead choice for each row, so the row must

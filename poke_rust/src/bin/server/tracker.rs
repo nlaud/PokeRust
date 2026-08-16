@@ -44,7 +44,7 @@ use poke_rust::information::inference::{
 };
 use poke_rust::information::information::{EventKind, InformationEvent};
 use poke_rust::information::unknowns::{
-    InformationMode, UnknownBattleState, UnknownMatchState, UnknownTeamPreviewState,
+    InformationMode, Unknown, UnknownBattleState, UnknownMatchState, UnknownTeamPreviewState,
 };
 use poke_rust::simulator;
 use poke_rust::state::battle::{BattleMechanics, FieldSlot, Player};
@@ -56,7 +56,8 @@ use crate::routes::AppState;
 use crate::session::Dexes;
 use crate::tracker_effects::augment_turn;
 use crate::tracker_parse::{
-    ParseError, TrackerLine, fold_leads_and_entry_abilities, parse_tracker_text,
+    ParseError, TrackerLine, fold_leads_and_entry_abilities, leads_is_the_opening,
+    parse_tracker_text,
 };
 
 pub struct TrackerSession {
@@ -442,20 +443,33 @@ fn restart_analysis(app: &AppState, id: &str, session: &mut TrackerSession) {
 /// never types it as a literal event node, just the `endofturn` sentinel line.
 /// Rejects a trailing partial turn rather than silently applying it early; see
 /// this module's doc comment on the Phase-1 "submit whole turns" contract.
-fn split_into_turns(lines: Vec<TrackerLine>) -> Result<Vec<Vec<InformationEvent>>, String> {
+fn split_into_turns(lines: Vec<TrackerLine>) -> Result<Vec<ParsedTurn>, String> {
     let mut turns = Vec::new();
     let mut current: Vec<InformationEvent> = Vec::new();
     let mut end_of_turn_reactions: Vec<InformationEvent> = Vec::new();
+    let mut declared_p1_back: Option<Vec<Species>> = None;
     for line in lines {
         match line {
             TrackerLine::Event(ev) => current.push(ev),
+            TrackerLine::LeadsWithBack { event, back } => {
+                if declared_p1_back.is_some() {
+                    return Err(
+                        "one turn accepts one leads line with a 'back' clause".to_string()
+                    );
+                }
+                declared_p1_back = Some(back);
+                current.push(event);
+            }
             TrackerLine::EndOfTurnReaction(ev) => end_of_turn_reactions.push(ev),
             TrackerLine::EndOfTurn => {
                 current.push(InformationEvent {
                     kind: EventKind::EndOfTurn,
                     reactions: std::mem::take(&mut end_of_turn_reactions),
                 });
-                turns.push(std::mem::take(&mut current));
+                turns.push(ParsedTurn {
+                    events: std::mem::take(&mut current),
+                    declared_p1_back: declared_p1_back.take(),
+                });
             }
         }
     }
@@ -469,6 +483,167 @@ fn split_into_turns(lines: Vec<TrackerLine>) -> Result<Vec<Vec<InformationEvent>
         return Err("no complete turn submitted (need at least one 'endofturn' line)".to_string());
     }
     Ok(turns)
+}
+
+/// One complete turn from `split_into_turns`.
+struct ParsedTurn {
+    events: Vec<InformationEvent>,
+    /// The Pokemon that Player 1 brought but did not lead.
+    ///
+    /// `Some` only when the opening `leads` line carried a `back` clause. See
+    /// `cut_p1_roster_to_bring`.
+    declared_p1_back: Option<Vec<Species>>,
+}
+
+/// Collect the events and the optional Player 1 bench for a preview request.
+fn preview_lines(
+    lines: Vec<TrackerLine>,
+) -> Result<(Vec<InformationEvent>, Option<Vec<Species>>), String> {
+    let mut declared_p1_back = None;
+    let mut events = Vec::new();
+    for line in lines {
+        match line {
+            TrackerLine::Event(event) => events.push(event),
+            TrackerLine::LeadsWithBack { event, back } => {
+                if declared_p1_back.replace(back).is_some() {
+                    return Err("a preview accepts one leads line with a 'back' clause".to_string());
+                }
+                events.push(event);
+            }
+            TrackerLine::EndOfTurn | TrackerLine::EndOfTurnReaction(_) => {}
+        }
+    }
+    Ok((events, declared_p1_back))
+}
+
+/// Cuts the Player 1 roster to the Pokemon that Player 1 brought.
+///
+/// `create_tracker` gives the whole Player 1 sheet to `p1_known_back_mons`,
+/// because the `leads` line arrives later. A `back` clause on that line names
+/// the rest of the bring, so the belief can drop every roster member that
+/// stayed at home. Player 1 owns this fact, so the cut removes no possible true
+/// value.
+///
+/// The cut keeps the leads of this turn and every declared back Pokemon. It
+/// runs before `apply_information`, while the leads still sit on the bench.
+///
+/// `mon_idx` is a flat index over the belief segments, and this cut moves every
+/// later index. The opening belief holds no `mon_idx` reference, so the cut is
+/// safe there and only there. `leads_is_the_opening` guards that rule against
+/// the working belief, which the parser cannot read for a later turn of the
+/// same submission.
+fn cut_p1_roster_to_bring(
+    belief: &mut UnknownBattleState,
+    events: &[InformationEvent],
+    back: &[Species],
+) -> Result<(), String> {
+    if !leads_is_the_opening(belief) {
+        return Err("'back' belongs on the opening leads line only".to_string());
+    }
+    let mut leads: Vec<Species> = Vec::new();
+    for event in events {
+        if let EventKind::SimultaneousSwitch { switches } = &event.kind {
+            for switch in switches {
+                if switch.slot.player == Player::P1 {
+                    leads.push(switch.species.clone());
+                }
+            }
+        }
+    }
+
+    let expected_leads = belief.active_per_side as usize;
+    if leads.len() != expected_leads {
+        return Err(format!(
+            "the opening leads line needs {expected_leads} Player 1 lead(s) for this format — got {}",
+            leads.len()
+        ));
+    }
+
+    let mut brought: Vec<Species> = back.to_vec();
+    brought.extend(leads);
+    for species in &brought {
+        let occurrences = brought
+            .iter()
+            .filter(|candidate| *candidate == species)
+            .count();
+        if occurrences > 1 {
+            return Err(format!(
+                "the Player 1 bring names '{species:?}' more than once"
+            ));
+        }
+        let on_roster = belief.p1_known_back_mons.iter().any(
+            |mon| matches!(&mon.possible_species, Unknown::Known(candidate) if candidate == species),
+        );
+        if !on_roster {
+            return Err(format!("'{species:?}' is not on the Player 1 roster"));
+        }
+    }
+
+    belief
+        .p1_known_back_mons
+        .retain(|mon| matches!(&mon.possible_species, Unknown::Known(s) if brought.contains(s)));
+    belief
+        .p1_possible_back_mons
+        .retain(|mon| matches!(&mon.possible_species, Unknown::Known(s) if brought.contains(s)));
+    belief
+        .p1_roster_templates
+        .retain(|mon| matches!(&mon.possible_species, Unknown::Known(s) if brought.contains(s)));
+    Ok(())
+}
+
+/// Reject a Player 1 switch when the species is not in the battle roster.
+///
+/// The tracker knows the complete Player 1 team. After a `back` clause, the
+/// live roster contains only the Pokemon that Player 1 brought.
+fn validate_p1_switches(
+    events: &[InformationEvent],
+    belief: &UnknownBattleState,
+) -> Result<(), String> {
+    let on_roster = |species: &Species| {
+        belief
+            .p1_active_mons
+            .iter()
+            .chain(&belief.p1_known_back_mons)
+            .chain(&belief.p1_possible_back_mons)
+            .chain(&belief.p1_fainted_mons)
+            .any(|mon| matches!(&mon.possible_species, Unknown::Known(candidate) if candidate == species))
+    };
+
+    fn visit(
+        event: &InformationEvent,
+        on_roster: &impl Fn(&Species) -> bool,
+    ) -> Result<(), String> {
+        match &event.kind {
+            EventKind::Switch(switch) if switch.slot.player == Player::P1 => {
+                if !on_roster(&switch.species) {
+                    return Err(format!(
+                        "Player 1 cannot switch to '{:?}' because it is not in the brought roster",
+                        switch.species
+                    ));
+                }
+            }
+            EventKind::SimultaneousSwitch { switches } => {
+                for switch in switches {
+                    if switch.slot.player == Player::P1 && !on_roster(&switch.species) {
+                        return Err(format!(
+                            "Player 1 cannot switch to '{:?}' because it is not in the brought roster",
+                            switch.species
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        for reaction in &event.reactions {
+            visit(reaction, on_roster)?;
+        }
+        Ok(())
+    }
+
+    for event in events {
+        visit(event, &on_roster)?;
+    }
+    Ok(())
 }
 
 /// Every active slot on both sides must show *some* recorded action this
@@ -732,14 +907,32 @@ fn apply_turns_from(
     let mut working = base.clone();
     let mut log: Vec<TurnLogEntry> = Vec::new();
     let mut turn_count = turn_offset;
-    for events in turns {
+    for turn in turns {
         // A combined `leads p … o …` line already parses to one event; this
         // also merges the (still-accepted) two-separate-lines form and folds
         // immediately-following entry-ability reveals into its `reactions` —
         // see `fold_leads_and_entry_abilities`'s doc comment. Must run before
         // completeness validation / synthesis so both see the final nested
         // shape.
-        let events = fold_leads_and_entry_abilities(events);
+        let events = fold_leads_and_entry_abilities(turn.events);
+
+        // A `back` clause states what Player 1 brought. The cut runs first, so
+        // every later step sees the real roster rather than the whole sheet.
+        if let Some(back) = &turn.declared_p1_back
+            && let Err(message) = cut_p1_roster_to_bring(&mut working, &events, back)
+        {
+            return Err(SubmitTrackerError::Unprocessable(format!(
+                "turn {}: {message}",
+                turn_count + 1
+            )));
+        }
+
+        if let Err(message) = validate_p1_switches(&events, &working) {
+            return Err(SubmitTrackerError::Unprocessable(format!(
+                "turn {}: {message}",
+                turn_count + 1
+            )));
+        }
 
         // An incomplete turn (some active slot recorded nothing at all) is
         // rejected the same way a contradiction is — before any mutation.
@@ -861,16 +1054,24 @@ pub async fn preview_tracker_events(
         Ok(l) => l,
         Err(e) => return parse_error_response(e),
     };
-    let events: Vec<InformationEvent> = lines
-        .into_iter()
-        .filter_map(|line| match line {
-            TrackerLine::Event(ev) => Some(ev),
-            TrackerLine::EndOfTurn | TrackerLine::EndOfTurnReaction(_) => None,
-        })
-        .collect();
+    let (events, declared_p1_back) = match preview_lines(lines) {
+        Ok(value) => value,
+        Err(message) => return unprocessable(message),
+    };
     let events = fold_leads_and_entry_abilities(events);
 
     let mut working = session.belief.clone();
+    // The preview shows the roster that the typed turn produces, so the clone
+    // takes the same cut that a commit would take. It never touches the
+    // session belief.
+    if let Some(back) = &declared_p1_back
+        && let Err(message) = cut_p1_roster_to_bring(&mut working, &events, back)
+    {
+        return unprocessable(message);
+    }
+    if let Err(message) = validate_p1_switches(&events, &working) {
+        return unprocessable(message);
+    }
     let events: Vec<InformationEvent> = augment_turn(
         events,
         &working,
@@ -1451,6 +1652,229 @@ mod tests {
         );
         assert_eq!(appended.log.len(), rebuilt.log.len());
         assert_eq!(appended.turn_count, rebuilt.log.len() as u16);
+    }
+
+    // ── The `back` clause of the opening `leads` line ───────────────────────
+
+    /// A fresh tracker belief: a four-Pokemon Player 1 sheet, nobody on the
+    /// field, and a format that brings two.
+    ///
+    /// `create_tracker` builds this shape for a real session — the whole sheet
+    /// waits in `p1_known_back_mons`, because the `leads` line arrives later.
+    fn opening_belief() -> UnknownBattleState {
+        let mut belief = belief_1v1();
+        belief.turn_number = 0;
+        belief.back_mons_per_side = 1;
+        belief.p1_active_mons.clear();
+        belief.p2_active_mons.clear();
+        let p1_roster = vec![
+            make_active(Species::Pikachu, false),
+            make_active(Species::Charizard, false),
+            make_active(Species::Snorlax, false),
+            make_active(Species::Gengar, false),
+        ];
+        belief.p1_known_back_mons = p1_roster.clone();
+        belief.p1_roster_templates = p1_roster;
+        belief.p2_possible_back_mons = vec![
+            make_active(Species::Garchomp, false),
+            make_active(Species::Tyranitar, false),
+        ];
+        belief
+    }
+
+    fn known_species(mons: &[UnknownPokemonState]) -> Vec<Species> {
+        mons.iter()
+            .filter_map(|mon| match &mon.possible_species {
+                Unknown::Known(species) => Some(species.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn parse_error_of(belief: &UnknownBattleState, text: &str) -> ParseError {
+        parse_tracker_text(text, belief, &dexes().move_dex, &dexes().pokemon_dex)
+            .expect_err("this leads line must fail to parse")
+    }
+
+    #[test]
+    fn a_back_clause_cuts_the_player_one_roster_to_the_bring() {
+        let applied = apply_turns_from(
+            &opening_belief(),
+            "leads p pikachu back charizard o garchomp\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        )
+        .expect("the opening turn should commit");
+
+        assert_eq!(
+            known_species(&applied.belief.p1_active_mons),
+            vec![Species::Pikachu]
+        );
+        assert_eq!(
+            known_species(&applied.belief.p1_known_back_mons),
+            vec![Species::Charizard]
+        );
+        assert_eq!(
+            known_species(&applied.belief.p1_roster_templates),
+            vec![Species::Pikachu, Species::Charizard]
+        );
+    }
+
+    #[test]
+    fn an_unbrought_player_one_species_cannot_switch_in_later() {
+        let result = apply_turns_from(
+            &opening_belief(),
+            "leads p pikachu back charizard o garchomp\nendofturn\n\
+             p1 switch snorlax\no1 pass\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        );
+
+        let Err(SubmitTrackerError::Unprocessable(message)) = result else {
+            panic!("an unbrought Pokemon must not enter the battle");
+        };
+        assert!(message.contains("not in the brought roster"), "{message}");
+    }
+
+    #[test]
+    fn an_off_roster_player_one_lead_is_rejected() {
+        let result = apply_turns_from(
+            &opening_belief(),
+            "leads p mewtwo back charizard o garchomp\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        );
+
+        let Err(SubmitTrackerError::Unprocessable(message)) = result else {
+            panic!("an off-roster lead must be rejected");
+        };
+        assert!(message.contains("not on the Player 1 roster"), "{message}");
+    }
+
+    #[test]
+    fn a_back_clause_rejects_extra_player_one_leads() {
+        let result = apply_turns_from(
+            &opening_belief(),
+            "leads p pikachu charizard back snorlax o garchomp\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        );
+
+        let Err(SubmitTrackerError::Unprocessable(message)) = result else {
+            panic!("the opening must use the configured lead count");
+        };
+        assert!(message.contains("needs 1 Player 1 lead"), "{message}");
+    }
+
+    #[test]
+    fn a_preview_rejects_two_back_clauses() {
+        let lines = parse_tracker_text(
+            "leads p pikachu back charizard o garchomp\n\
+             leads p snorlax back gengar o tyranitar",
+            &opening_belief(),
+            &dexes().move_dex,
+            &dexes().pokemon_dex,
+        )
+        .expect("each line is valid by itself");
+
+        let error = preview_lines(lines).expect_err("the preview must reject two clauses");
+        assert!(error.contains("one leads line"), "{error}");
+    }
+
+    #[test]
+    fn a_leads_line_with_no_back_clause_keeps_the_whole_sheet() {
+        let applied = apply_turns_from(
+            &opening_belief(),
+            "leads p pikachu o garchomp\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        )
+        .expect("the opening turn should commit");
+
+        assert_eq!(
+            known_species(&applied.belief.p1_known_back_mons),
+            vec![Species::Charizard, Species::Snorlax, Species::Gengar]
+        );
+    }
+
+    #[test]
+    fn a_back_clause_after_the_opening_is_rejected() {
+        // The parser reads the belief of the whole submission, so only the cut
+        // itself can see that this second turn is past the opening.
+        let result = apply_turns_from(
+            &opening_belief(),
+            "leads p pikachu o garchomp\nendofturn\n\
+             leads p charizard back snorlax o tyranitar\nendofturn",
+            dexes(),
+            &InferenceConfig::default(),
+            1,
+            0,
+        );
+
+        let Err(SubmitTrackerError::Unprocessable(message)) = result else {
+            panic!("a late 'back' clause must be rejected");
+        };
+        assert!(message.contains("opening leads line"), "{message}");
+    }
+
+    #[test]
+    fn a_back_clause_on_a_committed_belief_reports_a_line_error() {
+        // `belief_1v1` already has both leads on the field.
+        let error = parse_error_of(&belief_1v1(), "leads p pikachu back charizard");
+        assert_eq!(error.line, 1);
+        assert!(error.message.contains("opening leads line"), "{error:?}");
+    }
+
+    #[test]
+    fn a_back_clause_requires_both_sides_to_be_before_the_opening() {
+        let mut belief = opening_belief();
+        belief
+            .p2_active_mons
+            .push(make_active(Species::Garchomp, false));
+        let error = parse_error_of(&belief, "leads p pikachu back charizard");
+
+        assert!(error.message.contains("opening leads line"), "{error:?}");
+    }
+
+    #[test]
+    fn a_back_clause_with_the_wrong_count_reports_a_line_error() {
+        let error = parse_error_of(
+            &opening_belief(),
+            "leads p pikachu back charizard snorlax o garchomp",
+        );
+        assert!(error.message.contains("needs 1 species"), "{error:?}");
+    }
+
+    #[test]
+    fn a_back_species_off_the_player_one_roster_reports_a_line_error() {
+        // Tyranitar is on the opponent's roster only.
+        let error = parse_error_of(&opening_belief(), "leads p pikachu back tyranitar o garchomp");
+        assert!(
+            error.message.contains("not on the Player 1 roster"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_back_clause_on_the_opponent_side_reports_a_line_error() {
+        let error = parse_error_of(&opening_belief(), "leads p pikachu o garchomp back tyranitar");
+        assert!(error.message.contains("hidden"), "{error:?}");
+    }
+
+    #[test]
+    fn a_repeated_player_one_species_reports_a_line_error() {
+        let error = parse_error_of(&opening_belief(), "leads p pikachu back pikachu o garchomp");
+        assert!(error.message.contains("twice"), "{error:?}");
     }
 
     /// `apply_turns_from` itself still rejects an empty/all-whitespace script

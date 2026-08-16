@@ -322,6 +322,9 @@ const EXPLICIT_SLOT_WORDS = ['@p1', '@p2', '@o1', '@o2']
 // These markers do not use slot digits.
 const LEADS_LINE_WORDS: WordGroup[] = [group('leads')]
 const LEADS_SIDE_WORDS: WordGroup[] = [group('p'), group('o')]
+// `back` names the Pokemon that Player 1 brought but did not lead.
+// The opponent's bring is hidden, so only the `p` side accepts the word.
+const LEADS_BACK_WORDS: WordGroup[] = [group('back')]
 
 function canonicalsOf(groups: WordGroup[]): string[] {
   return groups.map((g) => g.canonical)
@@ -427,12 +430,26 @@ export type LinePosition =
   | { kind: 'stockpileLevel' }
   | { kind: 'switchSpecies' }
   | { kind: 'leadsSideOrSpecies' }
+  | { kind: 'leadsSideSpeciesOrBack' }
   | { kind: 'megaSpeciesOrDone' }
   | { kind: 'teraType' }
   | { kind: 'itemVerbItem' }
   | { kind: 'chargingMove' }
   | { kind: 'moveBody' }
   | { kind: 'done' }
+
+/** Reports whether the cursor can start the `back` clause of a `leads` line.
+ * The clause belongs to the `p` side, and one line holds one clause. */
+function leadsOffersBack(tokens: string[], cursorIndex: number): boolean {
+  let onPlayerSide = false
+  for (let i = 1; i < cursorIndex; i++) {
+    const word = norm(tokens[i] ?? '')
+    if (word === 'back') return false
+    if (word === 'p' || word === 'p1' || word === 'player') onPlayerSide = true
+    else if (word === 'o' || word === 'o1' || word === 'opponent') onPlayerSide = false
+  }
+  return onPlayerSide
+}
 
 /** Classifies the token at `cursorIndex` from the earlier tokens.
  * This order follows the Rust parser.
@@ -454,7 +471,12 @@ export function classifyPosition(tokens: string[], cursorIndex: number): LinePos
   }
   if (first === 'endofturn' || first === 'eot') return { kind: 'done' }
   // After `leads`, accept a new side marker or another species for the current side.
-  if (first === 'leads') return { kind: 'leadsSideOrSpecies' }
+  // The `p` side also accepts one `back` clause. The server validates the line.
+  if (first === 'leads') {
+    return leadsOffersBack(tokens, cursorIndex)
+      ? { kind: 'leadsSideSpeciesOrBack' }
+      : { kind: 'leadsSideOrSpecies' }
+  }
 
   if (cursorIndex === 1) return { kind: 'action' }
 
@@ -584,6 +606,15 @@ export function completionsAt(
       return rank(recased.species, partial)
     case 'leadsSideOrSpecies':
       return rank([...canonicalsOf(LEADS_SIDE_WORDS), ...recased.species], partial)
+    case 'leadsSideSpeciesOrBack':
+      return rank(
+        [
+          ...canonicalsOf(LEADS_SIDE_WORDS),
+          ...canonicalsOf(LEADS_BACK_WORDS),
+          ...recased.species,
+        ],
+        partial,
+      )
     case 'teraType':
       return rank(canonicalsOf(TYPE_WORDS), partial)
     case 'itemVerbItem':

@@ -270,7 +270,7 @@ A replacement turn needs switches only for slots that have a healthy reserve.
 
 | Form | Result |
 |---|---|
-| `leads [p\|o] <species>...` | Send one side into battle |
+| `leads [p\|o] <species>... [back <species>...]` | Send one side into battle |
 | `[slot] switch <species> [hpspec]` | Switch one slot |
 | `[slot] mega [species-or-suffix]` | Mega Evolve |
 | `[slot] tera <type>` | Terastallize |
@@ -294,6 +294,29 @@ leads p tyranitar raichu o charizard aerodactyl
 
 Place entry-ability lines directly after the leads line.
 The parser attaches those abilities to the switch event.
+
+#### The back clause
+
+The opening `leads` line can also name what you brought but did not lead:
+
+```text
+leads p tyranitar raichu back gengar snorlax o charizard aerodactyl
+```
+
+The clause removes the rest of your sheet from the belief.
+The solver panel then reads the team that you really brought.
+
+These rules apply to the clause:
+
+- Only the `p` side accepts it. The bring of the opponent is hidden.
+- Only the opening `leads` line accepts it.
+- Each species must be on your roster, and no species can repeat.
+- The count must equal the bench size of the format.
+
+The clause is optional.
+A format that brings your whole sheet has nothing to declare.
+Without the clause the solver panel adds a warning, because the drawn world
+gives you a bench that the real game does not hold.
 
 ### Move lines
 

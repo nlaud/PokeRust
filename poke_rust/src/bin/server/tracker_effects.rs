@@ -2547,7 +2547,9 @@ mod tests {
         let mut events = Vec::new();
         for line in lines {
             match line {
-                TrackerLine::Event(ev) | TrackerLine::EndOfTurnReaction(ev) => events.push(augment_with_guaranteed_effects(
+                TrackerLine::Event(ev)
+                | TrackerLine::EndOfTurnReaction(ev)
+                | TrackerLine::LeadsWithBack { event: ev, .. } => events.push(augment_with_guaranteed_effects(
                     ev,
                     &belief,
                     move_dex(),

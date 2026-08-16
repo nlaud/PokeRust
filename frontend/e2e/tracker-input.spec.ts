@@ -184,6 +184,25 @@ test.describe('Tracker solver panel', () => {
     await page.getByRole('button', { name: 'Delete' }).click()
     await deleted
   })
+
+  test('completes and commits the opening back clause', async ({ page }, testInfo) => {
+    await seedTeam(page)
+    await startTrackerSession(page)
+    const input = page.getByTestId('tracker-input')
+
+    await input.pressSequentially('leads p pikachu b', { delay: 15 })
+    await expect(page.getByTestId('tracker-suggestion-top')).toHaveText('back')
+    await expect(page.getByTestId('tracker-ghost')).toHaveText('ack')
+    await page.keyboard.press('Tab')
+    await expect(input).toHaveValue('leads p pikachu back ')
+
+    await input.pressSequentially('venusaur incineroar o garchomp', { delay: 15 })
+    await page.keyboard.press('Enter')
+    await expect(page.getByTestId('tracker-pending-turn')).toBeVisible()
+    await page.keyboard.press('Shift+Enter')
+    await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('back-clause-committed.png') })
+  })
 })
 
 // ── Casing coverage ───────────────────────────────────────────────────────

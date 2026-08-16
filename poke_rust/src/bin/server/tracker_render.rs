@@ -1271,7 +1271,10 @@ mod tests {
         let mut end_of_turn_reactions = Vec::new();
         for line in lines {
             match line {
-                crate::tracker_parse::TrackerLine::Event(event) => events.push(event),
+                crate::tracker_parse::TrackerLine::Event(event)
+                | crate::tracker_parse::TrackerLine::LeadsWithBack { event, .. } => {
+                    events.push(event)
+                }
                 crate::tracker_parse::TrackerLine::EndOfTurnReaction(event) => {
                     end_of_turn_reactions.push(event)
                 }
@@ -1468,7 +1471,10 @@ mod tests {
         let mut end_of_turn_reactions = Vec::new();
         for line in lines {
             match line {
-                crate::tracker_parse::TrackerLine::Event(ev) => turn_events.push(ev),
+                crate::tracker_parse::TrackerLine::Event(ev)
+                | crate::tracker_parse::TrackerLine::LeadsWithBack { event: ev, .. } => {
+                    turn_events.push(ev)
+                }
                 crate::tracker_parse::TrackerLine::EndOfTurnReaction(ev) => {
                     end_of_turn_reactions.push(ev)
                 }

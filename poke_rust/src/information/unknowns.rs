@@ -304,9 +304,10 @@ pub struct UnknownBattleState {
     /// bench" fallback both need to rebuild a roster entry from scratch, and MUST
     /// prefer cloning from here over calling `from_opponent_species` — the latter is
     /// species-only and, under an open sheet, would regress a fully-known mon back to
-    /// "no information" the moment it's rebuilt (see the TODO.md Zoroark-switching
-    /// regression this fixes). Never mutated after `into_battle_state` populates it;
-    /// never itself displayed or read by any other pass.
+    /// "no information" the moment it is rebuilt. Tracker setup prunes Player 1
+    /// templates when the opening `back` clause identifies the battle roster.
+    /// No inference pass mutates these templates. The user interface does not
+    /// display these templates.
     pub p1_roster_templates: Vec<UnknownPokemonState>,
     pub p2_roster_templates: Vec<UnknownPokemonState>,
 
