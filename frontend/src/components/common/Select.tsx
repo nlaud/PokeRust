@@ -6,6 +6,10 @@ export interface SelectOption {
   /** Tooltip text for this option.
    * The trigger shows the tooltip of the selected option. */
   hint?: string
+  /** True when this option cannot be selected.
+   * The list still shows the option, so the user reads the whole set.
+   * An absent value selects the option normally. */
+  disabled?: boolean
 }
 
 /**
@@ -48,13 +52,32 @@ export default function Select({
     }
   }, [open])
 
+  /** The next option that takes a selection, in the given direction.
+   * Returns `from` when no other option takes one. */
+  const nextEnabled = (from: number, step: number) => {
+    for (let i = from + step; i >= 0 && i < options.length; i += step) {
+      if (!options[i]?.disabled) return i
+    }
+    return from
+  }
+
   const openMenu = () => {
     if (disabled) return
-    setHighlight(Math.max(0, options.findIndex((o) => o.value === value)))
+    const selectedIndex = options.findIndex((o) => o.value === value)
+    // A disabled selection must not trap the arrow keys, so start the
+    // highlight on the first option that takes a selection.
+    const start = selectedIndex >= 0 ? selectedIndex : 0
+    let initial = start
+    if (options[start]?.disabled) {
+      initial = nextEnabled(start, 1)
+      if (options[initial]?.disabled) initial = nextEnabled(start, -1)
+    }
+    setHighlight(initial)
     setOpen((o) => !o)
   }
 
   const pick = (option: SelectOption) => {
+    if (option.disabled) return
     onChange(option.value)
     setOpen(false)
   }
@@ -67,10 +90,7 @@ export default function Select({
         openMenu()
         return
       }
-      setHighlight((h) => {
-        const next = e.key === 'ArrowDown' ? h + 1 : h - 1
-        return Math.min(options.length - 1, Math.max(0, next))
-      })
+      setHighlight((h) => nextEnabled(h, e.key === 'ArrowDown' ? 1 : -1))
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       if (open && options[highlight]) pick(options[highlight])
@@ -124,12 +144,18 @@ export default function Select({
               type="button"
               role="option"
               aria-selected={option.value === value}
+              aria-disabled={option.disabled === true}
+              disabled={option.disabled === true}
               title={option.hint}
               onClick={() => pick(option)}
-              onMouseEnter={() => setHighlight(i)}
+              onMouseEnter={() => {
+                if (!option.disabled) setHighlight(i)
+              }}
               className={`block w-full rounded-md px-2.5 py-1.5 text-left text-sm transition-colors ${
-                i === highlight ? 'bg-primary-soft text-primary' : ''
-              } ${option.value === value ? 'font-semibold' : ''}`}
+                option.disabled ? 'cursor-not-allowed text-ink-muted opacity-50' : ''
+              } ${i === highlight && !option.disabled ? 'bg-primary-soft text-primary' : ''} ${
+                option.value === value ? 'font-semibold' : ''
+              }`}
             >
               {option.label}
             </button>

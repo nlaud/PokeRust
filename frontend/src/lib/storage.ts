@@ -144,10 +144,10 @@ export interface BattleSetup {
   /** The profile preset for the planned P2 bot.
    * `off` and an absent value store no profile. */
   botPreset?: 'off' | BotPreset
+  /** The search that controls P2.
+   * The setup panel replaces a value that cannot play under
+   * `informationMode`, because a stored setup can hold an old pair. */
   botAlgorithm?: BotAlgorithm
-  /** True when the user selected `botAlgorithm` in the compatibility-aware picker.
-   * An absent value identifies a setup from the old picker. */
-  botAlgorithmExplicit?: boolean
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

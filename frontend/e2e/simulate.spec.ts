@@ -120,30 +120,30 @@ test.describe('Simulate mode', () => {
     // The picker explains what the chosen algorithm does, on the page and in a
     // tooltip on the list-box trigger.
     const hint = picker.getByTestId('bot-algorithm-hint')
-    const warning = picker.getByTestId('bot-algorithm-warning')
+    const limit = picker.getByTestId('bot-algorithm-limit')
     await expect(hint).toContainText('Sampled')
     await expect(hint).toContainText('respects the fog of war')
-    await expect(warning).toHaveCount(0)
+    await expect(limit).toContainText('only a belief search can control P2')
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
     ).toHaveAttribute('title', /Sampled/)
 
-    // An exact algorithm gets its own explanation. It cannot play under the fog
-    // of war, so the picker also warns about the random draw.
+    // An algorithm that reads the true position cannot play under the fog of
+    // war. The list still shows it, and the option takes no selection.
     await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
-    await openOption('Double Oracle (exact)').click()
-    await expect(hint).toContainText('Exact')
-    await expect(hint).toContainText('sees through the fog of war')
-    await expect(warning).toContainText('reads the true position')
-    await expect(warning).toContainText('draws one legal command at random')
+    const exactOption = openOption('Double Oracle (exact)')
+    await expect(exactOption).toBeDisabled()
+    await expect(openOption('MCTS (sampled)')).toBeDisabled()
+    await expect(openOption('MCCFR (sampled belief)')).toBeEnabled()
     await page.screenshot({
-      path: testInfo.outputPath('bot-picker-warning.png'),
+      path: testInfo.outputPath('bot-picker-disabled.png'),
       fullPage: true,
       animations: 'disabled',
     })
-    await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
+    // A click on a disabled option changes nothing and leaves the list open.
+    await exactOption.click({ force: true })
+    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
     await openOption('ISMCTS (sampled belief)').click()
-    await expect(warning).toHaveCount(0)
 
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
@@ -278,7 +278,7 @@ test.describe('Simulate mode', () => {
     })
   })
 
-  test('the P2 solver picker migrates only legacy incompatible defaults', async ({ page }) => {
+  test('the P2 solver picker repairs a stored pair that cannot play', async ({ page }) => {
     await page.goto('/')
     await page.evaluate(() => {
       localStorage.setItem(
@@ -296,29 +296,23 @@ test.describe('Simulate mode', () => {
     await page.goto('/simulate')
 
     const picker = page.getByTestId('bot-picker')
-    const openOption = (name: string) =>
-      picker.locator('div.relative:has(> button[aria-expanded="true"])').getByRole('option', { name })
 
-    // The old picker stored its incompatible default without an explicit marker.
+    // A stored exact algorithm cannot play under a fog-of-war mode, so the load
+    // path replaces it with the belief search.
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
-    await expect(picker.getByTestId('bot-algorithm-warning')).toHaveCount(0)
-
-    // The new picker marks a user selection and restores it after a reload.
-    await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
-    await openOption('Double Oracle (exact)').click()
-    await expect(picker.getByTestId('bot-algorithm-warning')).toBeVisible()
     await expect
       .poll(() =>
         page.evaluate(() => {
           const raw = localStorage.getItem('pokerust.battleSetup.v1')
-          return raw ? JSON.parse(raw).botAlgorithmExplicit : null
+          return raw ? JSON.parse(raw).botAlgorithm : null
         }),
       )
-      .toBe(true)
+      .toBe('ismcts')
 
+    // The repaired selection survives a reload, so no reload restores the pair
+    // that reported no answer on every turn.
     await page.reload()
-    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
-    await expect(picker.getByTestId('bot-algorithm-warning')).toBeVisible()
+    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
   })
 
   test('the reveal names the solver strategy under perfect information', async ({
@@ -328,8 +322,8 @@ test.describe('Simulate mode', () => {
     await page.goto('/simulate')
     await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
     // An exact algorithm reads the true position, so it can only control P2
-    // when the session hides nothing. A fogged session falls back to the
-    // uniform draw.
+    // when the session hides nothing. The picker permits the pair only in this
+    // mode.
     await pickSelectOption(page, 'Information mode', 'Perfect Information')
 
     const picker = page.getByTestId('bot-picker')
@@ -340,10 +334,18 @@ test.describe('Simulate mode', () => {
     await picker.getByRole('button', { name: 'None' }).click()
     await openOption('Fast').click()
     // Perfect Information holds no belief, so the mode change repairs the
-    // algorithm. The picker selects the exact search and shows no warning.
+    // algorithm. The picker selects the exact search and disables both belief
+    // searches.
     await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
     await expect(picker.getByTestId('bot-algorithm-hint')).toContainText('Exact')
-    await expect(picker.getByTestId('bot-algorithm-warning')).toHaveCount(0)
+    await expect(picker.getByTestId('bot-algorithm-limit')).toContainText(
+      'Perfect Information holds no belief',
+    )
+    await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
+    await expect(openOption('MCCFR (sampled belief)')).toBeDisabled()
+    await expect(openOption('ISMCTS (sampled belief)')).toBeDisabled()
+    await expect(openOption('Double Oracle (exact)')).toBeEnabled()
+    await page.keyboard.press('Escape')
 
     await page.getByRole('button', { name: 'Start Battle' }).click()
     const previewMons = page.getByTestId('preview-mon')

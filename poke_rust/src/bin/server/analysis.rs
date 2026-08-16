@@ -192,8 +192,17 @@ impl AnalysisState {
     ///
     /// Drops a result from an old or replaced job. A failure keeps the last
     /// complete checkpoint.
+    ///
+    /// Each exit writes one console line. A job that leaves no checkpoint for
+    /// the current generation makes the client report "no answer", and these
+    /// lines name which of the four exits ran.
     fn accept(&mut self, job: &JobTicket, outcome: Result<AnalysisCheckpoint, String>) {
         if job.generation != self.generation {
+            eprintln!(
+                "analysis job {}: the result was dropped, \
+                 because the position moved from generation {} to generation {}",
+                job.id, job.generation, self.generation
+            );
             return;
         }
         if !self
@@ -201,15 +210,36 @@ impl AnalysisState {
             .as_ref()
             .is_some_and(|running| running.id == job.id && running.generation == job.generation)
         {
+            eprintln!(
+                "analysis job {} (generation {}): the result was dropped, \
+                 because another job replaced it",
+                job.id, job.generation
+            );
             return;
         }
         self.running = None;
         match outcome {
             Ok(checkpoint) => {
+                eprintln!(
+                    "analysis job {} (generation {}): complete, depth {}, {} ms, \
+                     {} strategy rows, playable {}",
+                    job.id,
+                    job.generation,
+                    checkpoint.depth_reached,
+                    checkpoint.elapsed.as_millis(),
+                    checkpoint.p2_strategy.len(),
+                    checkpoint.strategy_is_playable
+                );
                 self.checkpoint = Some(checkpoint);
                 self.last_error = None;
             }
-            Err(message) => self.last_error = Some(message),
+            Err(message) => {
+                eprintln!(
+                    "analysis job {} (generation {}): no checkpoint: {message}",
+                    job.id, job.generation
+                );
+                self.last_error = Some(message);
+            }
         }
     }
 
@@ -298,6 +328,13 @@ pub fn start_job(
         return;
     };
     if !matches!(session.state, MatchState::BattleState(_)) {
+        // A bot session that starts no job leaves the client with no answer to
+        // wait for, so name the position that skipped the job.
+        eprintln!(
+            "analysis: no job started at generation {}, \
+             because the position is not a battle",
+            session.analysis.generation()
+        );
         return;
     }
 
@@ -337,10 +374,19 @@ pub fn start_job(
 
     let job = session.analysis.start();
     let battle_id = battle_id.to_string();
+    eprintln!(
+        "analysis job {} (generation {}): start, algorithm {}, preset {}, depth {}, \
+         time {:?} ms",
+        job.id, job.generation, replay.algorithm, replay.preset, replay.depth, time_ms
+    );
 
     tokio::task::spawn_blocking(move || {
         // A cancel before the search saves the whole search.
         if job.cancel.is_cancelled() {
+            eprintln!(
+                "analysis job {} (generation {}): cancelled before the search started",
+                job.id, job.generation
+            );
             return;
         }
         let outcome = run_search(
@@ -362,12 +408,23 @@ pub fn start_job(
         // cancelled job must also leave the record of the replacement job.
         // The ticket check in `accept` protects the race after this flag check.
         if job.cancel.is_cancelled() {
+            eprintln!(
+                "analysis job {} (generation {}): cancelled during the search, \
+                 so it reports no result",
+                job.id, job.generation
+            );
             return;
         }
         let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
         // A deleted battle leaves the task with no target.
         if let Some(session) = sessions.get_mut(&battle_id) {
             session.analysis.accept(&job, outcome);
+        } else {
+            eprintln!(
+                "analysis job {} (generation {}): the battle is gone, \
+                 so it reports no result",
+                job.id, job.generation
+            );
         }
     });
 }
@@ -822,17 +879,39 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
         return Err("battle is already over".to_string());
     };
 
-    if let Some(checkpoint) = session.analysis.current_checkpoint()
-        && checkpoint.strategy_is_playable
-        && let Some(commands) = sample_strategy(&checkpoint.p2_strategy, &mut rng)
-        && let Some(command) = accept(session, dexes, commands)
-    {
-        return Ok(P2Draw {
-            command,
-            source: DrawSource::Strategy,
-            seed,
-            replay: Some(checkpoint.replay.clone()),
-        });
+    // Case 2 has four exits, and three of them fall through to the uniform draw
+    // of case 3. Name the exit on the console. The reason reads P2's plan, so it
+    // never reaches the client. See `engine_error`.
+    let generation = session.analysis.generation();
+    match session.analysis.current_checkpoint() {
+        None => eprintln!(
+            "analysis draw (generation {generation}): the draw is uniform, \
+             because no checkpoint covers this position"
+        ),
+        Some(checkpoint) if !checkpoint.strategy_is_playable => eprintln!(
+            "analysis draw (generation {generation}): the draw is uniform, \
+             because the strategy read data that the fog of war hides"
+        ),
+        Some(checkpoint) => match sample_strategy(&checkpoint.p2_strategy, &mut rng) {
+            None => eprintln!(
+                "analysis draw (generation {generation}): the draw is uniform, \
+                 because the strategy holds no action with a positive weight"
+            ),
+            Some(commands) => match accept(session, dexes, commands) {
+                None => eprintln!(
+                    "analysis draw (generation {generation}): the draw is uniform, \
+                     because the legality check rejected the sampled action"
+                ),
+                Some(command) => {
+                    return Ok(P2Draw {
+                        command,
+                        source: DrawSource::Strategy,
+                        seed,
+                        replay: Some(checkpoint.replay.clone()),
+                    });
+                }
+            },
+        },
     }
 
     // No cap and no dominance pruning: the draw needs the whole legal set, and

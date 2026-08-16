@@ -177,6 +177,46 @@ pub(crate) fn roster_legality_error<'a>(
     None
 }
 
+/// True when this search can control P2 under this information mode.
+///
+/// A search reads the true position, or it draws worlds from a belief. A
+/// session hides Player 1 data, or it hides nothing. The pair plays only when
+/// the two answers agree.
+///
+/// Perfect Information builds no belief, so a belief search fails every
+/// analysis job and leaves no answer at all. A search of the true position runs
+/// in a fog-of-war session, but it reads data that the fog hides, so
+/// `analysis::draw_p2_command` drops its strategy. Both pairs give P2 a uniform
+/// draw on every turn, so `create_battle` refuses them.
+///
+/// `SetupPanel.tsx` disables the same pairs in the picker.
+fn bot_algorithm_fits_mode(search: crate::bot::BotSearchConfig, mode: InformationMode) -> bool {
+    let searches_belief = matches!(
+        search,
+        crate::bot::BotSearchConfig::Ismcts(_) | crate::bot::BotSearchConfig::Mccfr(_)
+    );
+    searches_belief == (mode != InformationMode::PerfectInformation)
+}
+
+/// The 422 message for a pair that cannot play.
+///
+/// `mode_name` is the wire name of the request, so the message names the field
+/// that the client sent. The line names the algorithm and the mode, and no
+/// state of either side.
+fn bot_algorithm_mismatch(algorithm: &str, mode_name: &str, mode: InformationMode) -> String {
+    if mode == InformationMode::PerfectInformation {
+        format!(
+            "botP2.algorithm: {algorithm} searches a belief, and informationMode \
+             {mode_name:?} builds none. Use another algorithm, or use a fog-of-war mode."
+        )
+    } else {
+        format!(
+            "botP2.algorithm: {algorithm} reads the true position, and informationMode \
+             {mode_name:?} hides that position. Use ismcts or mccfr, or use \"perfect\"."
+        )
+    }
+}
+
 pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
@@ -386,7 +426,16 @@ pub async fn create_battle(
     // win the 422. The profile uses the same physics as the battle.
     let bot_p2 = match &req.bot_p2 {
         Some(request) => match crate::bot::resolve("botP2", request, req.damage_rolls, req.consider_crit) {
-            Ok(profile) => Some(profile),
+            Ok(profile) => {
+                if !bot_algorithm_fits_mode(profile.search, information_mode) {
+                    return unprocessable(bot_algorithm_mismatch(
+                        &profile.view.algorithm,
+                        &req.information_mode,
+                        information_mode,
+                    ));
+                }
+                Some(profile)
+            }
             Err(message) => return unprocessable(message),
         },
         None => None,
@@ -933,6 +982,10 @@ mod tests {
     use poke_rust::data::pokemon_move::PokemonMove;
     use poke_rust::data::species::Species;
 
+    use poke_rust::information::unknowns::InformationMode;
+
+    use super::bot_algorithm_fits_mode;
+    use super::bot_algorithm_mismatch;
     use super::catch_benchmark_panic;
     use super::is_champions_teamsheet_species;
     use super::learnset_data_error;
@@ -1183,5 +1236,76 @@ mod tests {
         };
         assert_eq!(config.search.damage_rolls, 4);
         assert!(!config.search.consider_crit);
+    }
+
+    /// The search of one algorithm name at its default preset.
+    fn search_of(algorithm: &str) -> crate::bot::BotSearchConfig {
+        let request = crate::bot::BotProfileRequest {
+            algorithm: Some(algorithm.to_string()),
+            ..crate::bot::BotProfileRequest::default()
+        };
+        crate::bot::resolve("botP2", &request, 16, true)
+            .unwrap()
+            .search
+    }
+
+    #[test]
+    fn a_belief_search_fits_only_a_fog_of_war_mode() {
+        for name in ["ismcts", "mccfr"] {
+            let search = search_of(name);
+            assert!(
+                !bot_algorithm_fits_mode(search, InformationMode::PerfectInformation),
+                "{name} needs a belief"
+            );
+            for mode in [
+                InformationMode::ClosedTeamSheet,
+                InformationMode::OpenTeamSheet,
+                InformationMode::OpenTeamSheetNatures,
+            ] {
+                assert!(bot_algorithm_fits_mode(search, mode), "{name} in {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_true_position_search_fits_only_perfect_information() {
+        for name in ["doubleOracle", "serializedBounds", "backwardInduction", "mcts"] {
+            let search = search_of(name);
+            assert!(
+                bot_algorithm_fits_mode(search, InformationMode::PerfectInformation),
+                "{name} reads the true position"
+            );
+            for mode in [
+                InformationMode::ClosedTeamSheet,
+                InformationMode::OpenTeamSheet,
+                InformationMode::OpenTeamSheetNatures,
+            ] {
+                assert!(
+                    !bot_algorithm_fits_mode(search, mode),
+                    "{name} in {mode:?} reads hidden data"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_mismatch_message_names_the_algorithm_and_the_mode() {
+        let belief = bot_algorithm_mismatch(
+            "mccfr",
+            "perfect",
+            InformationMode::PerfectInformation,
+        );
+        assert!(belief.starts_with("botP2.algorithm: mccfr"), "{belief}");
+        assert!(belief.contains("\"perfect\""), "{belief}");
+        assert!(belief.contains("searches a belief"), "{belief}");
+
+        let exact = bot_algorithm_mismatch(
+            "doubleOracle",
+            "closedSheet",
+            InformationMode::ClosedTeamSheet,
+        );
+        assert!(exact.starts_with("botP2.algorithm: doubleOracle"), "{exact}");
+        assert!(exact.contains("\"closedSheet\""), "{exact}");
+        assert!(exact.contains("reads the true position"), "{exact}");
     }
 }

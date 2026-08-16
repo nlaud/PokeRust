@@ -155,6 +155,15 @@ The wait does not remove the uniform draw.
 `draw_p2_command` also drops a checkpoint whose strategy read hidden data.
 An exact or `mcts` profile reads hidden data in every fog-of-war battle.
 
+`create_battle` refuses a profile that cannot control P2 in the session.
+`bot_algorithm_fits_mode` in `routes.rs` holds the rule.
+A belief search needs a fog-of-war mode, because Perfect Information builds no
+belief.
+An exact or `mcts` profile needs Perfect Information.
+Both other pairs give P2 a uniform draw on every turn, so the endpoint returns
+422.
+`frontend/src/pages/simulate/SetupPanel.tsx` disables the same pairs.
+
 ### Search deadlines
 
 `simulator::scoped_abort_signal` carries the deadline and the cancel flag into

@@ -4,6 +4,12 @@ Design notes live in the documentation.
 `poke_rust/src/solver/README.md` explains the solver targets, the algorithms,
 and the analysis jobs.
 
+# Fixes
+
+## The solver does not think before team preview
+
+- [ ] The solver does not stop to think for the team preview turn unlike other turns when it finishes thinking, it is somehow instantly able to choose leads.
+
 # New features
 
 ## Strategy rates in the simulator

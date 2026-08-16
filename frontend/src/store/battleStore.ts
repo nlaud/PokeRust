@@ -127,6 +127,17 @@ async function waitForBotAnalysis(
       progress.checkpoint.generation === progress.generation &&
       !progress.checkpoint.stale
     if (progress.phase !== 'running') {
+      if (!current) {
+        // The server console holds the reason. This line holds the position
+        // that asked for it, so the two logs line up.
+        console.warn('bot search: no answer for this position', {
+          phase: progress.phase,
+          generation: progress.generation,
+          checkpointGeneration: progress.checkpoint?.generation ?? null,
+          checkpointStale: progress.checkpoint?.stale ?? null,
+          error: progress.error,
+        })
+      }
       return current ? 'answered' : 'noAnswer'
     }
     onProgress(progress.runningMs)

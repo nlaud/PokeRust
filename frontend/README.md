@@ -138,6 +138,16 @@ A bot session lets the server choose the P2 command.
 The client sends no `p2` field for that session.
 The server returns the drawn command as `p2Reveal`.
 
+`SetupPanel.tsx` pairs the algorithm with the information mode.
+A search reads the true position, or it draws worlds from a belief.
+Only a belief search plays under a fog-of-war mode.
+Only a search of the true position plays under Perfect Information.
+
+The picker shows all six algorithms and disables every one that cannot play.
+A mode change replaces a selection that the new mode does not permit.
+The load path replaces a stored pair the same way.
+`POST /api/battles` returns 422 for a pair that still arrives.
+
 `P2RevealPanel.tsx` shows both states of that draw:
 
 - During the search it shows a wait line, the elapsed time, an approximate

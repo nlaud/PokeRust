@@ -73,7 +73,9 @@ const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string 
 
 // An algorithm reads the true position, or it reads a belief.
 // A session hides the data of the other player, or it hides nothing.
-// A combination plays only when the two answers agree.
+// A pair plays only when the two answers agree.
+// The picker disables every other pair, and `bot_algorithm_fits_mode` in
+// `poke_rust/src/bin/server/routes.rs` rejects one that still arrives.
 // `strategy_respects_fog` and `belief_search_inputs` in
 // `poke_rust/src/bin/server/analysis.rs` hold the same rule.
 // A new algorithm needs one entry here and one arm there.
@@ -95,16 +97,15 @@ function defaultAlgorithmFor(mode: InformationMode): BotAlgorithm {
 }
 
 /**
- * Names the reason that a combination cannot play.
+ * Names the reason that this mode limits the algorithm list.
  *
- * Call this only when `canPlay` is false. The mode then names the direction of
- * the mismatch, because the algorithm holds the other answer.
+ * The picker shows this line at all times. It explains the disabled entries,
+ * which the list keeps so that the user reads the whole set.
  */
-function algorithmWarning(mode: InformationMode): string {
-  const cause = hidesData(mode)
-    ? 'This algorithm reads the true position, and the fog of war hides that position.'
-    : 'This algorithm searches a belief, and Perfect Information holds no belief.'
-  return `${cause} The search cannot control P2, so P2 draws one legal command at random.`
+function algorithmLimitNote(mode: InformationMode): string {
+  return hidesData(mode)
+    ? 'This information mode hides Player 1 data, so only a belief search can control P2. The other algorithms read the true position.'
+    : 'Perfect Information holds no belief, so only a search of the true position can control P2. Pick another information mode for a belief search.'
 }
 
 type TeamSource = 'saved' | 'meta'
@@ -140,30 +141,19 @@ export default function SetupPanel() {
   const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
   const [botPreset, setBotPreset] = useState<BotChoice>(saved?.botPreset ?? 'off')
   const savedAlgorithm = saved?.botAlgorithm
-  const savedAlgorithmIsExplicit = saved?.botAlgorithmExplicit === true
-  // The old picker stored Double Oracle as its default for a fogged session.
-  // Replace that legacy mismatch, but keep a mismatch selected in the new picker.
-  const initialBotAlgorithm =
-    savedAlgorithm && (canPlay(savedAlgorithm, defaultInformationMode) || savedAlgorithmIsExplicit)
-      ? savedAlgorithm
-      : defaultAlgorithmFor(defaultInformationMode)
+  // A stored algorithm that cannot play under the stored mode creates a bot
+  // that never answers, so the load path replaces it. A setup from an older
+  // picker can hold such a pair.
   const [botAlgorithm, setBotAlgorithm] = useState<BotAlgorithm>(
-    initialBotAlgorithm,
+    savedAlgorithm && canPlay(savedAlgorithm, defaultInformationMode)
+      ? savedAlgorithm
+      : defaultAlgorithmFor(defaultInformationMode),
   )
-  const [botAlgorithmExplicit, setBotAlgorithmExplicit] = useState(savedAlgorithmIsExplicit)
 
   // A mode change replaces an algorithm that cannot play in the new mode.
   const changeInformationMode = (mode: InformationMode) => {
     setInformationMode(mode)
-    if (!canPlay(botAlgorithm, mode)) {
-      setBotAlgorithm(defaultAlgorithmFor(mode))
-      setBotAlgorithmExplicit(false)
-    }
-  }
-
-  const changeBotAlgorithm = (algorithm: BotAlgorithm) => {
-    setBotAlgorithm(algorithm)
-    setBotAlgorithmExplicit(true)
+    if (!canPlay(botAlgorithm, mode)) setBotAlgorithm(defaultAlgorithmFor(mode))
   }
 
   useEffect(() => {
@@ -176,7 +166,6 @@ export default function SetupPanel() {
       informationMode,
       botPreset,
       botAlgorithm,
-      botAlgorithmExplicit,
     })
   }, [
     formatId,
@@ -187,7 +176,6 @@ export default function SetupPanel() {
     informationMode,
     botPreset,
     botAlgorithm,
-    botAlgorithmExplicit,
   ])
 
   const format = formats.find((f) => f.id === formatId)
@@ -224,6 +212,12 @@ export default function SetupPanel() {
   }
 
   const algorithmHint = BOT_ALGORITHM_OPTIONS.find((o) => o.value === botAlgorithm)?.hint ?? ''
+  // The list keeps every algorithm and disables each one that cannot play. The
+  // user then reads the whole set and cannot select a pair that never answers.
+  const algorithmOptions = BOT_ALGORITHM_OPTIONS.map((option) => ({
+    ...option,
+    disabled: !canPlay(option.value, informationMode),
+  }))
   const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
   const teamOptions = sortedTeams.map((t) => ({ value: t.id, label: t.name }))
 
@@ -290,17 +284,15 @@ export default function SetupPanel() {
             <>
               <Select
                 value={botAlgorithm}
-                options={BOT_ALGORITHM_OPTIONS}
-                onChange={(v) => changeBotAlgorithm(v as BotAlgorithm)}
+                options={algorithmOptions}
+                onChange={(v) => setBotAlgorithm(v as BotAlgorithm)}
               />
               <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-hint">
                 {algorithmHint}
               </p>
-              {!canPlay(botAlgorithm, informationMode) && (
-                <p className="mt-1 text-xs text-warning" data-testid="bot-algorithm-warning">
-                  {algorithmWarning(informationMode)}
-                </p>
-              )}
+              <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-limit">
+                {algorithmLimitNote(informationMode)}
+              </p>
               <p className="mt-1 text-xs text-ink-muted">
                 P2 uses this solver profile after Player 1 locks a command.
               </p>
