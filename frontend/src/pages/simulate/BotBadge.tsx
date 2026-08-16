@@ -19,6 +19,9 @@ const PRESET_LABELS: Record<BotProfileView['preset'], string> = {
 /** Returns the resolved limits as one short line. */
 function limitLine(profile: BotProfileView): string {
   const parts = [`depth ${profile.depth}`]
+  if (profile.replacementDepth !== null) {
+    parts.push(`replacement depth ${profile.replacementDepth}`)
+  }
   if (profile.timeMs !== null) {
     parts.push(profile.timeMs < 1000 ? `${profile.timeMs} ms` : `${profile.timeMs / 1000} s`)
   }

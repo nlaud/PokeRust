@@ -186,6 +186,10 @@ pub struct BotProfileRequest {
     /// Exact algorithms only.
     pub node_budget: Option<u64>,
     pub depth: Option<u8>,
+    /// Turns of lookahead below a replacement or a self-switch pivot.
+    /// No preset sets this field. An absent field gives a forced decision the
+    /// remaining turn budget, as a turn gets.
+    pub replacement_depth: Option<u8>,
     /// The search is serial, so the server accepts only 1.
     pub workers: Option<u8>,
     /// Sampling algorithms only.
@@ -210,6 +214,8 @@ pub struct BotProfileView {
     pub time_ms: Option<u64>,
     pub node_budget: Option<u64>,
     pub depth: u8,
+    /// Absent when a forced decision uses the remaining turn budget.
+    pub replacement_depth: Option<u8>,
     pub workers: u8,
     pub iterations: Option<u32>,
     pub particles: Option<usize>,
@@ -393,6 +399,15 @@ pub fn resolve(
         }
         None => limits.depth,
     };
+    // No preset sets this field, so any value is an override of the preset.
+    let replacement_depth = match req.replacement_depth {
+        Some(value) => {
+            check_range(scope, "replacementDepth", value, 1, 8)?;
+            note(true, "replacementDepth", value.to_string());
+            Some(value)
+        }
+        None => None,
+    };
     let node_budget = match req.node_budget {
         Some(value) => {
             check_range(scope, "nodeBudget", value, 1, 1_000_000_000)?;
@@ -442,6 +457,11 @@ pub fn resolve(
     approximations.push(format!(
         "The search stops after {depth} turn(s) and scores the position with the leaf evaluator."
     ));
+    if let Some(value) = replacement_depth {
+        approximations.push(format!(
+            "A forced switch is searched to {value} turn(s) instead of the remaining budget. One path can pass that budget one time."
+        ));
+    }
     if !exact {
         approximations
             .push("The search samples trajectories, so the strategy is an estimate.".to_string());
@@ -472,6 +492,7 @@ pub fn resolve(
     let search = build_search(
         algorithm,
         depth,
+        replacement_depth,
         time_ms,
         node_budget,
         iterations,
@@ -489,6 +510,7 @@ pub fn resolve(
             time_ms: Some(time_ms),
             node_budget,
             depth,
+            replacement_depth,
             workers: 1,
             iterations,
             particles,
@@ -506,6 +528,7 @@ pub fn resolve(
 fn build_search(
     algorithm: BotAlgorithm,
     depth: u8,
+    replacement_depth: Option<u8>,
     time_ms: u64,
     node_budget: Option<u64>,
     iterations: Option<u32>,
@@ -517,6 +540,7 @@ fn build_search(
     if algorithm.is_exact() {
         return BotSearchConfig::Exact(SolveConfig {
             depth,
+            replacement_depth,
             iterative_deepening: true,
             damage_rolls,
             consider_crit,
@@ -531,6 +555,7 @@ fn build_search(
     let search = MctsConfig {
         iterations: iterations.unwrap_or_else(|| MctsConfig::default().iterations),
         depth,
+        replacement_depth,
         damage_rolls,
         consider_crit,
         max_actions_per_player,
@@ -588,6 +613,66 @@ mod tests {
             assert_eq!(profile.view.time_ms, Some(time));
             assert_eq!(profile.view.workers, 1);
             assert!(profile.view.adjustments.is_empty());
+        }
+    }
+
+    /// No preset sets the replacement depth, so every preset keeps the search
+    /// that it ran before this field existed.
+    #[test]
+    fn no_preset_sets_a_replacement_depth() {
+        for name in ["fast", "balanced", "strong"] {
+            let profile = resolve("botP2", &request("doubleOracle", name), 16, true).unwrap();
+            assert_eq!(profile.view.replacement_depth, None, "{name}");
+            match profile.search {
+                BotSearchConfig::Exact(config) => assert_eq!(config.replacement_depth, None),
+                other => panic!("doubleOracle is exact: {other:?}"),
+            }
+        }
+    }
+
+    /// A replacement depth of 0 would score a forced position with no decision,
+    /// and the search reads at most 8 turns.
+    #[test]
+    fn a_replacement_depth_outside_its_range_is_rejected() {
+        for value in [0, 9] {
+            let mut req = request("doubleOracle", "fast");
+            req.replacement_depth = Some(value);
+            let error = resolve("botP2", &req, 16, true).unwrap_err();
+            assert!(error.starts_with("botP2.replacementDepth"), "{error}");
+        }
+    }
+
+    /// The field reaches both the view and the search of every algorithm.
+    #[test]
+    fn a_replacement_depth_reaches_the_view_and_the_search() {
+        let mut req = request("doubleOracle", "fast");
+        req.replacement_depth = Some(3);
+        let profile = resolve("botP2", &req, 16, true).unwrap();
+        assert_eq!(profile.view.replacement_depth, Some(3));
+        assert_eq!(profile.view.adjustments.len(), 1);
+        assert!(profile.view.adjustments[0].contains("replacementDepth"));
+        assert!(
+            profile
+                .view
+                .approximations
+                .iter()
+                .any(|line| line.contains("A forced switch is searched to 3 turn(s)")),
+            "{:?}",
+            profile.view.approximations
+        );
+        match profile.search {
+            BotSearchConfig::Exact(config) => assert_eq!(config.replacement_depth, Some(3)),
+            other => panic!("doubleOracle is exact: {other:?}"),
+        }
+
+        let mut req = request("ismcts", "fast");
+        req.replacement_depth = Some(2);
+        let profile = resolve("botP2", &req, 16, true).unwrap();
+        match profile.search {
+            BotSearchConfig::Ismcts(config) => {
+                assert_eq!(config.search.replacement_depth, Some(2));
+            }
+            other => panic!("ismcts is a belief search: {other:?}"),
         }
     }
 

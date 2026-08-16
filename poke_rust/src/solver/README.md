@@ -54,6 +54,34 @@ Its result is a no-timeout battle win probability.
 Tournament matches often use a best-of-three format.
 A later match mode must keep learned build data between games.
 
+## Forced decisions
+
+A replacement and a self-switch pivot resolve inside the turn that starts them.
+Such a decision consumes no turn depth.
+`max_forced_chain` bounds the length of one chain of such decisions.
+`solver::forced_descent` holds this rule, and all four searches call it.
+
+`SolveConfig::replacement_depth` and `MctsConfig::replacement_depth` give a
+forced decision its own depth.
+`None` gives the forced child the remaining turn budget, as a turn gets.
+`Some(value)` gives the forced child `value` turns of lookahead.
+The value clamps to a minimum of 1, because depth 0 makes no decision at all.
+A search that starts at a forced decision also uses this depth.
+
+A value below the remaining depth makes a replacement cheaper to search.
+A value above the remaining depth searches past the turn budget of the root.
+The second case extends the horizon, so one path extends one time.
+After that, a forced child takes the lower of the value and the remaining depth.
+This bound makes every path finite.
+
+The counter that each search passes to its cache holds the extension flag in its
+high bit.
+The node state therefore keeps its size, and a cached value cannot cross an
+extension boundary.
+
+No bot preset sets this field.
+The server accepts `replacementDepth` from 1 through 8 in a profile request.
+
 ## Perfect-information solver
 
 ### Team preview

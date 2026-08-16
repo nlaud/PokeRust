@@ -268,6 +268,10 @@ export interface BotProfileRequest {
   /** Exact algorithms only. */
   nodeBudget?: number
   depth?: number
+  /** Turns of lookahead below a replacement or a self-switch pivot.
+   * No preset sets this field. An absent field gives a forced decision the
+   * remaining turn budget, as a turn gets. */
+  replacementDepth?: number
   /** The search is serial, so the server accepts only 1. */
   workers?: number
   /** Sampling algorithms only. */
@@ -290,6 +294,8 @@ export interface BotProfileView {
   timeMs: number | null
   nodeBudget: number | null
   depth: number
+  /** Null when a forced decision uses the remaining turn budget. */
+  replacementDepth: number | null
   workers: number
   iterations: number | null
   particles: number | null
@@ -405,6 +411,8 @@ export interface AnalysisReplay {
   timeMs: number | null
   nodeBudget: number | null
   depth: number
+  /** Null when a forced decision uses the remaining turn budget. */
+  replacementDepth: number | null
   workers: number
   iterations: number | null
   particles: number | null

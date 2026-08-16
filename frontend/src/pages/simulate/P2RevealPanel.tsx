@@ -24,6 +24,9 @@ const UNIFORM_NOTE =
 /** Returns the resolved search limits as one short line. */
 function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
   const parts = [`depth ${replay.depth}`]
+  if (replay.replacementDepth !== null) {
+    parts.push(`replacement depth ${replay.replacementDepth}`)
+  }
   if (replay.timeMs !== null) {
     parts.push(replay.timeMs < 1000 ? `${replay.timeMs} ms` : `${replay.timeMs / 1000} s`)
   }

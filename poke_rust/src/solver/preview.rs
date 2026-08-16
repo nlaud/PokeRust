@@ -360,6 +360,7 @@ fn config_key(config: &PreviewConfig) -> u64 {
     battle.node_budget.hash(&mut hasher);
     battle.deadline.hash(&mut hasher);
     battle.max_forced_chain.hash(&mut hasher);
+    battle.replacement_depth.hash(&mut hasher);
     hasher.finish()
 }
 

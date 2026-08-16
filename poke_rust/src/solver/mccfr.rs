@@ -715,8 +715,13 @@ fn search_root_belief(
         let root = worlds.draw().expect("the set is not empty").clone();
         let state = root.state;
         let histories = root.histories;
+        let (root_depth, root_chain) = super::root_descent(
+            actions::phase_of(&state),
+            depth,
+            config.search.replacement_depth,
+        );
         for (keys, &history) in ctx.root_keys.iter_mut().zip(&histories) {
-            let key = (history, depth, 0);
+            let key = (history, root_depth, root_chain);
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -729,7 +734,14 @@ fn search_root_belief(
             chance_reach: 1.0,
             sample_reach: 1.0,
         };
-        let descent = ctx.iterate(&state, depth, 0, histories, ObservationKey::ROOT, walk);
+        let descent = ctx.iterate(
+            &state,
+            root_depth,
+            root_chain,
+            histories,
+            ObservationKey::ROOT,
+            walk,
+        );
         if let Some(public) = root_public {
             ctx.record_root_value(public, histories, walk.traverser, &descent);
         }
@@ -1416,13 +1428,16 @@ impl MccfrContext<'_> {
     ///
     /// A successor that waits for a replacement or a self-switch pivot is a
     /// decision point but not a new turn, so it does not consume a turn depth.
+    /// [`super::forced_descent`] holds the rule, and
+    /// [`MctsConfig::replacement_depth`] gives such a decision its own depth.
     fn descend(&self, child: &MatchState, depth: u8, chain: u8) -> (u8, u8) {
-        match actions::phase_of(child) {
-            Phase::SelfSwitch | Phase::Replacement if chain < self.cfg.search.max_forced_chain => {
-                (depth, chain + 1)
-            }
-            _ => (depth.saturating_sub(1), 0),
-        }
+        super::forced_descent(
+            actions::phase_of(child),
+            depth,
+            chain,
+            self.cfg.search.max_forced_chain,
+            self.cfg.search.replacement_depth,
+        )
     }
 }
 

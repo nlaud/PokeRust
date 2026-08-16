@@ -282,6 +282,10 @@ pub struct MctsConfig {
     pub prune_dominated_actions: bool,
     /// Maximum decision chain that does not consume depth.
     pub max_forced_chain: u8,
+    /// Turns of lookahead below a replacement or a self-switch pivot.
+    /// `None` gives a forced decision the remaining turn budget, as a turn gets.
+    /// Read [`super::forced_descent`] for the rule and its termination bound.
+    pub replacement_depth: Option<u8>,
     /// Grows the action set of a node with its visit count.
     /// `None` gives every node its complete action set from the first visit.
     pub widening: Option<Widening>,
@@ -399,6 +403,7 @@ impl Default for MctsConfig {
             max_actions_per_player: None,
             prune_dominated_actions: false,
             max_forced_chain: 8,
+            replacement_depth: None,
             widening: None,
             common_random_numbers: None,
             control_variate: false,
@@ -518,6 +523,8 @@ pub fn search_cancellable(
     // Depth 0 would score the root without a decision, and the strategy would
     // mean nothing. One turn is the minimum.
     let depth = config.depth.max(1);
+    let (root_depth, root_chain) =
+        super::root_descent(actions::phase_of(state), depth, config.replacement_depth);
     let iterations = config.iterations.max(1);
     let batch = effective_batch(config.transition, iterations);
     let universes = effective_universes(config, iterations);
@@ -538,7 +545,7 @@ pub fn search_cancellable(
 
     // Create the root before the iteration budget starts.
     // Each requested iteration then samples a path from a root action.
-    let root_key = (hash_state(state), depth, 0);
+    let root_key = (hash_state(state), root_depth, root_chain);
     let battle = match state {
         MatchState::BattleState(battle) => battle,
         _ => unreachable!("the search rejected each non-battle state"),
@@ -556,7 +563,7 @@ pub fn search_cancellable(
             cancelled = true;
             break;
         }
-        values.push(ctx.iterate(state, depth, 0));
+        values.push(ctx.iterate(state, root_depth, root_chain));
     }
 
     // Every field that the report needs, read before the truncation record
@@ -1468,13 +1475,16 @@ impl MctsContext<'_> {
     ///
     /// A successor that waits for a replacement or a self-switch pivot is a
     /// decision point but not a new turn, so it does not consume a turn depth.
+    /// [`super::forced_descent`] holds the rule, and
+    /// [`MctsConfig::replacement_depth`] gives such a decision its own depth.
     fn descend(&self, child: &MatchState, depth: u8, chain: u8) -> (u8, u8) {
-        match actions::phase_of(child) {
-            Phase::SelfSwitch | Phase::Replacement if chain < self.cfg.max_forced_chain => {
-                (depth, chain + 1)
-            }
-            _ => (depth.saturating_sub(1), 0),
-        }
+        super::forced_descent(
+            actions::phase_of(child),
+            depth,
+            chain,
+            self.cfg.max_forced_chain,
+            self.cfg.replacement_depth,
+        )
     }
 }
 

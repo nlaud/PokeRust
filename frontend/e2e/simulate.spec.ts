@@ -100,6 +100,7 @@ test.describe('Simulate mode', () => {
     await page.route('**/api/battles', async (route) => {
       const request = route.request().postDataJSON()
       request.botP2.timeMs = 1
+      request.botP2.replacementDepth = 2
       await route.continue({ postData: JSON.stringify(request) })
     })
     let holdPreviewAnalysis = true
@@ -170,6 +171,7 @@ test.describe('Simulate mode', () => {
     await expect(badge).toContainText('Fast')
     await expect(badge).toContainText('sampled algorithm')
     await expect(badge).toContainText('depth 1')
+    await expect(badge).toContainText('replacement depth 2')
     await expect(badge).toContainText('1 ms')
 
     // The new badge must not make a narrow viewport overflow horizontally.
@@ -287,6 +289,7 @@ test.describe('Simulate mode', () => {
     const revealDetail = page.getByTestId('p2-reveal-detail')
     await expect(revealDetail).toContainText('Draw seed')
     await expect(revealDetail).toContainText('ismcts')
+    await expect(revealDetail).toContainText('replacement depth 2')
     await expect(revealDetail).not.toContainText('%')
     await expect(revealDetail).not.toContainText(/win/i)
     await page.screenshot({

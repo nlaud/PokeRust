@@ -337,6 +337,10 @@ pub struct SolveConfig {
     pub turn_cache_capacity: usize,
     /// Maximum decision chain that does not consume depth.
     pub max_forced_chain: u8,
+    /// Turns of lookahead below a replacement or a self-switch pivot.
+    /// `None` gives a forced decision the remaining turn budget, as a turn gets.
+    /// Read [`forced_descent`] for the rule and for its termination bound.
+    pub replacement_depth: Option<u8>,
 }
 
 impl Default for SolveConfig {
@@ -358,8 +362,100 @@ impl Default for SolveConfig {
             tt_capacity: 1 << 18,
             turn_cache_capacity: 0,
             max_forced_chain: 8,
+            replacement_depth: None,
         }
     }
+}
+
+/// The high bit of a forced-chain counter. It marks a path that already
+/// extended its horizon. See [`forced_descent`].
+pub(crate) const EXTENDED_FLAG: u8 = 0b1000_0000;
+
+/// The low seven bits of a forced-chain counter. They hold the count.
+pub(crate) const CHAIN_MASK: u8 = !EXTENDED_FLAG;
+
+/// The depth and the forced-chain counter for a root position.
+///
+/// A search can start at a replacement or self-switch pivot. In that case,
+/// apply `replacement_depth` before the search expands the root. Mark a depth
+/// increase as the one permitted horizon extension for the path.
+pub(crate) fn root_descent(
+    phase: actions::Phase,
+    depth: u8,
+    replacement_depth: Option<u8>,
+) -> (u8, u8) {
+    let forced = matches!(phase, actions::Phase::SelfSwitch | actions::Phase::Replacement);
+    if !forced {
+        return (depth, 0);
+    }
+    let Some(value) = replacement_depth else {
+        return (depth, 0);
+    };
+    let value = value.max(1);
+    let chain = if value > depth { EXTENDED_FLAG } else { 0 };
+    (value, chain)
+}
+
+/// The depth and the forced-chain counter that a successor uses.
+///
+/// All four searches call this function. `phase` is the phase of the successor,
+/// and `depth` and `chain` belong to the parent.
+///
+/// A replacement or a self-switch pivot is a forced decision. It resolves inside
+/// the same turn, so it consumes no depth. `max_forced_chain` bounds how long
+/// one chain of such decisions can go on.
+///
+/// `replacement_depth` sets the depth of a forced child:
+///
+/// - `None` keeps the remaining depth. This is the depth that a turn would get.
+/// - `Some(value)` uses `value`, and `value` clamps to a minimum of 1. A value
+///   below the remaining depth lowers the child depth. A value above it raises
+///   the child depth, so the search looks past the turn budget of the root.
+///
+/// # Termination
+///
+/// A raise extends the horizon, so an unlimited count of raises could make one
+/// path grow without a bound. One path therefore raises one time. After that, a
+/// forced child takes the lower of the value and the remaining depth.
+///
+/// The counter carries that fact in [`EXTENDED_FLAG`], which keeps the node
+/// state at one pair. Each search keys its cache on the pair, so a cached value
+/// cannot cross an extension boundary.
+///
+/// Read this measure of a node, in this order:
+///
+/// 1. `0` when the path already extended, and `1` when it did not.
+/// 2. The remaining depth.
+/// 3. The room left in the forced chain.
+///
+/// A raise lowers item 1. Another forced child keeps item 1 and lowers item 3. A
+/// normal turn keeps item 1 and lowers item 2. A node at depth 0 takes a static
+/// score and expands no child. Every edge therefore lowers the measure, and the
+/// measure has a lower bound.
+pub(crate) fn forced_descent(
+    phase: actions::Phase,
+    depth: u8,
+    chain: u8,
+    max_forced_chain: u8,
+    replacement_depth: Option<u8>,
+) -> (u8, u8) {
+    let extended = chain & EXTENDED_FLAG;
+    let count = chain & CHAIN_MASK;
+    // The flag owns the high bit, so the count cannot use it.
+    let limit = max_forced_chain.min(CHAIN_MASK);
+    let forced = matches!(phase, actions::Phase::SelfSwitch | actions::Phase::Replacement);
+    if !forced || count >= limit {
+        return (depth.saturating_sub(1), extended);
+    }
+    let Some(value) = replacement_depth else {
+        return (depth, (count + 1) | extended);
+    };
+    // Depth 0 would score a replacement position with no decision at all.
+    let value = value.max(1);
+    if value > depth && extended == 0 {
+        return (value, (count + 1) | EXTENDED_FLAG);
+    }
+    (value.min(depth), (count + 1) | extended)
 }
 
 /// One joint action — a command per active slot — and how often to play it.

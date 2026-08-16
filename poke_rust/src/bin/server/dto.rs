@@ -679,6 +679,8 @@ pub struct AnalysisReplayDto {
     pub time_ms: Option<u64>,
     pub node_budget: Option<u64>,
     pub depth: u8,
+    /// Absent when a forced decision uses the remaining turn budget.
+    pub replacement_depth: Option<u8>,
     pub workers: u8,
     pub iterations: Option<u32>,
     pub particles: Option<usize>,

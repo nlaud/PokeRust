@@ -41,8 +41,9 @@ use crate::solver::preview::{
     solve_team_preview_cancellable,
 };
 use crate::solver::{
-    CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveWarning,
-    SolverAlgorithm, eval, solve, solve_seeded, solve_seeded_cancellable,
+    CHAIN_MASK, CancelFlag, EXTENDED_FLAG, JointActionProb, SolveConfig, SolveError, SolveResult,
+    SolveWarning, SolverAlgorithm, eval, forced_descent, root_descent, solve, solve_seeded,
+    solve_seeded_cancellable,
 };
 use crate::state::battle::{
     BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
@@ -661,6 +662,24 @@ fn seeded_sampling_is_reproducible() {
 #[test]
 fn a_pending_replacement_is_searched_without_consuming_depth() {
     let (pokemon_dex, move_dex) = dexes();
+    let state = pending_replacement_position();
+
+    let result = solve(&state, pokemon_dex, move_dex, &base_config())
+        .expect("a replacement position is solvable");
+
+    assert_valid_strategies(&result);
+    // P1's only decision is which Pokemon to bring in, so every action it
+    // considers must be a switch.
+    for action in &result.p1_strategy {
+        assert!(
+            matches!(action.commands[0], BattleCommand::Switch(_)),
+            "expected a switch, got {:?}",
+            action.commands
+        );
+    }
+}
+
+fn pending_replacement_position() -> MatchState {
     let mut battle = battle_state_from_lists(
         vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack])],
         vec![
@@ -674,25 +693,7 @@ fn a_pending_replacement_is_searched_without_consuming_depth() {
     battle.p1_active_mons[0].fainted = true;
     battle.turn_started = true;
     battle.turn_ended = true;
-
-    let result = solve(
-        &MatchState::BattleState(battle),
-        pokemon_dex,
-        move_dex,
-        &base_config(),
-    )
-    .expect("a replacement position is solvable");
-
-    assert_valid_strategies(&result);
-    // P1's only decision is which Pokemon to bring in, so every action it
-    // considers must be a switch.
-    for action in &result.p1_strategy {
-        assert!(
-            matches!(action.commands[0], BattleCommand::Switch(_)),
-            "expected a switch, got {:?}",
-            action.commands
-        );
-    }
+    MatchState::BattleState(battle)
 }
 
 #[test]
@@ -6058,4 +6059,320 @@ fn a_cancelled_open_list_preview_reports_the_cancel() {
     );
     assert_eq!(result.stats.turns_simulated, 0);
     assert!((0.0..=1.0).contains(&result.value));
+}
+
+// ── Replacement depth ───────────────────────────────────────────────────────
+
+/// The unset field must return exactly the pair that the searches used before
+/// the field existed: a forced child keeps the depth and adds one to the chain,
+/// and everything else spends one turn and clears the chain.
+#[test]
+fn an_unset_replacement_depth_keeps_the_old_descent() {
+    assert_eq!(forced_descent(solver_actions::Phase::Normal, 3, 2, 8, None), (2, 0));
+    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 3, 2, 8, None), (3, 3));
+    assert_eq!(forced_descent(solver_actions::Phase::SelfSwitch, 3, 0, 8, None), (3, 1));
+    // A chain at its limit spends a turn instead.
+    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 3, 8, 8, None), (2, 0));
+}
+
+/// A search can start while a replacement is pending. The replacement depth
+/// must apply before that search expands its root.
+#[test]
+fn a_root_replacement_uses_the_replacement_depth() {
+    assert_eq!(
+        root_descent(solver_actions::Phase::Replacement, 4, Some(1)),
+        (1, 0)
+    );
+    assert_eq!(
+        root_descent(solver_actions::Phase::SelfSwitch, 1, Some(3)),
+        (3, EXTENDED_FLAG)
+    );
+    assert_eq!(
+        root_descent(solver_actions::Phase::Normal, 4, Some(1)),
+        (4, 0)
+    );
+
+    let (pokemon_dex, move_dex) = dexes();
+    let state = pending_replacement_position();
+    let solve_with = |replacement_depth| {
+        solve(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &SolveConfig {
+                depth: 3,
+                replacement_depth,
+                ..base_config()
+            },
+        )
+        .expect("the replacement position is solvable")
+    };
+
+    let full = solve_with(None);
+    let capped = solve_with(Some(1));
+    assert!(
+        capped.stats.turns_simulated < full.stats.turns_simulated,
+        "a replacement root at depth 1 simulated {} turns, the unset field simulated {}",
+        capped.stats.turns_simulated,
+        full.stats.turns_simulated
+    );
+
+    let MatchState::BattleState(world) = state else {
+        unreachable!("the fixture is a battle position")
+    };
+    let belief = belief_of_worlds(vec![world]);
+    let run_ismcts = |replacement_depth| {
+        ismcts::search(
+            23,
+            &belief,
+            pokemon_dex,
+            move_dex,
+            &IsmctsConfig {
+                search: MctsConfig {
+                    iterations: 40,
+                    depth: 3,
+                    replacement_depth,
+                    ..MctsConfig::default()
+                },
+                particles: 1,
+                ..IsmctsConfig::default()
+            },
+        )
+        .expect("the replacement belief is solvable")
+    };
+    let full = run_ismcts(None);
+    let capped = run_ismcts(Some(1));
+    assert!(
+        capped.stats.turns_simulated < full.stats.turns_simulated,
+        "ISMCTS ignored the replacement depth at its root"
+    );
+
+    let run_mccfr = |replacement_depth| {
+        mccfr::search(
+            29,
+            &belief,
+            pokemon_dex,
+            move_dex,
+            &MccfrConfig {
+                search: MctsConfig {
+                    iterations: 40,
+                    depth: 3,
+                    replacement_depth,
+                    ..MccfrConfig::default().search
+                },
+                particles: 1,
+                ..MccfrConfig::default()
+            },
+        )
+        .expect("the replacement belief is solvable")
+    };
+    let full = run_mccfr(None);
+    let capped = run_mccfr(Some(1));
+    assert!(
+        capped.stats.turns_simulated < full.stats.turns_simulated,
+        "MCCFR ignored the replacement depth at its root"
+    );
+}
+
+/// Sampling searches must also apply the replacement depth at the root.
+#[test]
+fn sampling_searches_use_the_root_replacement_depth() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = pending_replacement_position();
+    let run_mcts = |replacement_depth| {
+        mcts::search(
+            19,
+            &state,
+            pokemon_dex,
+            move_dex,
+            &MctsConfig {
+                iterations: 40,
+                depth: 3,
+                replacement_depth,
+                ..MctsConfig::default()
+            },
+        )
+        .expect("the replacement position is solvable")
+    };
+
+    let full = run_mcts(None);
+    let capped = run_mcts(Some(1));
+    assert!(
+        capped.stats.turns_simulated < full.stats.turns_simulated,
+        "a replacement root at depth 1 simulated {} turns, the unset field simulated {}",
+        capped.stats.turns_simulated,
+        full.stats.turns_simulated
+    );
+}
+
+/// A value below the remaining depth makes the forced subtree smaller.
+#[test]
+fn a_low_replacement_depth_lowers_the_child_depth() {
+    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(1)), (1, 1));
+    assert_eq!(forced_descent(solver_actions::Phase::SelfSwitch, 4, 0, 8, Some(2)), (2, 1));
+    // Zero would score a forced position with no decision at all.
+    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(0)), (1, 1));
+}
+
+/// A value above the remaining depth searches past the turn budget of the root.
+/// One path does that one time, which keeps every path finite.
+#[test]
+fn a_high_replacement_depth_extends_the_horizon_one_time() {
+    let (depth, chain) = forced_descent(solver_actions::Phase::Replacement, 1, 0, 8, Some(3));
+    assert_eq!(depth, 3);
+    assert_eq!(chain & CHAIN_MASK, 1);
+    assert_eq!(chain & EXTENDED_FLAG, EXTENDED_FLAG);
+
+    // A normal turn spends depth and keeps the flag.
+    let (depth, chain) = forced_descent(solver_actions::Phase::Normal, depth, chain, 8, Some(3));
+    assert_eq!(depth, 2);
+    assert_eq!(chain, EXTENDED_FLAG);
+
+    // The path already extended, so the next forced child takes the lower
+    // value. Without this rule a faint could raise the depth forever.
+    let (depth, chain) = forced_descent(solver_actions::Phase::Replacement, 1, chain, 8, Some(3));
+    assert_eq!(depth, 1);
+    assert_eq!(chain & CHAIN_MASK, 1);
+    assert_eq!(chain & EXTENDED_FLAG, EXTENDED_FLAG);
+}
+
+/// The flag owns the high bit, so a large chain limit must not write into it.
+#[test]
+fn the_forced_chain_counter_stays_inside_its_mask() {
+    let mut chain = 0;
+    for expected in 1..=CHAIN_MASK {
+        let (_, next) =
+            forced_descent(solver_actions::Phase::Replacement, 4, chain, u8::MAX, Some(2));
+        assert_eq!(next, expected, "the counter left its mask");
+        chain = next;
+    }
+    // The counter is at its limit, so the next forced child spends a turn.
+    let pair = forced_descent(solver_actions::Phase::Replacement, 4, chain, u8::MAX, Some(2));
+    assert_eq!(pair, (3, 0));
+}
+
+/// The cost of a replacement is the reason for the field. A low value must cut
+/// the work at a position whose first cell reaches a replacement node.
+#[test]
+fn a_low_replacement_depth_lowers_the_simulated_turns() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = partial_first_pass_position();
+
+    let solve_with = |replacement_depth| {
+        solve(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &SolveConfig {
+                depth: 3,
+                replacement_depth,
+                ..base_config()
+            },
+        )
+        .expect("position is solvable")
+    };
+
+    let full = solve_with(None);
+    let capped = solve_with(Some(1));
+
+    assert_valid_strategies(&full);
+    assert_valid_strategies(&capped);
+    assert!(
+        capped.stats.turns_simulated < full.stats.turns_simulated,
+        "a replacement depth of 1 simulated {} turns, the unset field simulated {}",
+        capped.stats.turns_simulated,
+        full.stats.turns_simulated
+    );
+}
+
+/// The opposite direction: a value above the remaining depth must search more,
+/// and it must still return a legal strategy pair.
+#[test]
+fn a_high_replacement_depth_searches_past_the_turn_budget() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = partial_first_pass_position();
+
+    let solve_with = |replacement_depth| {
+        solve(
+            &state,
+            pokemon_dex,
+            move_dex,
+            &SolveConfig {
+                depth: 1,
+                replacement_depth,
+                ..base_config()
+            },
+        )
+        .expect("position is solvable")
+    };
+
+    let plain = solve_with(None);
+    let extended = solve_with(Some(3));
+
+    assert_valid_strategies(&extended);
+    assert!(
+        extended.stats.turns_simulated > plain.stats.turns_simulated,
+        "a replacement depth of 3 simulated {} turns, the unset field simulated {}",
+        extended.stats.turns_simulated,
+        plain.stats.turns_simulated
+    );
+}
+
+/// The field changes the shape of the tree, so the pruning of each algorithm
+/// must still land on one value.
+#[test]
+fn all_algorithms_agree_with_a_replacement_depth() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let mut values = Vec::new();
+    for algorithm in [
+        SolverAlgorithm::BackwardInduction,
+        SolverAlgorithm::SerializedBounds,
+        SolverAlgorithm::DoubleOracle,
+    ] {
+        let config = SolveConfig {
+            depth: 1,
+            replacement_depth: Some(2),
+            algorithm,
+            ..base_config()
+        };
+        let result = solve(&state, pokemon_dex, move_dex, &config).expect("position is solvable");
+        assert_valid_strategies(&result);
+        values.push((algorithm, result.value));
+    }
+
+    let reference = values[0].1;
+    for (algorithm, value) in &values {
+        assert!(
+            (value - reference).abs() < 1e-6,
+            "{algorithm:?} returned {value}, backward induction returned {reference}"
+        );
+    }
+}
+
+/// The sampling search reads the same field, and a forced decision below the
+/// horizon must not break its estimate.
+#[test]
+fn the_sampling_search_reads_the_replacement_depth() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = partial_first_pass_position();
+
+    let result = mcts::search(
+        7,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &MctsConfig {
+            iterations: 40,
+            depth: 1,
+            replacement_depth: Some(2),
+            ..MctsConfig::default()
+        },
+    )
+    .expect("position is solvable");
+
+    assert!((0.0..=1.0).contains(&result.value));
+    let total: f64 = result.p1_strategy.iter().map(|a| a.probability).sum();
+    assert!((total - 1.0).abs() < 1e-6, "P1 strategy sums to {total}");
 }

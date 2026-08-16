@@ -160,7 +160,9 @@ pub(super) fn run(
         let seed = ctx.root_seed.take();
         let max_discarded = ctx.max_discarded;
         let action_truncations = ctx.action_truncations;
-        let pass = ctx.solve_position(state, depth, 0, LOSS, WIN, seed.as_ref());
+        let (root_depth, root_chain) =
+            super::root_descent(actions::phase_of(state), depth, config.replacement_depth);
+        let pass = ctx.solve_position(state, root_depth, root_chain, LOSS, WIN, seed.as_ref());
 
         // `budget_hit`, `deadline_hit`, and `cancel_hit` latch, and the loop
         // stops at the first pass that sets one, so the flags describe this pass
@@ -981,14 +983,16 @@ impl<'a> SearchContext<'a> {
     ///
     /// A successor that is still mid-turn — waiting for a replacement or a
     /// self-switch pivot — is a decision point but not a new turn, so it does
-    /// not consume a ply. `max_forced_chain` bounds how long that can go on.
+    /// not consume a ply. [`super::forced_descent`] holds the rule, and
+    /// [`SolveConfig::replacement_depth`] gives such a decision its own depth.
     fn descend(&self, child: &MatchState, depth: u8, chain: u8) -> (u8, u8) {
-        match actions::phase_of(child) {
-            Phase::SelfSwitch | Phase::Replacement if chain < self.cfg.max_forced_chain => {
-                (depth, chain + 1)
-            }
-            _ => (depth.saturating_sub(1), 0),
-        }
+        super::forced_descent(
+            actions::phase_of(child),
+            depth,
+            chain,
+            self.cfg.max_forced_chain,
+            self.cfg.replacement_depth,
+        )
     }
 }
 
@@ -1026,14 +1030,23 @@ impl<'a> RootCells<'a> {
     /// The value of one command pair at `state`, to the configured depth.
     ///
     /// `state` must be a battle position.
+    ///
+    /// A forced root takes the same start depth that [`run`] gives it. Without
+    /// that call a cell of this wrapper would answer a different question than
+    /// the same cell of `run`.
     pub fn cell_value(
         &mut self,
         state: &MatchState,
         p1_commands: &[BattleCommand],
         p2_commands: &[BattleCommand],
     ) -> f64 {
+        let (depth, chain) = super::root_descent(
+            actions::phase_of(state),
+            self.depth,
+            self.ctx.cfg.replacement_depth,
+        );
         self.ctx
-            .cell_value(state, p1_commands, p2_commands, self.depth, 0)
+            .cell_value(state, p1_commands, p2_commands, depth, chain)
     }
 
     /// What the evaluated cells cost so far.
