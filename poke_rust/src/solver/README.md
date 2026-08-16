@@ -144,6 +144,12 @@ The generation check in `accept` drops a result that a state change made old.
 `solver::CancelFlag` stops a search that already runs.
 A cancelled job therefore leaves the last complete checkpoint in place.
 
+Each job exit writes one console line, and each line names the exit that ran.
+The lines hold no count of P2's actions.
+P1 starts the server of a hotseat battle, so P1 can read that console.
+`accept` returns its line, and the caller writes it after it releases the
+session lock.
+
 The server draws the P2 command and returns it as `p2Reveal`.
 The client sends no `p2` field for a bot session.
 The client waits for the current analysis job until that job stops.
@@ -154,6 +160,8 @@ The next submission plays the turn.
 The wait does not remove the uniform draw.
 `draw_p2_command` also drops a checkpoint whose strategy read hidden data.
 An exact or `mcts` profile reads hidden data in every fog-of-war battle.
+`create_battle` now refuses that pair, so the drop is a second guard.
+No battle session reaches it today.
 
 `create_battle` refuses a profile that cannot control P2 in the session.
 `bot_algorithm_fits_mode` in `routes.rs` holds the rule.
@@ -163,6 +171,11 @@ An exact or `mcts` profile needs Perfect Information.
 Both other pairs give P2 a uniform draw on every turn, so the endpoint returns
 422.
 `frontend/src/pages/simulate/SetupPanel.tsx` disables the same pairs.
+
+`botP2.algorithm` is optional.
+A request that names no algorithm takes the search of its information mode.
+`default_bot_algorithm` in `routes.rs` makes that choice.
+The response reports the resolved name in `botP2.algorithm`.
 
 ### Search deadlines
 

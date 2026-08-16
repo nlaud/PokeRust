@@ -193,52 +193,44 @@ impl AnalysisState {
     /// Drops a result from an old or replaced job. A failure keeps the last
     /// complete checkpoint.
     ///
-    /// Each exit writes one console line. A job that leaves no checkpoint for
-    /// the current generation makes the client report "no answer", and these
-    /// lines name which of the four exits ran.
-    fn accept(&mut self, job: &JobTicket, outcome: Result<AnalysisCheckpoint, String>) {
+    /// Returns the console line of the exit that ran. The caller writes that
+    /// line after it releases the session lock. A job that leaves no checkpoint
+    /// for the current generation makes the client report "no answer", and the
+    /// four lines name which exit ran.
+    fn accept(&mut self, job: &JobTicket, outcome: Result<AnalysisCheckpoint, String>) -> String {
         if job.generation != self.generation {
-            eprintln!(
+            return format!(
                 "analysis job {}: the result was dropped, \
                  because the position moved from generation {} to generation {}",
                 job.id, job.generation, self.generation
             );
-            return;
         }
         if !self
             .running
             .as_ref()
             .is_some_and(|running| running.id == job.id && running.generation == job.generation)
         {
-            eprintln!(
+            return format!(
                 "analysis job {} (generation {}): the result was dropped, \
                  because another job replaced it",
                 job.id, job.generation
             );
-            return;
         }
         self.running = None;
         match outcome {
             Ok(checkpoint) => {
-                eprintln!(
-                    "analysis job {} (generation {}): complete, depth {}, {} ms, \
-                     {} strategy rows, playable {}",
-                    job.id,
-                    job.generation,
-                    checkpoint.depth_reached,
-                    checkpoint.elapsed.as_millis(),
-                    checkpoint.p2_strategy.len(),
-                    checkpoint.strategy_is_playable
-                );
+                let line = complete_line(job, &checkpoint);
                 self.checkpoint = Some(checkpoint);
                 self.last_error = None;
+                line
             }
             Err(message) => {
-                eprintln!(
+                let line = format!(
                     "analysis job {} (generation {}): no checkpoint: {message}",
                     job.id, job.generation
                 );
                 self.last_error = Some(message);
+                line
             }
         }
     }
@@ -295,6 +287,34 @@ impl AnalysisState {
     }
 }
 
+/// The console line of one complete job.
+///
+/// The line names the cost of the search. It never names the number of rows in
+/// `p2_strategy`. That number is P2's joint-action count, which
+/// [`AnalysisCheckpoint::turns_simulated`] keeps off every response and which
+/// [`warning_line`] scrubs out of `ActionsTruncated`. P1 runs the server in a
+/// hotseat battle, so the console must hold no more of P2's plan than the
+/// response does.
+///
+/// An empty strategy explains the "no action with a positive weight" draw line,
+/// so the line reports that one fact alone.
+fn complete_line(job: &JobTicket, checkpoint: &AnalysisCheckpoint) -> String {
+    let strategy = if checkpoint.p2_strategy.is_empty() {
+        "no action"
+    } else {
+        "an action"
+    };
+    format!(
+        "analysis job {} (generation {}): complete, depth {}, {} ms, \
+         the strategy holds {strategy}, playable {}",
+        job.id,
+        job.generation,
+        checkpoint.depth_reached,
+        checkpoint.elapsed.as_millis(),
+        checkpoint.strategy_is_playable
+    )
+}
+
 /// Builds the public progress row of one checkpoint.
 ///
 /// The row carries the wall-clock cost of the search, never the strategy and
@@ -328,11 +348,17 @@ pub fn start_job(
         return;
     };
     if !matches!(session.state, MatchState::BattleState(_)) {
-        // A bot session that starts no job leaves the client with no answer to
-        // wait for, so name the position that skipped the job.
+        // `routes::turn` calls this after the turn resolves, so a finished game
+        // is the only position that reaches this exit. That exit is correct,
+        // and the client asks for no further turn. Name the two cases apart, so
+        // the line does not report a normal end as a skipped job.
+        let reason = if matches!(session.state, MatchState::GameOverState { .. }) {
+            "the battle is over"
+        } else {
+            "the position is not a battle"
+        };
         eprintln!(
-            "analysis: no job started at generation {}, \
-             because the position is not a battle",
+            "analysis: no job started at generation {}, because {reason}",
             session.analysis.generation()
         );
         return;
@@ -375,9 +401,18 @@ pub fn start_job(
     let job = session.analysis.start();
     let battle_id = battle_id.to_string();
     eprintln!(
-        "analysis job {} (generation {}): start, algorithm {}, preset {}, depth {}, \
-         time {:?} ms",
-        job.id, job.generation, replay.algorithm, replay.preset, replay.depth, time_ms
+        "analysis job {} (generation {}): start, algorithm {}, preset {}, depth {}, {}",
+        job.id,
+        job.generation,
+        replay.algorithm,
+        replay.preset,
+        replay.depth,
+        // `resolve` fills this field for every profile, and `Debug` would print
+        // `Some(20000)` where the line names a count of milliseconds.
+        time_ms.map_or_else(
+            || "no time limit".to_string(),
+            |limit| format!("time {limit} ms")
+        )
     );
 
     tokio::task::spawn_blocking(move || {
@@ -417,15 +452,20 @@ pub fn start_job(
         }
         let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
         // A deleted battle leaves the task with no target.
-        if let Some(session) = sessions.get_mut(&battle_id) {
-            session.analysis.accept(&job, outcome);
+        let line = if let Some(session) = sessions.get_mut(&battle_id) {
+            session.analysis.accept(&job, outcome)
         } else {
-            eprintln!(
+            format!(
                 "analysis job {} (generation {}): the battle is gone, \
                  so it reports no result",
                 job.id, job.generation
-            );
-        }
+            )
+        };
+        // A console write can block. The operator can pause a Windows console,
+        // and a redirected stream can fill its pipe. This lock guards every
+        // session, so release it before the write.
+        drop(sessions);
+        eprintln!("{line}");
     });
 }
 
@@ -1267,6 +1307,62 @@ mod tests {
         // The two counts of the fixture, in case a later field renames them.
         assert!(!json.contains("40"), "{json}");
         assert!(!json.contains("12"), "{json}");
+    }
+
+    /// The console line of a complete job must hold no action count either.
+    ///
+    /// P1 starts the server of a hotseat battle, so P1 can read that console.
+    /// `p2_strategy.len()` is P2's joint-action count, which is the figure
+    /// `warning_line` scrubs and `turns_simulated` withholds. Two strategies of
+    /// different size must therefore write the same line.
+    #[test]
+    fn the_complete_line_holds_no_action_count() {
+        let mut narrow = AnalysisState::default();
+        let job = narrow.start();
+        let short = narrow.accept(&job, Ok(checkpoint(0, 4)));
+
+        let mut wide = AnalysisState::default();
+        let job = wide.start();
+        let mut many = checkpoint(0, 4);
+        many.p2_strategy = vec![many.p2_strategy[0].clone(); 12];
+        let long = wide.accept(&job, Ok(many));
+
+        assert_eq!(short, long, "the line counts P2's actions");
+        assert!(!short.contains("12"), "{short}");
+        assert!(short.contains("the strategy holds an action"), "{short}");
+    }
+
+    /// An empty strategy explains the uniform draw, so the line names it.
+    /// This one bit is not a count.
+    #[test]
+    fn the_complete_line_names_an_empty_strategy() {
+        let mut state = AnalysisState::default();
+        let job = state.start();
+        let mut empty = checkpoint(0, 4);
+        empty.p2_strategy.clear();
+
+        let line = state.accept(&job, Ok(empty));
+
+        assert!(line.contains("the strategy holds no action"), "{line}");
+    }
+
+    /// A dropped result and a failure both return their own line, so the caller
+    /// writes the console line after it releases the session lock.
+    #[test]
+    fn each_accept_exit_returns_its_own_line() {
+        let mut state = AnalysisState::default();
+        let stale = state.start();
+        state.invalidate();
+        let dropped = state.accept(&stale, Ok(checkpoint(0, 1)));
+        assert!(dropped.contains("the position moved"), "{dropped}");
+
+        let first = state.start();
+        let second = state.start();
+        let replaced = state.accept(&first, Ok(checkpoint(1, 1)));
+        assert!(replaced.contains("another job replaced it"), "{replaced}");
+
+        let failed = state.accept(&second, Err("the search panicked".to_string()));
+        assert!(failed.contains("no checkpoint"), "{failed}");
     }
 
     /// The published seed goes back over the wire as a JSON number, and

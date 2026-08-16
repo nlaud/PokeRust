@@ -257,7 +257,10 @@ export type BotPreset = 'fast' | 'balanced' | 'strong'
  * Every field is optional, and the preset fills each absent field.
  * The server rejects a limit that the algorithm cannot read. */
 export interface BotProfileRequest {
-  /** Defaults to `doubleOracle`. */
+  /** As `botP2`, an absent value takes the search of the information mode.
+   * A fog-of-war mode takes `ismcts`, and Perfect Information takes
+   * `doubleOracle`. The response reports the name in `botP2.algorithm`.
+   * The tracker analysis endpoint takes `doubleOracle`. */
   algorithm?: BotAlgorithm
   /** Defaults to `balanced`. */
   preset?: BotPreset

@@ -175,6 +175,10 @@ fn preset_limits(preset: BotPreset) -> PresetLimits {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BotProfileRequest {
     /// Defaults to `doubleOracle`.
+    ///
+    /// `routes::resolve_bot_p2` fills an absent field before this call, because
+    /// `doubleOracle` cannot control P2 in a fog-of-war session. A battle
+    /// request therefore takes the search of its information mode.
     pub algorithm: Option<String>,
     /// Defaults to `balanced`.
     pub preset: Option<String>,

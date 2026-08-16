@@ -198,6 +198,26 @@ fn bot_algorithm_fits_mode(search: crate::bot::BotSearchConfig, mode: Informatio
     searches_belief == (mode != InformationMode::PerfectInformation)
 }
 
+/// The search of a request that names no algorithm.
+///
+/// `BotProfileRequest::algorithm` is optional, and `bot::resolve` fills an
+/// absent field with `doubleOracle`. That search reads the true position, so it
+/// cannot control P2 in a fog-of-war session, and every mode except Perfect
+/// Information hides data. A request that names only a preset would therefore
+/// always fail [`bot_algorithm_fits_mode`], although it names no pair at all.
+///
+/// The absent field takes the search that fits the mode instead. The response
+/// carries the resolved name in `botP2.algorithm`, so the client reads which
+/// search it got. `defaultAlgorithmFor` in `SetupPanel.tsx` makes the same
+/// choice.
+fn default_bot_algorithm(mode: InformationMode) -> &'static str {
+    if mode == InformationMode::PerfectInformation {
+        "doubleOracle"
+    } else {
+        "ismcts"
+    }
+}
+
 /// The 422 message for a pair that cannot play.
 ///
 /// `mode_name` is the wire name of the request, so the message names the field
@@ -215,6 +235,49 @@ fn bot_algorithm_mismatch(algorithm: &str, mode_name: &str, mode: InformationMod
              {mode_name:?} hides that position. Use ismcts or mccfr, or use \"perfect\"."
         )
     }
+}
+
+/// Resolves the P2 bot profile of one create request.
+///
+/// An absent algorithm takes [`default_bot_algorithm`]. A resolve error wins
+/// over the pair check, so the client reads the reason of its own field first.
+/// `mode_name` is the wire name that the request sent.
+///
+/// `bot::resolve` refuses a limit that the algorithm does not read. A request
+/// that names no algorithm never saw the algorithm that made that rule, so the
+/// message ends with the name that this mode chose. Without that name the
+/// client reads "use an exact algorithm" for a fog-of-war mode, which the pair
+/// check then refuses.
+fn resolve_bot_p2(
+    request: &crate::bot::BotProfileRequest,
+    mode: InformationMode,
+    mode_name: &str,
+    damage_rolls: u8,
+    consider_crit: bool,
+) -> Result<crate::bot::BotProfile, String> {
+    let mut request = request.clone();
+    let chosen = request.algorithm.is_none().then(|| {
+        let name = default_bot_algorithm(mode);
+        request.algorithm = Some(name.to_string());
+        name
+    });
+    let profile = crate::bot::resolve("botP2", &request, damage_rolls, consider_crit).map_err(
+        |message| match chosen {
+            Some(name) => format!(
+                "{message}. botP2.algorithm named no algorithm, \
+                 so informationMode {mode_name:?} chose {name}"
+            ),
+            None => message,
+        },
+    )?;
+    if !bot_algorithm_fits_mode(profile.search, mode) {
+        return Err(bot_algorithm_mismatch(
+            &profile.view.algorithm,
+            mode_name,
+            mode,
+        ));
+    }
+    Ok(profile)
 }
 
 pub async fn create_battle(
@@ -425,17 +488,14 @@ pub async fn create_battle(
     // Resolve the optional P2 bot profile last. A team or item error must still
     // win the 422. The profile uses the same physics as the battle.
     let bot_p2 = match &req.bot_p2 {
-        Some(request) => match crate::bot::resolve("botP2", request, req.damage_rolls, req.consider_crit) {
-            Ok(profile) => {
-                if !bot_algorithm_fits_mode(profile.search, information_mode) {
-                    return unprocessable(bot_algorithm_mismatch(
-                        &profile.view.algorithm,
-                        &req.information_mode,
-                        information_mode,
-                    ));
-                }
-                Some(profile)
-            }
+        Some(request) => match resolve_bot_p2(
+            request,
+            information_mode,
+            &req.information_mode,
+            req.damage_rolls,
+            req.consider_crit,
+        ) {
+            Ok(profile) => Some(profile),
             Err(message) => return unprocessable(message),
         },
         None => None,
@@ -987,6 +1047,8 @@ mod tests {
     use super::bot_algorithm_fits_mode;
     use super::bot_algorithm_mismatch;
     use super::catch_benchmark_panic;
+    use super::default_bot_algorithm;
+    use super::resolve_bot_p2;
     use super::is_champions_teamsheet_species;
     use super::learnset_data_error;
     use super::roster_legality_error;
@@ -1307,5 +1369,118 @@ mod tests {
         assert!(exact.starts_with("botP2.algorithm: doubleOracle"), "{exact}");
         assert!(exact.contains("\"closedSheet\""), "{exact}");
         assert!(exact.contains("reads the true position"), "{exact}");
+    }
+
+    /// The four wire names of the information mode, with the mode of each one.
+    const WIRE_MODES: [(&str, InformationMode); 4] = [
+        ("perfect", InformationMode::PerfectInformation),
+        ("closedSheet", InformationMode::ClosedTeamSheet),
+        ("openSheet", InformationMode::OpenTeamSheet),
+        ("openSheetNatures", InformationMode::OpenTeamSheetNatures),
+    ];
+
+    /// A request that names only a preset must still build a bot that plays.
+    ///
+    /// `bot::resolve` fills an absent algorithm with `doubleOracle`, and that
+    /// search reads the true position, so the fixed default alone would refuse
+    /// every fog-of-war session.
+    #[test]
+    fn an_absent_bot_algorithm_takes_a_search_that_fits_the_mode() {
+        let body = r#"{
+            "p1Team": "",
+            "p2Team": "",
+            "activePerSide": 2,
+            "broughtPerSide": 4,
+            "botP2": { "preset": "fast" }
+        }"#;
+        let req: CreateBattleRequest = serde_json::from_str(body).unwrap();
+        let request = req.bot_p2.as_ref().unwrap();
+        assert!(request.algorithm.is_none(), "the body names no algorithm");
+
+        for (name, mode) in WIRE_MODES {
+            let profile = resolve_bot_p2(request, mode, name, 16, true)
+                .unwrap_or_else(|message| panic!("informationMode {name:?}: {message}"));
+            assert!(
+                bot_algorithm_fits_mode(profile.search, mode),
+                "informationMode {name:?} resolved {}, which cannot control P2",
+                profile.view.algorithm
+            );
+            assert_eq!(profile.view.preset, "fast", "the preset survives");
+        }
+    }
+
+    /// The default of the request body is the default of the picker.
+    #[test]
+    fn the_absent_algorithm_matches_the_picker_default() {
+        assert_eq!(
+            default_bot_algorithm(InformationMode::PerfectInformation),
+            "doubleOracle"
+        );
+        for (name, mode) in WIRE_MODES {
+            if mode == InformationMode::PerfectInformation {
+                continue;
+            }
+            assert_eq!(default_bot_algorithm(mode), "ismcts", "mode {name:?}");
+        }
+    }
+
+    /// A named pair that cannot play still fails, and the message names it.
+    #[test]
+    fn a_named_pair_that_cannot_play_is_refused() {
+        let exact = crate::bot::BotProfileRequest {
+            algorithm: Some("doubleOracle".to_string()),
+            ..crate::bot::BotProfileRequest::default()
+        };
+        let message = resolve_bot_p2(&exact, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
+            .expect_err("an exact search cannot control P2 under the fog of war");
+        assert!(message.contains("reads the true position"), "{message}");
+
+        let belief = crate::bot::BotProfileRequest {
+            algorithm: Some("mccfr".to_string()),
+            ..crate::bot::BotProfileRequest::default()
+        };
+        let message = resolve_bot_p2(
+            &belief,
+            InformationMode::PerfectInformation,
+            "perfect",
+            16,
+            true,
+        )
+        .expect_err("a belief search needs a belief");
+        assert!(message.contains("searches a belief"), "{message}");
+    }
+
+    /// A field that the resolved algorithm does not read still wins the 422.
+    ///
+    /// The request names no algorithm, so the message also names the algorithm
+    /// that the mode chose. Without that name the line reads as a request for
+    /// an exact algorithm, which the pair check refuses under the fog of war.
+    #[test]
+    fn an_unused_field_reports_its_own_reason() {
+        let request = crate::bot::BotProfileRequest {
+            node_budget: Some(1_000),
+            ..crate::bot::BotProfileRequest::default()
+        };
+        let message =
+            resolve_bot_p2(&request, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
+                .expect_err("a node budget applies only to an exact algorithm");
+        assert!(message.starts_with("botP2.nodeBudget"), "{message}");
+        assert!(message.contains("chose ismcts"), "{message}");
+        assert!(message.contains("\"closedSheet\""), "{message}");
+    }
+
+    /// A request that names its own algorithm keeps the plain field message.
+    #[test]
+    fn a_named_algorithm_reports_the_field_reason_alone() {
+        let request = crate::bot::BotProfileRequest {
+            algorithm: Some("ismcts".to_string()),
+            node_budget: Some(1_000),
+            ..crate::bot::BotProfileRequest::default()
+        };
+        let message =
+            resolve_bot_p2(&request, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
+                .expect_err("a node budget applies only to an exact algorithm");
+        assert!(message.starts_with("botP2.nodeBudget"), "{message}");
+        assert!(!message.contains("chose"), "{message}");
     }
 }
