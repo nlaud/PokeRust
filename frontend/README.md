@@ -151,11 +151,21 @@ The load path replaces a stored pair the same way.
 `P2RevealPanel.tsx` shows both states of that draw:
 
 - During the search it shows a wait line, the elapsed time, an approximate
-  progress figure, and a "Change my move" button.
+  progress figure, a "Choose current move" button, and a "Change my move"
+  button.
 - After the turn resolves it shows the drawn command and the draw source.
+
+The profile, progress, strategy, and reveal use one expandable card.
+Approximation notes appear only while the user points to or focuses the
+`Approx.` control.
 
 The client waits for the current analysis job until that job stops.
 No client timeout ends the wait.
+The profile duration is an estimate. It does not stop the search.
+The progress figure stays at or below 99 percent until the server returns a
+strategy.
+`POST /api/battles/{id}/analysis` stops the search and keeps its current
+complete strategy.
 A job that ends with no answer blocks one submission and reports the reason.
 The next submission plays the turn.
 
@@ -236,9 +246,11 @@ If a draft exists, the first press clears the draft.
 ### Solver panel
 
 `TrackerSolverPanel.tsx` shows the solver answer for the current position.
-The panel appears below the input instructions.
+The profile, progress, and answer use one card below the input instructions.
 It starts closed.
 An open panel grows upward, and it scrolls only when it passes the window.
+Approximation notes appear only while the user points to or focuses the
+`Approx.` control.
 
 Open the panel, select an algorithm and a preset, then start the search.
 The controls hold the same knobs as the simulator setup panel.
@@ -253,9 +265,8 @@ DELETE /api/tracker/{id}/analysis
 
 The tracker holds a belief, not a concrete battle state.
 The server draws one world from the belief with the determinizer.
-An exact search and a sampled search read that one world.
-A belief search reads the belief and renders its rows against the drawn world.
-Each answer names this limit in a note.
+The tracker accepts `ismcts` and `mccfr` only.
+Both searches read the belief and render their rows against the drawn world.
 
 The server runs one search for each depth from one through the configured depth.
 Each depth publishes a complete answer.
@@ -263,8 +274,9 @@ The store reads the newest answer two times each second.
 The numbers therefore move while the search goes deeper.
 
 Between two answers the panel shows the depth that runs and a progress bar.
-The bar reports the spent part of the time budget of that depth.
+The bar compares elapsed time with the expected duration of that depth.
 The solver reports no live node count, so this figure is an estimate.
+It stays at or below 99 percent until the server publishes an answer.
 
 ### Team preview
 
@@ -280,7 +292,6 @@ A real opponent reads its own hidden stats, so the answer names that limit in
 a note.
 
 An `ismcts` or `mccfr` profile draws up to eight worlds.
-Every other profile draws one world.
 The answer names the count, because one world gives the whole answer one guess
 of the opponent's hidden data.
 

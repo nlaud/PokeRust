@@ -1,60 +1,85 @@
 import { useEffect, useState } from 'react'
-import type { P2Reveal, P2Strategy, StrategyRow } from '../../api/types'
+import type { BotProfileView, P2Reveal, P2Strategy, StrategyRow } from '../../api/types'
 import { useBattle } from '../../store/battleStore'
 
-/** Names the rule that produced the draw. */
+const ALGORITHM_LABELS: Record<BotProfileView['algorithm'], string> = {
+  doubleOracle: 'Double Oracle',
+  serializedBounds: 'Serialized Bounds',
+  backwardInduction: 'Backward Induction',
+  mcts: 'MCTS',
+  ismcts: 'ISMCTS',
+  mccfr: 'MCCFR',
+}
+
+const PRESET_LABELS: Record<BotProfileView['preset'], string> = {
+  fast: 'Fast',
+  balanced: 'Balanced',
+  strong: 'Strong',
+}
+
 const SOURCE_LABELS: Record<P2Reveal['source'], string> = {
   strategy: 'from the solver strategy',
   uniform: 'from a uniform draw',
   teamPreview: 'from a uniform preview draw',
 }
 
-/** Explains why a uniform draw replaced the solver strategy.
- *
- * Three rules produce this draw. The search gave no answer for the position.
- * The answer read data that the fog of war hides, which an exact or `mcts`
- * profile does in every fog-of-war battle. The sampled command was not legal
- * in the position.
- *
- * The client waits for the search, so only the first rule also shows a message
- * in the control panel before the turn resolves. */
 const UNIFORM_NOTE =
   'Player 2 picked one legal command at random. The search supplied no strategy that Player 2 can play here.'
 
-/** How often the panel reads Player 2's strategy for the current position.
- *
- * The search runs after each turn, so the answer arrives while Player 1 reads
- * the field. Only a battle with `revealStrategy` starts this timer. */
 const POLL_MS = 1000
 
-/** Returns the resolved search limits as one short line. */
+function limitLine(profile: BotProfileView): string {
+  const parts = [`depth ${profile.depth}`]
+  if (profile.replacementDepth !== null) parts.push(`replacement depth ${profile.replacementDepth}`)
+  if (profile.timeMs !== null) {
+    parts.push(`about ${profile.timeMs < 1000 ? `${profile.timeMs} ms` : `${profile.timeMs / 1000} s`}`)
+  }
+  if (profile.nodeBudget !== null) parts.push(`${profile.nodeBudget.toLocaleString()} nodes`)
+  if (profile.iterations !== null) parts.push(`${profile.iterations.toLocaleString()} iterations`)
+  if (profile.particles !== null) parts.push(`${profile.particles} worlds`)
+  if (profile.maxActionsPerPlayer !== null) parts.push(`${profile.maxActionsPerPlayer} actions`)
+  return parts.join(' · ')
+}
+
 function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
   const parts = [`depth ${replay.depth}`]
-  if (replay.replacementDepth !== null) {
-    parts.push(`replacement depth ${replay.replacementDepth}`)
-  }
-  if (replay.timeMs !== null) {
-    parts.push(replay.timeMs < 1000 ? `${replay.timeMs} ms` : `${replay.timeMs / 1000} s`)
-  }
+  if (replay.replacementDepth !== null) parts.push(`replacement depth ${replay.replacementDepth}`)
+  if (replay.timeMs !== null) parts.push(`about ${replay.timeMs / 1000} s`)
   if (replay.nodeBudget !== null) parts.push(`${replay.nodeBudget.toLocaleString()} nodes`)
   if (replay.iterations !== null) parts.push(`${replay.iterations.toLocaleString()} iterations`)
   if (replay.particles !== null) parts.push(`${replay.particles} worlds`)
   if (replay.maxActionsPerPlayer !== null) parts.push(`${replay.maxActionsPerPlayer} actions`)
-  parts.push(`${replay.workers} worker`)
   parts.push(`${replay.damageRolls} damage rolls`)
   if (replay.considerCrit) parts.push('crit branches')
   return parts.join(' · ')
 }
 
-/** Renders one probability as a whole-percent label. */
+function NotesTooltip({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return null
+  return (
+    <span className="group relative shrink-0" data-testid="solver-approximations">
+      <button
+        type="button"
+        aria-label="Show solver approximations"
+        className="rounded-card border border-subtle px-2 py-0.5 font-semibold text-ink-muted"
+      >
+        Approx.
+      </button>
+      <span className="pointer-events-none absolute right-0 top-full z-50 mt-1 hidden w-80 rounded-card border border-subtle bg-card p-2 text-left text-ink-muted shadow-lg group-hover:block group-focus-within:block">
+        {lines.map((line) => (
+          <span key={line} className="mb-1 block last:mb-0">
+            {line}
+          </span>
+        ))}
+      </span>
+    </span>
+  )
+}
+
 function percent(probability: number): string {
   return `${(100 * probability).toFixed(1)}%`
 }
 
-/** Renders one strategy row.
- *
- * A team-preview row names the leads and the back Pokemon. A battle row names
- * one command for each active slot. */
 function actionLabel(row: StrategyRow): string {
   if (row.preview) {
     const leads = row.preview.leads.join(' + ')
@@ -65,16 +90,7 @@ function actionLabel(row: StrategyRow): string {
   return row.commands.map((option) => option.description).join(' · ')
 }
 
-/** Shows one full mixed strategy of Player 2, highest rate first. */
-function StrategyList({
-  title,
-  strategy,
-  testId,
-}: {
-  title: string
-  strategy: P2Strategy
-  testId: string
-}) {
+function StrategyList({ title, strategy, testId }: { title: string; strategy: P2Strategy; testId: string }) {
   return (
     <div className="min-w-0 flex-1" data-testid={testId}>
       <p className="mb-1 font-semibold">{title}</p>
@@ -95,20 +111,7 @@ function StrategyList({
   )
 }
 
-/**
- * Shows the command that the server drew for Player 2.
- *
- * The panel appears only after both commands lock, so it gives Player 1 no
- * early information. It shows one action for each slot and nothing else of
- * Player 2's plan: no probability of that action, no second action, and no win
- * odds. The wait line replaces the panel while the search runs.
- *
- * A battle whose profile holds `revealStrategy` shows more, because that
- * session asked for it. The panel then also shows the strategy of the current
- * position and the whole strategy that the last drawn command came from. The
- * server sends those rows only for such a session, so this component reads
- * whatever it is given.
- */
+/** Shows one solver card for the profile, progress, result, and reveal. */
 export default function P2RevealPanel() {
   const {
     view,
@@ -119,137 +122,141 @@ export default function P2RevealPanel() {
     waitingForBot,
     botWaitMs,
     cancelBotWait,
+    finishBotSearch,
   } = useBattle()
   const [open, setOpen] = useState(false)
+  const [finishing, setFinishing] = useState(false)
 
-  // Read the newest answer for the current position. The timer belongs to this
-  // component, so it stops when Player 1 leaves the battle screen.
   const polls = Boolean(botP2?.revealStrategy) && view !== null && view.phase !== 'gameOver'
   useEffect(() => {
     if (!polls) return
     void refreshP2Strategy()
-    const timer = setInterval(() => {
-      void refreshP2Strategy()
-    }, POLL_MS)
+    const timer = setInterval(() => void refreshP2Strategy(), POLL_MS)
     return () => clearInterval(timer)
   }, [polls, refreshP2Strategy])
 
-  if (!botP2) return null
+  useEffect(() => {
+    if (!waitingForBot) setFinishing(false)
+  }, [waitingForBot])
 
-  if (waitingForBot) {
-    // The limit bounds the search, but a turn simulation that already runs
-    // cannot stop, so the elapsed time can pass it. The bar therefore stops at
-    // a full bar and the seconds keep counting.
-    const limit = botP2.timeMs ?? null
-    const elapsed = botWaitMs ?? 0
-    const percent = limit === null ? null : Math.min(100, Math.round((100 * elapsed) / limit))
-    return (
-      <div
-        data-testid="bot-wait-line"
-        role="status"
-        className="glass relative z-20 mb-2 rounded-card border border-subtle px-3 py-2 text-xs shadow-sm"
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold">Player 2 is thinking…</span>
-          <span className="text-ink-muted">
-            The solver is searching this position. The turn resolves when it answers.
-          </span>
-          <span className="ml-auto shrink-0 font-mono text-ink-muted">
-            {(elapsed / 1000).toFixed(1)} s{percent === null ? '' : ` · about ${percent}%`}
-          </span>
-          <button
-            onClick={cancelBotWait}
-            data-testid="bot-wait-cancel"
-            className="lift shrink-0 rounded-card border border-subtle px-2 py-1 font-semibold text-ink-muted"
-          >
-            {view?.phase === 'teamPreview' ? 'Change my selection' : 'Change my move'}
-          </button>
-        </div>
-        {percent !== null && (
-          <div className="mt-1 h-1 w-full overflow-hidden rounded-card bg-subtle">
-            <div
-              className="h-full bg-primary"
-              style={{ width: `${percent}%` }}
-              role="progressbar"
-              aria-valuenow={percent}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label="Player 2 search progress"
-            />
-          </div>
-        )}
-      </div>
-    )
-  }
+  if (!botP2) return null
 
   const drawnStrategy = p2Reveal?.strategy ?? null
   const played = p2Reveal !== null && p2Reveal.commands.length > 0
-  if (!played && !p2Strategy && !drawnStrategy) return null
+  const elapsed = botWaitMs ?? 0
+  const estimate = botP2.timeMs
+  const progress = estimate === null ? null : Math.min(99, Math.round((100 * elapsed) / estimate))
+  const summary = waitingForBot
+    ? 'Player 2 is thinking…'
+    : played && p2Reveal
+      ? p2Reveal.commands.map((option) => option.description).join(' · ')
+      : p2Strategy
+        ? 'Strategy ready'
+        : 'Preparing strategy'
 
   return (
     <div
-      data-testid="p2-reveal"
-      className="glass relative z-20 mb-2 rounded-card border border-subtle px-3 py-2 text-xs shadow-sm"
+      data-testid="bot-badge"
+      className="glass relative z-30 mb-2 rounded-card border border-subtle px-3 py-2 text-xs shadow-sm"
     >
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        className="flex w-full min-w-0 flex-wrap items-center gap-2 text-left"
-      >
-        <span className="rounded-card bg-primary px-2 py-0.5 font-semibold text-white">
-          {played ? 'Player 2 played' : 'Player 2 strategy'}
-        </span>
-        {played && p2Reveal && (
-          <>
-            <span className="font-semibold">
-              {p2Reveal.commands.map((option) => option.description).join(' · ')}
+      <div className="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
+        >
+          <span className="rounded-card bg-primary px-2 py-0.5 font-semibold text-white">P2 solver</span>
+          <span className="font-semibold">{ALGORITHM_LABELS[botP2.algorithm]}</span>
+          <span className="text-ink-muted">{PRESET_LABELS[botP2.preset]}</span>
+          <span className="truncate text-ink-muted">{summary}</span>
+          {botP2.revealStrategy && (
+            <span data-testid="bot-badge-reveal" className="rounded-card bg-warning/15 px-2 py-0.5 font-semibold text-warning">
+              strategy shown
             </span>
-            <span className="text-ink-muted">{SOURCE_LABELS[p2Reveal.source]}</span>
-          </>
-        )}
-        {!played && <span className="text-ink-muted">for this position</span>}
-        <span aria-hidden className="ml-auto text-ink-muted">
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
+          )}
+          <span aria-hidden className="ml-auto text-ink-muted">{open ? '▾' : '▸'}</span>
+        </button>
+        <NotesTooltip lines={botP2.approximations} />
+      </div>
 
-      {open && (
-        <div className="mt-2 border-t border-subtle pt-2" data-testid="p2-reveal-detail">
-          {p2Reveal?.source === 'uniform' && <p className="mb-2 text-warning">{UNIFORM_NOTE}</p>}
-
-          {(p2Strategy || drawnStrategy) && (
-            <div className="mb-2 flex flex-col gap-3 sm:flex-row">
-              {p2Strategy && (
-                <StrategyList
-                  title={
-                    p2Strategy.position === 'teamPreview'
-                      ? "Player 2's bring and lead now"
-                      : "Player 2's strategy now"
-                  }
-                  strategy={p2Strategy}
-                  testId="p2-strategy-current"
-                />
-              )}
-              {drawnStrategy && (
-                <StrategyList
-                  title="The strategy of the last draw"
-                  strategy={drawnStrategy}
-                  testId="p2-strategy-drawn"
-                />
-              )}
+      {waitingForBot && (
+        <div data-testid="bot-wait-line" role="status" className="mt-2 border-t border-subtle pt-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-ink-muted">The turn resolves when the solver returns a strategy.</span>
+            <span className="ml-auto shrink-0 font-mono text-ink-muted">
+              {(elapsed / 1000).toFixed(1)} s{progress === null ? '' : ` · about ${progress}%`}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setFinishing(true)
+                void finishBotSearch()
+              }}
+              disabled={finishing}
+              data-testid="bot-wait-finish"
+              className="lift rounded-card bg-primary px-2 py-1 font-semibold text-white disabled:opacity-50"
+            >
+              {finishing ? 'Choosing…' : 'Choose current move'}
+            </button>
+            <button
+              type="button"
+              onClick={cancelBotWait}
+              data-testid="bot-wait-cancel"
+              className="lift rounded-card border border-subtle px-2 py-1 font-semibold text-ink-muted"
+            >
+              {view?.phase === 'teamPreview' ? 'Change my selection' : 'Change my move'}
+            </button>
+          </div>
+          {progress !== null && (
+            <div className="mt-1 h-1 w-full overflow-hidden rounded-card bg-subtle">
+              <div
+                className="h-full bg-primary"
+                style={{ width: `${progress}%` }}
+                role="progressbar"
+                aria-valuenow={progress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Player 2 search progress estimate"
+              />
             </div>
           )}
+        </div>
+      )}
 
-          {p2Reveal && <p className="text-ink-muted">Draw seed {p2Reveal.drawSeed}</p>}
-          {p2Reveal?.replay && (
-            <>
-              <p className="mt-2 font-semibold">Search</p>
-              <p className="text-ink-muted">
-                {p2Reveal.replay.algorithm} · {p2Reveal.replay.preset} · turn{' '}
-                {p2Reveal.replay.turnNumber} · seed {p2Reveal.replay.searchSeed}
-              </p>
-              <p className="break-words text-ink-muted">{replayLine(p2Reveal.replay)}</p>
-            </>
+      {open && (
+        <div className="mt-2 border-t border-subtle pt-2" data-testid="bot-badge-detail">
+          <p className="text-ink-muted">{limitLine(botP2)}</p>
+          {botP2.adjustments.length > 0 && (
+            <p className="mt-1 text-ink-muted">{botP2.adjustments.join(' · ')}</p>
+          )}
+          {(played || p2Strategy || drawnStrategy) && (
+            <div data-testid="p2-reveal" className="mt-2 border-t border-subtle pt-2">
+              {played && p2Reveal && (
+                <p className="font-semibold">
+                  Player 2 played {p2Reveal.commands.map((option) => option.description).join(' · ')}{' '}
+                  <span className="font-normal text-ink-muted">{SOURCE_LABELS[p2Reveal.source]}</span>
+                </p>
+              )}
+              {p2Reveal?.source === 'uniform' && <p className="mt-1 text-warning">{UNIFORM_NOTE}</p>}
+              {(p2Strategy || drawnStrategy) && (
+                <div className="mt-2 flex flex-col gap-3 sm:flex-row" data-testid="p2-reveal-detail">
+                  {p2Strategy && (
+                    <StrategyList title="Player 2 strategy now" strategy={p2Strategy} testId="p2-strategy-current" />
+                  )}
+                  {drawnStrategy && (
+                    <StrategyList title="Strategy of the last draw" strategy={drawnStrategy} testId="p2-strategy-drawn" />
+                  )}
+                </div>
+              )}
+              {p2Reveal && <p className="mt-2 text-ink-muted">Draw seed {p2Reveal.drawSeed}</p>}
+              {p2Reveal?.replay && (
+                <p className="mt-1 break-words text-ink-muted">
+                  {p2Reveal.replay.algorithm} · {p2Reveal.replay.preset} · turn {p2Reveal.replay.turnNumber} · seed{' '}
+                  {p2Reveal.replay.searchSeed} · {replayLine(p2Reveal.replay)}
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}

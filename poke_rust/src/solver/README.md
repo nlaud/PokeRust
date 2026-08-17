@@ -36,18 +36,6 @@ One six-Pokemon team has 180 bring-and-lead choices.
 Two players produce 32,400 preview matrix cells.
 Team preview is a simultaneous decision.
 
-Official play uses these time limits:
-
-| Limit | Value |
-|---|---|
-| Team preview | 90 seconds |
-| One move | 45 seconds |
-| Player time | 7 minutes |
-| One game | 20 minutes |
-
-The interactive solver must return a useful checkpoint well before 45 seconds.
-The offline solver can use a longer limit.
-
 The simulator does not model timeout rules.
 Its result is a no-timeout battle win probability.
 
@@ -170,7 +158,8 @@ These files live in `poke_rust/src/bin/server/`.
 `invalidate` raises the cancel flag of the running job.
 The generation check in `accept` drops a result that a state change made old.
 `solver::CancelFlag` stops a search that already runs.
-A cancelled job therefore leaves the last complete checkpoint in place.
+A state-change cancellation leaves the last complete checkpoint in place.
+An explicit finish request keeps the cancelled search result.
 
 Each job exit writes one console line, and each line names the exit that ran.
 The lines hold no count of P2's actions.
@@ -182,11 +171,21 @@ The server draws the P2 command and returns it as `p2Reveal`.
 The client sends no `p2` field for a bot session.
 The client waits for the current analysis job until that job stops.
 No client timeout ends the wait.
+A profile time is an expected duration. It does not stop the solver.
+`POST /api/battles/{id}/analysis` requests the current complete result.
+The cancel flag stops the active search, and the job keeps its last complete
+strategy for the draw.
 A job that ends with no answer blocks one submission and reports the reason.
 The next submission plays the turn.
 
-The wait does not remove the uniform draw.
-`draw_p2_command` also drops a checkpoint whose strategy read hidden data.
+Before a draw, `draw_p2_command` removes strategy rows that are not legal in
+the current state. It normalizes the remaining positive weights. This rule is
+important during end-of-turn replacement decisions, where an old or malformed
+row must not force a uniform draw.
+If P2 has exactly one legal joint action, the server publishes it immediately
+and does not start a search.
+
+`draw_p2_command` drops a checkpoint whose strategy read hidden data.
 An exact or `mcts` profile reads hidden data in every fog-of-war battle.
 `create_battle` now refuses that pair, so the drop is a second guard.
 No battle session reaches it today.
@@ -205,10 +204,9 @@ A request that names no algorithm takes the search of its information mode.
 `default_bot_algorithm` in `routes.rs` makes that choice.
 The response reports the resolved name in `botP2.algorithm`.
 
-### Search deadlines
+### Search cancellation
 
-`simulator::scoped_abort_signal` carries the deadline and the cancel flag into
-one turn simulation.
+`simulator::scoped_abort_signal` carries a cancel flag into one turn simulation.
 The hit loop, the target loop, and the action queue read the signal.
 The hit loop and the target loop also merge their equal branches after each
 step.
@@ -223,8 +221,13 @@ It draws one world from the belief.
 It then runs one search for each depth from one through the configured depth.
 Each depth publishes a complete answer, so the panel moves while the search
 goes deeper.
-Each rung also records its depth and its time budget.
-The panel therefore shows an approximate progress figure between two answers.
+Each rung records its depth and expected duration.
+The panel shows an approximate progress figure between two answers.
+The figure stays below 100 percent until the server publishes an answer.
+
+The tracker accepts `ismcts` and `mccfr` only.
+Both algorithms search the belief instead of treating one hidden world as the
+true state.
 
 A position with no lead on either side is the team preview.
 The same module then searches the stored team-preview belief with

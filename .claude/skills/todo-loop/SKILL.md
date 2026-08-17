@@ -29,6 +29,8 @@ Arguments: `$ARGUMENTS`
    task now*.
 7. If the input is `false`, run no task now.
 8. Report the job ID and schedule.
+9. Report the next three TODO items. Follow the section *Report the next
+   items*.
 
 The schedule runs near midnight, 6:00 AM, noon, and 6:00 PM. Claude adds jitter
 to recurring tasks. The seven-day expiry is the maximum supported time.
@@ -47,3 +49,26 @@ Do not try `Skill` with `todo`. Read
 for this run, so the guard does not apply.
 
 Follow every section of that file, including the push notification.
+
+## Report the next items
+
+End the run with the next three TODO items. Print them under the heading
+`Next 3 TODO items`.
+
+If the TODO run returned a `NEXT:` block, print that block. It is current,
+because the run wrote it after it changed `TODO.md`.
+
+If the run returned no `NEXT:` block, build the list yourself:
+
+1. Read `TODO.md` at the repository root.
+2. Take the next three top-level `- [ ]` items in file order.
+3. Print the section title, the item text, and the sub-bullet count of each
+   item.
+
+The `false` input runs no task, so this path always applies to it.
+
+List fewer than three items when the file holds fewer. Print `TODO.md holds no
+unchecked item` when the file holds none.
+
+One item and all of its sub-bullets are one task. Count the sub-bullets. Do not
+list a sub-bullet as an item.

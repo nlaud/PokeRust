@@ -260,10 +260,11 @@ export interface BotProfileRequest {
   /** As `botP2`, an absent value takes the search of the information mode.
    * A fog-of-war mode takes `ismcts`, and Perfect Information takes
    * `doubleOracle`. The response reports the name in `botP2.algorithm`.
-   * The tracker analysis endpoint takes `doubleOracle`. */
+   * The tracker analysis endpoint takes `ismcts` or `mccfr`. */
   algorithm?: BotAlgorithm
   /** Defaults to `balanced`. */
   preset?: BotPreset
+  /** Expected duration. This value does not stop the solver. */
   timeMs?: number
   /** Exact algorithms only. */
   nodeBudget?: number
@@ -298,6 +299,7 @@ export interface BotProfileView {
   /** True when the algorithm itself is exact.
    * A limit can still make the result approximate. */
   exact: boolean
+  /** Expected duration. This value does not stop the solver. */
   timeMs: number | null
   nodeBudget: number | null
   depth: number
@@ -470,6 +472,7 @@ export interface AnalysisReplay {
   searchSeed: number
   algorithm: string
   preset: string
+  /** Expected duration. This value does not stop the solver. */
   timeMs: number | null
   nodeBudget: number | null
   depth: number
@@ -558,9 +561,9 @@ export interface TrackerAnalysisRung {
   depth: number
   /** How long this rung has run. */
   elapsedMs: number
-  /** The time that this rung can spend. */
+  /** The expected duration of this rung. */
   budgetMs: number
-  /** `elapsedMs` divided by `budgetMs`, from 0 through 1. */
+  /** `elapsedMs` divided by `budgetMs`, from 0 through 0.99 while running. */
   fraction: number
 }
 

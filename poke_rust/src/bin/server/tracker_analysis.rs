@@ -11,7 +11,7 @@
 //! The panel must update while the search goes deeper, so the job runs one rung
 //! for each depth from one through the configured depth. A rung publishes a
 //! complete checkpoint, and the client reads the newest one. A rung that starts
-//! with no time left does not start.
+//! runs until it finishes or the client cancels it.
 //!
 //! # The record
 //!
@@ -32,21 +32,14 @@
 //! names a species and a belief mon index, which is a guess about the live
 //! opponent rather than a fact the user recorded.
 //!
-//! # The time limit
+//! # The time estimate
 //!
-//! [`SolveConfig::deadline`](poke_rust::solver::SolveConfig::deadline) stops an
-//! exact search before it starts another turn simulation. A simulation that
-//! already runs still finishes. One full damage-roll enumeration of a multi-hit
-//! move branches `(rolls * 2)` ways for each hit, so a five-hit move at 16 rolls
-//! reaches about 33 million outcomes. That one cell can run for minutes.
+//! The profile time is an expected duration. It does not set a solver deadline.
+//! The response uses that duration to estimate rung progress. Progress stays
+//! below 100 percent until the rung publishes a complete answer.
 //!
-//! A measured example: a drawn Garchomp with Scale Shot made a depth-one
-//! `doubleOracle` rung run past 95 seconds under a 2000 ms limit. The same
-//! position answered in about 100 ms under `ismcts` and `mcts`, because a
-//! sampling search draws one outcome instead of every outcome.
-//!
-//! [`overrun_line`] reports the overrun on the rung that publishes. The panel
-//! selects a sampling algorithm by default for the same reason.
+//! The tracker accepts only `ismcts` and `mccfr`. These algorithms search the
+//! belief instead of treating one sampled hidden world as the true state.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -67,8 +60,8 @@ use poke_rust::state::battle::{BattleState, MatchState, Player};
 
 use crate::bot::{BotProfile, BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
-    TrackerAnalysisCheckpointDto, TrackerAnalysisDto, TrackerAnalysisRungDto,
-    PreviewChoiceDto, StrategyRowDto,
+    PreviewChoiceDto, StrategyRowDto, TrackerAnalysisCheckpointDto, TrackerAnalysisDto,
+    TrackerAnalysisRungDto,
 };
 use crate::mapping;
 use crate::session::{Dexes, MetaDexes};
@@ -344,11 +337,7 @@ impl TrackerAnalysisState {
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
             target_depth: profile.map(|p| p.view.depth),
-            rung: self
-                .running
-                .as_ref()
-                .and_then(|job| job.rung)
-                .map(rung_dto),
+            rung: self.running.as_ref().and_then(|job| job.rung).map(rung_dto),
             checkpoint: self
                 .checkpoint
                 .as_ref()
@@ -368,8 +357,8 @@ impl TrackerAnalysisState {
 
 /// Builds the progress row of the rung that runs.
 ///
-/// The fraction is the spent part of the time budget. It never passes 1, so a
-/// rung that runs past its budget shows a full bar rather than an overflow.
+/// The fraction compares elapsed time with the estimate. A running job stays
+/// below 100 percent until it finishes.
 fn rung_dto(rung: RungProgress) -> TrackerAnalysisRungDto {
     let elapsed = rung.started.elapsed();
     let budget_ms = rung.budget.as_millis().max(1) as u64;
@@ -378,7 +367,7 @@ fn rung_dto(rung: RungProgress) -> TrackerAnalysisRungDto {
         depth: rung.depth,
         elapsed_ms,
         budget_ms,
-        fraction: (elapsed_ms as f64 / budget_ms as f64).clamp(0.0, 1.0),
+        fraction: (elapsed_ms as f64 / budget_ms as f64).clamp(0.0, 0.99),
     }
 }
 
@@ -427,7 +416,7 @@ fn strategy_row_dto(row: &TrackerStrategyRow) -> StrategyRowDto {
 struct LadderInputs {
     search: BotSearchConfig,
     seed: u64,
-    /// The wall-clock limit of the whole ladder.
+    /// The expected duration of one rung.
     time_ms: u64,
     /// The depth horizon. The ladder runs one rung for each depth up to it.
     target_depth: u8,
@@ -524,7 +513,7 @@ pub fn start_job(
     });
 }
 
-/// The time limit of a profile that carries none.
+/// The expected duration of a profile that carries none.
 ///
 /// `bot::resolve` always sets one, so this value covers only a hand-built
 /// profile.
@@ -552,7 +541,6 @@ fn run_ladder(
     hooks: &LadderHooks,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let mut published_rung = false;
     let meta = inputs
         .meta
         .for_format(inputs.format)
@@ -587,11 +575,9 @@ fn run_ladder(
         if cancel.is_cancelled() {
             return Ok(());
         }
-        let Some(remaining) = remaining_time(inputs.time_ms, started.elapsed()) else {
-            return no_time_left(published_rung);
-        };
-        let search = inputs.search.with_depth(depth).with_deadline(remaining);
-        (hooks.note_rung)(depth, remaining);
+        let estimate = Duration::from_millis(inputs.time_ms);
+        let search = inputs.search.with_depth(depth);
+        (hooks.note_rung)(depth, estimate);
 
         // A solver panic must not poison the session mutex, so catch it here
         // and report it as an ordinary job failure.
@@ -616,9 +602,6 @@ fn run_ladder(
                  opponent."
             ));
         }
-        if let Some(line) = overrun_line(inputs.time_ms, elapsed) {
-            warnings.push(line);
-        }
         if let Some(line) = unknown_bring_line(&inputs.belief) {
             warnings.push(line);
         }
@@ -638,47 +621,11 @@ fn run_ladder(
             seed: inputs.seed,
             warnings,
         });
-        published_rung = true;
         if rung.depth_reached < depth {
             return Ok(());
         }
     }
     Ok(())
-}
-
-/// Stops a ladder after it spends its time limit.
-fn no_time_left(published_rung: bool) -> Result<(), String> {
-    if published_rung {
-        Ok(())
-    } else {
-        Err("The time limit expired before the first depth could start.".to_string())
-    }
-}
-
-/// The time that the ladder has left.
-///
-/// Returns `None` when the limit is already spent, which stops the ladder.
-fn remaining_time(time_ms: u64, spent: Duration) -> Option<Duration> {
-    Duration::from_millis(time_ms)
-        .checked_sub(spent)
-        .filter(|left| !left.is_zero())
-}
-
-/// Reports a rung that ran past the limit of the profile.
-///
-/// [`SolveConfig::deadline`](poke_rust::solver::SolveConfig::deadline) stops the
-/// solver before it starts another turn simulation. A simulation that already
-/// runs still finishes, and one full damage-roll enumeration of a multi-hit move
-/// can take much longer than the limit. The panel shows this line so the user
-/// knows why the answer was late.
-fn overrun_line(time_ms: u64, elapsed: Duration) -> Option<String> {
-    (elapsed > Duration::from_millis(time_ms)).then(|| {
-        format!(
-            "The search took {} ms, which is past the {time_ms} ms limit. One turn simulation \
-             that already runs cannot stop.",
-            elapsed.as_millis()
-        )
-    })
 }
 
 /// The result of one rung, before the job renders it.
@@ -828,8 +775,7 @@ fn leads_error(p1_is_empty: bool, p2_is_empty: bool) -> Result<(), String> {
 // ── The team-preview rung ────────────────────────────────────────────────────
 
 /// Names the way that a preview answer falls short of the true game.
-const PREVIEW_MEAN_MATRIX_NOTE: &str =
-    "The search solved the mean matrix of the drawn worlds, so both players play one strategy \
+const PREVIEW_MEAN_MATRIX_NOTE: &str = "The search solved the mean matrix of the drawn worlds, so both players play one strategy \
      for every world. A real opponent reads its own hidden stats and can pick another lead.";
 
 /// The belief to search when the position is the team preview.
@@ -846,7 +792,9 @@ fn preview_position(inputs: &LadderInputs) -> Option<&UnknownTeamPreviewState> {
         inputs.belief.p2_active_mons.is_empty(),
         inputs.turn_number,
     );
-    is_preview.then_some(inputs.preview_belief.as_ref()).flatten()
+    is_preview
+        .then_some(inputs.preview_belief.as_ref())
+        .flatten()
 }
 
 /// True when the position is the team preview.
@@ -864,18 +812,18 @@ fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u
 ///
 /// `analysis.rs` calls this for the preview position of a bot battle, which
 /// takes the same profile and the same solver.
-pub(crate) fn preview_battle_config(search: BotSearchConfig, deadline: Duration) -> SolveConfig {
+pub(crate) fn preview_battle_config(search: BotSearchConfig) -> SolveConfig {
     let sampled = |mcts: poke_rust::solver::mcts::MctsConfig| SolveConfig {
         depth: mcts.depth,
         damage_rolls: mcts.damage_rolls,
         consider_crit: mcts.consider_crit,
         max_actions_per_player: mcts.max_actions_per_player,
-        deadline: Some(deadline),
+        deadline: None,
         ..SolveConfig::default()
     };
     match search {
         BotSearchConfig::Exact(config) => SolveConfig {
-            deadline: Some(deadline),
+            deadline: None,
             ..config
         },
         BotSearchConfig::Mcts(config) => sampled(config),
@@ -911,17 +859,15 @@ fn run_preview_rung(
     cancel: &CancelFlag,
     hooks: &LadderHooks,
 ) -> Result<(), String> {
-    let Some(remaining) = remaining_time(inputs.time_ms, started.elapsed()) else {
-        return no_time_left(false);
-    };
-    let battle = preview_battle_config(inputs.search, remaining);
+    let estimate = Duration::from_millis(inputs.time_ms);
+    let battle = preview_battle_config(inputs.search);
     let depth = battle.depth;
-    (hooks.note_rung)(depth, remaining);
+    (hooks.note_rung)(depth, estimate);
 
     let config = OpenListConfig {
         preview: PreviewConfig {
             battle,
-            deadline: Some(remaining),
+            deadline: None,
         },
         worlds: preview_worlds(inputs.search),
         seed: inputs.seed,
@@ -965,10 +911,6 @@ fn run_preview_rung(
             result.draw_warnings.len()
         ));
     }
-    if let Some(line) = overrun_line(inputs.time_ms, elapsed) {
-        warnings.push(line);
-    }
-
     (hooks.publish)(TrackerAnalysisCheckpoint {
         generation: inputs.generation,
         turn_number: inputs.turn_number,
@@ -1524,7 +1466,10 @@ mod tests {
         assert!(rows[0].commands.is_empty());
 
         let json = serde_json::to_string(&strategy_row_dto(&rows[0])).unwrap();
-        assert!(json.contains("\"leads\":[\"Garchomp\",\"Pikachu\"]"), "{json}");
+        assert!(
+            json.contains("\"leads\":[\"Garchomp\",\"Pikachu\"]"),
+            "{json}"
+        );
     }
 
     /// A rate cut must keep the choices that the strategy plays most.
@@ -1564,11 +1509,24 @@ mod tests {
         let rung = state.view(Some(&profile())).rung.expect("a running rung");
         assert_eq!(rung.depth, 2);
         assert_eq!(rung.budget_ms, 4_000);
-        assert!((0.0..=1.0).contains(&rung.fraction), "{}", rung.fraction);
+        assert!((0.0..=0.99).contains(&rung.fraction), "{}", rung.fraction);
 
         // A finished job reports no rung, so the panel drops the bar.
         state.finish(&job, Ok(()));
         assert!(state.view(Some(&profile())).rung.is_none());
+    }
+
+    /// Elapsed time can exceed the estimate. The panel must not report a
+    /// complete rung before the server publishes its answer.
+    #[test]
+    fn a_running_rung_stays_below_one_hundred_percent() {
+        let rung = rung_dto(RungProgress {
+            depth: 2,
+            started: Instant::now() - Duration::from_secs(2),
+            budget: Duration::from_secs(1),
+        });
+
+        assert_eq!(rung.fraction, 0.99);
     }
 
     /// A replaced job must not move the progress record of the job that owns it.
@@ -1613,7 +1571,6 @@ mod tests {
     /// profile must still supply a complete battle configuration.
     #[test]
     fn a_sampling_profile_builds_a_preview_battle_configuration() {
-        let deadline = Duration::from_millis(2_500);
         for name in ["doubleOracle", "mcts", "ismcts", "mccfr"] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
@@ -1622,12 +1579,12 @@ mod tests {
             };
             let resolved = crate::bot::resolve("analysis", &request, 16, true).unwrap();
 
-            let config = preview_battle_config(resolved.search, deadline);
+            let config = preview_battle_config(resolved.search);
 
             assert_eq!(config.depth, 1, "{name}");
             assert_eq!(config.damage_rolls, 16, "{name}");
             assert!(config.consider_crit, "{name}");
-            assert_eq!(config.deadline, Some(deadline), "{name}");
+            assert_eq!(config.deadline, None, "{name}");
         }
     }
 
@@ -1941,22 +1898,6 @@ Level: 50
         assert_eq!(top_actions(&strategy[..3]).len(), 3);
     }
 
-    /// The ladder must stop rather than start a rung that has no time to run.
-    #[test]
-    fn a_spent_time_limit_stops_the_ladder() {
-        assert!(remaining_time(1_000, Duration::from_millis(200)).is_some());
-        assert_eq!(
-            remaining_time(1_000, Duration::from_millis(200)),
-            Some(Duration::from_millis(800))
-        );
-        assert!(remaining_time(1_000, Duration::from_millis(1_000)).is_none());
-        assert!(remaining_time(1_000, Duration::from_millis(4_000)).is_none());
-
-        assert!(no_time_left(true).is_ok());
-        let message = no_time_left(false).unwrap_err();
-        assert!(message.contains("before the first depth"), "{message}");
-    }
-
     /// A limited exact search must report the depth that it completed.
     #[test]
     fn an_exact_rung_keeps_the_solver_depth() {
@@ -1976,18 +1917,6 @@ Level: 50
 
         assert_eq!(rung.depth_reached, 1);
         assert!(rung.warnings[0].contains("depth 1 of the 3"));
-    }
-
-    /// A turn simulation that already runs cannot stop, so a rung can finish
-    /// past its limit. The panel has to say so.
-    #[test]
-    fn a_rung_past_the_limit_reports_the_overrun() {
-        assert_eq!(overrun_line(1_000, Duration::from_millis(900)), None);
-        assert_eq!(overrun_line(1_000, Duration::from_millis(1_000)), None);
-
-        let line = overrun_line(1_000, Duration::from_millis(4_500)).unwrap();
-        assert!(line.contains("4500 ms"), "{line}");
-        assert!(line.contains("1000 ms limit"), "{line}");
     }
 
     /// A repeated warning appears one time, and a distinct one survives.

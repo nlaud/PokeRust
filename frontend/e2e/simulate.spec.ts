@@ -101,6 +101,8 @@ test.describe('Simulate mode', () => {
       const request = route.request().postDataJSON()
       request.botP2.timeMs = 1
       request.botP2.replacementDepth = 2
+      request.botP2.iterations = 50
+      request.botP2.particles = 2
       await route.continue({ postData: JSON.stringify(request) })
     })
     let holdPreviewAnalysis = true
@@ -164,15 +166,11 @@ test.describe('Simulate mode', () => {
 
     await page.getByRole('button', { name: 'Start Battle' }).click()
 
-    // The badge names the resolved algorithm, preset, and limits.
+    // The card names the resolved algorithm, preset, and limits.
     const badge = page.getByTestId('bot-badge')
     await expect(badge).toBeVisible({ timeout: 10_000 })
     await expect(badge).toContainText('ISMCTS')
     await expect(badge).toContainText('Fast')
-    await expect(badge).toContainText('sampled algorithm')
-    await expect(badge).toContainText('depth 1')
-    await expect(badge).toContainText('replacement depth 2')
-    await expect(badge).toContainText('1 ms')
 
     // The new badge must not make a narrow viewport overflow horizontally.
     await page.setViewportSize({ width: 390, height: 844 })
@@ -180,6 +178,7 @@ test.describe('Simulate mode', () => {
       const bounds = root.getBoundingClientRect()
       return [...root.querySelectorAll<HTMLElement>('*')]
         .filter((element) => {
+          if (element.getClientRects().length === 0) return false
           const rect = element.getBoundingClientRect()
           return rect.left < bounds.left - 1 || rect.right > bounds.right + 1
         })
@@ -193,11 +192,18 @@ test.describe('Simulate mode', () => {
     })
     expect(overflowing).toEqual([])
 
-    // The panel lists every approximation of the resolved profile.
+    // The card shows approximations only while their label has hover or focus.
+    const approximations = page.getByTestId('solver-approximations')
+    await approximations.getByRole('button').hover()
+    await expect(approximations).toContainText('samples trajectories')
+    await expect(approximations).toContainText('world(s) from the belief')
+
+    // The expanded part keeps profile adjustments and the result in this card.
     await badge.getByRole('button').first().click()
     const detail = page.getByTestId('bot-badge-detail')
-    await expect(detail).toContainText('samples trajectories')
-    await expect(detail).toContainText('world(s) from the belief')
+    await expect(detail).toContainText('depth 1')
+    await expect(detail).toContainText('replacement depth 2')
+    await expect(detail).toContainText('1 ms')
     await expect(detail).toContainText('timeMs overrides the fast preset: 1')
     const detailOwnsOverlap = await page.evaluate(() => {
       const detail = document.querySelector<HTMLElement>('[data-testid="bot-badge-detail"]')
@@ -228,6 +234,7 @@ test.describe('Simulate mode', () => {
     await expect(page.getByTestId('preview-confirm')).toHaveText('Start Battle')
     await page.getByTestId('preview-confirm').click()
     await expect(page.getByTestId('bot-wait-line')).toBeVisible()
+    await expect(page.getByTestId('bot-wait-finish')).toHaveText('Choose current move')
     await expect(page.getByTestId('bot-wait-cancel')).toHaveText('Change my selection')
     for (let i = 0; i < p1Count; i++) await expect(previewMons.nth(i)).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Back', exact: false })).toBeDisabled()
@@ -237,7 +244,10 @@ test.describe('Simulate mode', () => {
       fullPage: true,
       animations: 'disabled',
     })
+    // The duration is an estimate, so end the search through the explicit
+    // finish action and use its current complete strategy.
     holdPreviewAnalysis = false
+    await page.getByTestId('bot-wait-finish').click()
     await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
     expect(turnRequests).toHaveLength(1)
     expect(turnRequests[0]).not.toHaveProperty('p2')
@@ -281,17 +291,16 @@ test.describe('Simulate mode', () => {
 
     // The reveal names P2's one action. It must never show the odds of that
     // action or P2's win probability.
+    await badge.getByRole('button').first().click()
     const reveal = page.getByTestId('p2-reveal')
     await expect(reveal).toBeVisible()
     await expect(reveal).toContainText('Player 2 played')
     await expect(reveal).toContainText('from the solver strategy')
-    await reveal.getByRole('button').first().click()
-    const revealDetail = page.getByTestId('p2-reveal-detail')
-    await expect(revealDetail).toContainText('Draw seed')
-    await expect(revealDetail).toContainText('ismcts')
-    await expect(revealDetail).toContainText('replacement depth 2')
-    await expect(revealDetail).not.toContainText('%')
-    await expect(revealDetail).not.toContainText(/win/i)
+    await expect(reveal).toContainText('Draw seed')
+    await expect(reveal).toContainText('ismcts')
+    await expect(reveal).toContainText('replacement depth 2')
+    await expect(reveal).not.toContainText('%')
+    await expect(reveal).not.toContainText(/win/i)
     await page.screenshot({
       path: testInfo.outputPath('bot-turn-resolved.png'),
       fullPage: true,
@@ -347,6 +356,14 @@ test.describe('Simulate mode', () => {
     // mode.
     await pickSelectOption(page, 'Information mode', 'Perfect Information')
 
+    // Keep this UI test small. Solver correctness and unrestricted execution
+    // have Rust tests.
+    await page.route('**/api/battles', async (route) => {
+      const request = route.request().postDataJSON()
+      request.botP2.nodeBudget = 20
+      await route.continue({ postData: JSON.stringify(request) })
+    })
+
     const picker = page.getByTestId('bot-picker')
     const openOption = (name: string) =>
       picker
@@ -382,13 +399,14 @@ test.describe('Simulate mode', () => {
     await expect(previewMons.first()).toBeVisible({ timeout: 10_000 })
     await expect(page.getByTestId('bot-badge-reveal')).toHaveText('strategy shown')
 
-    // The first analysis answer shows the full preview strategy before P1 picks.
+    // Expand the one solver card. The first analysis answer shows the full
+    // preview strategy before P1 picks.
+    await page.getByTestId('bot-badge').getByRole('button').first().click()
     const reveal = page.getByTestId('p2-reveal')
     await expect(reveal).toContainText('Player 2 strategy', { timeout: 20_000 })
-    await reveal.getByRole('button').first().click()
     const detail = page.getByTestId('p2-reveal-detail')
     const currentStrategy = page.getByTestId('p2-strategy-current')
-    await expect(currentStrategy).toContainText("Player 2's bring and lead now")
+    await expect(currentStrategy).toContainText('Player 2 strategy now')
     await expect(currentStrategy).toContainText('Lead')
     await expect(currentStrategy).toContainText('%')
     await page.screenshot({
@@ -404,9 +422,9 @@ test.describe('Simulate mode', () => {
     // The resolved preview keeps its source strategy and starts the battle search.
     await expect(page.getByTestId('move-option').first()).toBeVisible({ timeout: 10_000 })
     const drawnStrategy = page.getByTestId('p2-strategy-drawn')
-    await expect(drawnStrategy).toContainText('The strategy of the last draw')
+    await expect(drawnStrategy).toContainText('Strategy of the last draw')
     await expect(drawnStrategy).toContainText('\u25b8')
-    await expect(currentStrategy).toContainText("Player 2's strategy now", { timeout: 20_000 })
+    await expect(currentStrategy).toContainText('Player 2 strategy now', { timeout: 20_000 })
     await page.screenshot({
       path: testInfo.outputPath('opponent-strategy-battle.png'),
       fullPage: true,
@@ -447,8 +465,8 @@ test.describe('Simulate mode', () => {
     await page.waitForTimeout(150)
     await expect(detail).not.toContainText('STALE STRATEGY FROM THE PREVIOUS POSITION')
     await expect(reveal).toContainText('from the solver strategy')
-    await expect(detail).toContainText('doubleOracle')
-    await expect(detail).toContainText('turn 1')
+    await expect(reveal).toContainText('doubleOracle')
+    await expect(reveal).toContainText('turn 1')
     await expect(drawnStrategy).toContainText('%')
     // The strategy contains action rates, but it contains no solver win odds.
     await expect(detail).not.toContainText(/win/i)

@@ -261,15 +261,16 @@ fn resolve_bot_p2(
         request.algorithm = Some(name.to_string());
         name
     });
-    let profile = crate::bot::resolve("botP2", &request, damage_rolls, consider_crit).map_err(
-        |message| match chosen {
-            Some(name) => format!(
-                "{message}. botP2.algorithm named no algorithm, \
+    let profile =
+        crate::bot::resolve("botP2", &request, damage_rolls, consider_crit).map_err(|message| {
+            match chosen {
+                Some(name) => format!(
+                    "{message}. botP2.algorithm named no algorithm, \
                  so informationMode {mode_name:?} chose {name}"
-            ),
-            None => message,
-        },
-    )?;
+                ),
+                None => message,
+            }
+        })?;
     if !bot_algorithm_fits_mode(profile.search, mode) {
         return Err(bot_algorithm_mismatch(
             &profile.view.algorithm,
@@ -284,9 +285,11 @@ pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
 ) -> Response {
-    if let Some(message) =
-        side_count_error(req.active_per_side, req.brought_per_side, req.total_per_side)
-    {
+    if let Some(message) = side_count_error(
+        req.active_per_side,
+        req.brought_per_side,
+        req.total_per_side,
+    ) {
         return unprocessable(message);
     }
     if !(1..=16).contains(&req.damage_rolls) {
@@ -686,6 +689,18 @@ pub async fn get_analysis(State(app): State<AppState>, Path(id): Path<String>) -
     Json(crate::analysis::progress_dto(session)).into_response()
 }
 
+/// `POST /api/battles/{id}/analysis` keeps the strategy found so far.
+pub async fn finish_analysis(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+    let mut sessions = lock_sessions(&app);
+    let Some(session) = sessions.get_mut(&id) else {
+        return not_found();
+    };
+    if let Err(message) = session.analysis.finish_now() {
+        return error(StatusCode::CONFLICT, message);
+    }
+    Json(crate::analysis::progress_dto(session)).into_response()
+}
+
 pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {
     let removed = lock_sessions(&app).remove(&id).is_some();
     if removed {
@@ -1069,9 +1084,9 @@ mod tests {
     use super::bot_algorithm_mismatch;
     use super::catch_benchmark_panic;
     use super::default_bot_algorithm;
-    use super::resolve_bot_p2;
     use super::is_champions_teamsheet_species;
     use super::learnset_data_error;
+    use super::resolve_bot_p2;
     use super::roster_legality_error;
     use super::side_count_error;
     use crate::dto::{CreateBattleRequest, TurnRequest};
@@ -1125,7 +1140,10 @@ mod tests {
     fn an_empty_roster_is_accepted() {
         let empty: &[Species] = &[];
 
-        assert_eq!(roster_legality_error("p1Team", empty, &learnset_dex()), None);
+        assert_eq!(
+            roster_legality_error("p1Team", empty, &learnset_dex()),
+            None
+        );
     }
 
     #[test]
@@ -1141,9 +1159,8 @@ mod tests {
     /// must not hold a species that Champions leaves out.
     #[test]
     fn the_shipped_learnset_dex_matches_the_check() {
-        let dex = poke_rust::state::dex_data::parse_learnset_dex(
-            "../pokemon_info/showdownLearnsets.txt",
-        );
+        let dex =
+            poke_rust::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt");
         assert!(!dex.is_empty(), "the learnset dex must load");
 
         for species in [
@@ -1171,14 +1188,14 @@ mod tests {
 
     #[test]
     fn the_species_catalog_matches_roster_legality() {
-        let pokemon_dex = poke_rust::state::dex_data::parse_pokemon_dex(
-            "../pokemon_info/showdownDex.txt",
-        );
-        let learnset_dex = poke_rust::state::dex_data::parse_learnset_dex(
-            "../pokemon_info/showdownLearnsets.txt",
-        );
+        let pokemon_dex =
+            poke_rust::state::dex_data::parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let learnset_dex =
+            poke_rust::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt");
         let listed = |species: &Species| {
-            let data = pokemon_dex.get(species).expect("the species must have dex data");
+            let data = pokemon_dex
+                .get(species)
+                .expect("the species must have dex data");
             is_champions_teamsheet_species(species, data, &learnset_dex)
         };
 
@@ -1235,10 +1252,7 @@ mod tests {
 
     #[test]
     fn a_roster_above_six_is_rejected() {
-        assert_eq!(
-            side_count_error(2, 4, 7),
-            Some("totalPerSide must be <= 6")
-        );
+        assert_eq!(side_count_error(2, 4, 7), Some("totalPerSide must be <= 6"));
     }
 
     #[test]
@@ -1352,7 +1366,12 @@ mod tests {
 
     #[test]
     fn a_true_position_search_fits_only_perfect_information() {
-        for name in ["doubleOracle", "serializedBounds", "backwardInduction", "mcts"] {
+        for name in [
+            "doubleOracle",
+            "serializedBounds",
+            "backwardInduction",
+            "mcts",
+        ] {
             let search = search_of(name);
             assert!(
                 bot_algorithm_fits_mode(search, InformationMode::PerfectInformation),
@@ -1373,11 +1392,8 @@ mod tests {
 
     #[test]
     fn each_mismatch_message_names_the_algorithm_and_the_mode() {
-        let belief = bot_algorithm_mismatch(
-            "mccfr",
-            "perfect",
-            InformationMode::PerfectInformation,
-        );
+        let belief =
+            bot_algorithm_mismatch("mccfr", "perfect", InformationMode::PerfectInformation);
         assert!(belief.starts_with("botP2.algorithm: mccfr"), "{belief}");
         assert!(belief.contains("\"perfect\""), "{belief}");
         assert!(belief.contains("searches a belief"), "{belief}");
@@ -1387,7 +1403,10 @@ mod tests {
             "closedSheet",
             InformationMode::ClosedTeamSheet,
         );
-        assert!(exact.starts_with("botP2.algorithm: doubleOracle"), "{exact}");
+        assert!(
+            exact.starts_with("botP2.algorithm: doubleOracle"),
+            "{exact}"
+        );
         assert!(exact.contains("\"closedSheet\""), "{exact}");
         assert!(exact.contains("reads the true position"), "{exact}");
     }
@@ -1452,8 +1471,14 @@ mod tests {
             algorithm: Some("doubleOracle".to_string()),
             ..crate::bot::BotProfileRequest::default()
         };
-        let message = resolve_bot_p2(&exact, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
-            .expect_err("an exact search cannot control P2 under the fog of war");
+        let message = resolve_bot_p2(
+            &exact,
+            InformationMode::ClosedTeamSheet,
+            "closedSheet",
+            16,
+            true,
+        )
+        .expect_err("an exact search cannot control P2 under the fog of war");
         assert!(message.contains("reads the true position"), "{message}");
 
         let belief = crate::bot::BotProfileRequest {
@@ -1482,9 +1507,14 @@ mod tests {
             node_budget: Some(1_000),
             ..crate::bot::BotProfileRequest::default()
         };
-        let message =
-            resolve_bot_p2(&request, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
-                .expect_err("a node budget applies only to an exact algorithm");
+        let message = resolve_bot_p2(
+            &request,
+            InformationMode::ClosedTeamSheet,
+            "closedSheet",
+            16,
+            true,
+        )
+        .expect_err("a node budget applies only to an exact algorithm");
         assert!(message.starts_with("botP2.nodeBudget"), "{message}");
         assert!(message.contains("chose ismcts"), "{message}");
         assert!(message.contains("\"closedSheet\""), "{message}");
@@ -1498,9 +1528,14 @@ mod tests {
             node_budget: Some(1_000),
             ..crate::bot::BotProfileRequest::default()
         };
-        let message =
-            resolve_bot_p2(&request, InformationMode::ClosedTeamSheet, "closedSheet", 16, true)
-                .expect_err("a node budget applies only to an exact algorithm");
+        let message = resolve_bot_p2(
+            &request,
+            InformationMode::ClosedTeamSheet,
+            "closedSheet",
+            16,
+            true,
+        )
+        .expect_err("a node budget applies only to an exact algorithm");
         assert!(message.starts_with("botP2.nodeBudget"), "{message}");
         assert!(!message.contains("chose"), "{message}");
     }

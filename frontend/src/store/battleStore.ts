@@ -95,6 +95,8 @@ interface BattleStore {
   goBack: () => void
   /** Stops the wait for the P2 search and returns the move choice. */
   cancelBotWait: () => void
+  /** Stops the search and keeps its current strategy. */
+  finishBotSearch: () => Promise<void>
   /** Reads P2's strategy for the current position.
    *
    * Does nothing without a battle, and nothing without `revealStrategy`. The
@@ -122,10 +124,8 @@ const BOT_NO_ANSWER =
 /**
  * Waits for the search that supplies Player 2's strategy.
  *
- * The wait ends when the job stops, and no fixed limit ends it early. A search
- * that runs past its own time limit therefore still supplies the strategy. A
- * turn simulation that already runs cannot stop, which is why that overrun
- * happens.
+ * The wait ends when the job stops. No fixed limit ends it early. The profile
+ * time is an estimate and does not stop the search.
  *
  * `shouldStop` returns true when Player 1 cancels the wait.
  */
@@ -566,6 +566,16 @@ export const useBattle = create<BattleStore>((set, get) => {
       // itself keeps running on the server, so the next submission can read its
       // answer.
       if (get().waitingForBot) set({ botWaitCancelled: true })
+    },
+
+    finishBotSearch: async () => {
+      const { battleId, waitingForBot } = get()
+      if (!battleId || !waitingForBot) return
+      try {
+        await api.finishAnalysis(battleId)
+      } catch (err) {
+        set({ error: err instanceof Error ? err.message : String(err) })
+      }
     },
 
     togglePreviewPick: (index) => {

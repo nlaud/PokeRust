@@ -82,6 +82,11 @@ export function getAnalysis(battleId: string): Promise<AnalysisProgressResponse>
   return request(`/api/battles/${battleId}/analysis`)
 }
 
+/** Stops the search and keeps the strategy that it has found. */
+export function finishAnalysis(battleId: string): Promise<AnalysisProgressResponse> {
+  return request(`/api/battles/${battleId}/analysis`, { method: 'POST' })
+}
+
 export function deleteBattle(battleId: string): Promise<void> {
   return request(`/api/battles/${battleId}`, { method: 'DELETE' })
 }

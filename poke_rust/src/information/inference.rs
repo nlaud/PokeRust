@@ -104,9 +104,10 @@ impl Default for InferenceConfig {
 
 impl InferenceConfig {
     /// Returns `true` if `item` is permitted under the configured item whitelist.
+    /// A whitelist names held items. It does not need to name an empty item slot.
     /// When no whitelist is set every item is permitted.
     pub(crate) fn legal_item_ok(&self, item: &Item) -> bool {
-        self.legal_items.as_ref().is_none_or(|l| l.contains(item))
+        *item == Item::None || self.legal_items.as_ref().is_none_or(|l| l.contains(item))
     }
 }
 

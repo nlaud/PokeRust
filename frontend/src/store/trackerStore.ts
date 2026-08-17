@@ -340,8 +340,8 @@ export const useTracker = create<TrackerStore>((set, get) => ({
     try {
       await api.stopTrackerAnalysis(trackerId)
     } catch {
-      // The panel is already closed. A failed stop leaves one job to expire on
-      // its own time limit.
+      // The panel is already closed. A failed stop can leave one job running
+      // until another state change cancels it.
     }
   },
 

@@ -44,6 +44,28 @@ Write `SCREENSHOTS: none` when the run captured no screenshot. The main thread
 shows each listed file to the user. The screenshot block does not replace the
 contract line. Write both.
 
+Put a next-item block directly before the screenshot block in a `DONE:` report:
+
+```text
+NEXT:
+1. <section title> — <item text> (<count> sub-bullets)
+2. <section title> — <item text> (<count> sub-bullets)
+3. <section title> — <item text> (<count> sub-bullets)
+```
+
+Read `TODO.md` again after section 11 to build this block. Section 8 already
+removed the finished item, so the file holds only open work. Take the next three
+top-level `- [ ]` items in file order. Start at the first section that still
+holds an unchecked item. Count only the sub-bullets of each item.
+
+List fewer than three items when the file holds fewer. Write `NEXT: none` when
+`TODO.md` holds no unchecked item.
+
+Write `NEXT: none` in a `PAUSED:` report and in a `BLOCKED:` report. Those runs
+did not finish the current item, so the next item did not change.
+
+The next-item block does not replace the contract line. Write both.
+
 ## Temporary files
 
 A run writes files that are not project work. These files are temporary
@@ -79,7 +101,8 @@ Read `.claude/todo/state.json`.
 
 If the file exists, a task is active. Do these steps:
 
-1. Read `stage` and `task` from the file.
+1. Read `stage`, `task`, `subtasks`, and `subtasks_done` from the file. The
+   `subtasks` list holds the full scope of the active task.
 2. Read the `latest_message` field of the handoff block. It holds the answer of
    the user to your last question.
 3. Go to the section for that stage. Continue there.
@@ -106,16 +129,31 @@ change that you did not make, and it stops the loop for no reason.
 ## 2. Choose the task
 
 If the handoff block holds argument text, use that text as the task. Go to
-step 7.
+step 8.
 
 1. Read `TODO.md` at the repository root.
 2. Take the first `## ` section. This is the topmost major element.
-3. Take the first `- [ ]` item in that section.
-4. Read the indented sub-bullets under the item. They hold the acceptance rules.
+3. Take the first top-level `- [ ]` item in that section.
+4. Take every sub-bullet under that item. Take each nested level too.
 5. Read the prose paragraphs after the item list. They hold the rationale.
 6. If the section holds no `- [ ]` item, use the next `## ` section.
-7. Write `state.json` with the task, source, stage, and task-start usage.
-8. Quote the chosen task in the approval summary.
+7. Write `state.json` with the task, the sub-bullet list, the source, the stage,
+   and the task-start usage.
+8. Quote the chosen item and every sub-bullet in the approval summary.
+
+The item and all of its sub-bullets are one task. One run does all of them.
+
+A sub-bullet is a part of the item. It is not a separate task, and it is not an
+acceptance rule alone. Do not stop after the first sub-bullet. Do not leave a
+sub-bullet for a later run.
+
+Write the full sub-bullet list in the `subtasks` field of `state.json`. Keep the
+nesting order of the file. The next run reads that list to find the remaining
+work.
+
+If the sub-bullets are too large for one run, say so in the approval summary.
+Give the count and the reason. Ask the user which sub-bullets to cut. Do not cut
+a sub-bullet yourself.
 
 ## 3. Research
 
@@ -142,6 +180,10 @@ Use these sections:
 - **Reuse** — existing functions to call, with their paths.
 - **Verification** — the exact commands, and the expected result.
 - **Risks** — what could break, and the invariant that protects it.
+
+Cover every sub-bullet of the task in the plan. Name the sub-bullet that each
+file change satisfies. A sub-bullet with no plan text is a gap. Close it before
+you ask for an approval.
 
 Use the `ste-writing` skill for the plan text. Use strict mode.
 
@@ -187,6 +229,9 @@ Usage: Daily/5h <remaining>% left | Weekly <remaining>% left
 4. Use the `ste-writing` skill for every comment and document you write.
 5. Update the progress log after each file that you finish.
 6. Set `Now:` to the next file or action before you start it.
+7. Implement every sub-bullet of the task. The task ends when the last
+   sub-bullet is done.
+8. Record the done sub-bullet count in the progress log after each sub-bullet.
 
 ## 7. Verify the implementation
 
@@ -207,8 +252,9 @@ Set the stage to `committing`.
 ## 8. Commit the review target
 
 1. Stay on the current branch. Create no branch. Push nothing.
-2. If the task came from `TODO.md`, remove the finished item from `TODO.md`.
-   The file says to remove completed work.
+2. If the task came from `TODO.md`, remove the finished item and every one of
+   its sub-bullets from `TODO.md`. The file says to remove completed work.
+   Remove the `## ` section too when the item was its last item.
 3. Stage only the files that this task changed. Include `TODO.md` when step 2
    changed it.
 4. Never stage `.claude/todo/`. It holds loop state, not project work.
@@ -371,11 +417,16 @@ Return a report with these facts:
 
 - The commit hash and subject.
 - The count of changed files.
+- The done sub-bullet count, and the total sub-bullet count of the item.
 - The Codex review result and any fixes that Codex made.
 - The test result and the clippy result.
 - The Playwright result and the screenshot paths.
 - The task-start and task-end usage limits.
 - Any work that you left undone.
+
+End the report with the next-item block, the screenshot block, and the contract
+line, in that order. Read the section *Return contract* for the shape of each
+block.
 
 The main thread prints this report and sends the push notification. Return
 `DONE:` as the last line.
@@ -465,7 +516,7 @@ todo — Split nature_spread_coherence into two controls
 Now: Running tracker-input.spec.ts with Playwright
 Usage: Daily/5h 68% left | Weekly 57% left
 [5/12] Approval — plan approved 12:15
-[6/12] Implement — 2 files of 4 done
+[6/12] Implement — 2 sub-bullets of 3 done, 2 files of 4 done
 [7/12] Verify — tests and clippy passed
 [8/12] Commit — created the review target
 [9/12] Codex review — fixed one edge case
@@ -523,6 +574,12 @@ Path: `.claude/todo/state.json`
 ```json
 {
   "task": "Split nature_spread_coherence into two controls",
+  "subtasks": [
+    "Add a separate nature control",
+    "Add a separate spread control",
+    "Keep the old flag as an alias"
+  ],
+  "subtasks_done": 1,
   "source": "todo",
   "stage": "awaiting-approval",
   "review_commit": null,
@@ -539,6 +596,10 @@ Valid stages: `researching`, `awaiting-approval`, `implementing`, `verifying`,
 `committing`, `reviewing`, `reverifying`, `finalizing`.
 
 Write the file after every stage change. The next run reads it.
+
+`subtasks` holds every sub-bullet of the item. `subtasks_done` holds the count
+of finished sub-bullets. Update `subtasks_done` after each sub-bullet. Do not
+delete an entry from `subtasks`.
 
 This file is the only memory between runs. A new subagent starts with no
 conversation history. Record every fact that the next run needs.

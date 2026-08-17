@@ -4,16 +4,6 @@ Design notes live in the documentation.
 `poke_rust/src/solver/README.md` explains the solver targets, the algorithms,
 and the analysis jobs.
 
-# Fixes
-
-## Solver Bugs
-- [ ] Do all of the following.
-  - [ ] Update the UI for both surfaces of the solver so that it is not two separate containers it is juts one with a dropdown
-  - [ ] Solver settings in tracker should not allow for exact solvers, since that doesnt make sense within context of not having all the information
-  - [ ] Simulator bots should not have to think when there is only one possible move -- It should just pick that move
-  - [ ] Solver solutions are generally not better than random guessing especially on high modes, you should investigate this and come up with a solution yourself. Running out of time is currently really bad, especially when you run out on lower depths. We should double the time limit for high effort. 
-  - [ ]I think generally we should remove the time cap, support a choose current move that just ends the search early using the current latest found strategy, and use these as time estimates instead (Percent should be capped at 99% until actual strategy is found). They should still be doubled I think.
-
 # New features
 
 ## Add solver strategy info to frontend

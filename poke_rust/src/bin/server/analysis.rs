@@ -13,9 +13,9 @@
 //!
 //! Every search reads the cancel flag during the search, so a raised flag stops
 //! the work rather than only the start of it. A cancelled search still returns
-//! an answer, and that answer covers only the work that finished. The task
-//! therefore drops it: a partial answer must not replace the last complete
-//! checkpoint.
+//! an answer, and that answer covers only the work that finished. State changes
+//! drop that partial answer. An explicit finish request keeps it as the current
+//! strategy.
 //!
 //! P1 reads `GET /api/battles/{id}/analysis` during a battle, so the progress
 //! view holds no P2 action, no P2 win odds, no count that divides out P2's
@@ -35,6 +35,7 @@
 //! at all. The rules above still hold for every session that keeps the default.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -174,6 +175,8 @@ struct RunningJob {
     /// Every search reads this flag at its own check points. The ticket check in
     /// [`AnalysisState::accept`] covers the final race.
     cancel: CancelFlag,
+    /// True when the player asked the job to return its current strategy.
+    finish_requested: Arc<AtomicBool>,
 }
 
 /// Identifies one analysis job and carries its cancel flag.
@@ -182,6 +185,13 @@ struct JobTicket {
     id: u64,
     generation: u64,
     cancel: CancelFlag,
+    finish_requested: Arc<AtomicBool>,
+}
+
+impl JobTicket {
+    fn should_publish_cancelled_result(&self) -> bool {
+        self.finish_requested.load(Ordering::Acquire)
+    }
 }
 
 /// The analysis record of one session.
@@ -221,18 +231,34 @@ impl AnalysisState {
         let id = self.next_job_id;
         self.next_job_id = self.next_job_id.wrapping_add(1);
         let cancel = CancelFlag::new();
+        let finish_requested = Arc::new(AtomicBool::new(false));
         self.running = Some(RunningJob {
             id,
             generation: self.generation,
             started: Instant::now(),
             cancel: cancel.clone(),
+            finish_requested: Arc::clone(&finish_requested),
         });
         self.last_error = None;
         JobTicket {
             id,
             generation: self.generation,
             cancel,
+            finish_requested,
         }
+    }
+
+    /// Stops the current search and keeps the strategy that it has found.
+    pub fn finish_now(&mut self) -> Result<(), String> {
+        if let Some(job) = &self.running {
+            job.finish_requested.store(true, Ordering::Release);
+            job.cancel.cancel();
+            return Ok(());
+        }
+        if self.current_checkpoint().is_some() {
+            return Ok(());
+        }
+        Err("analysis: no current search or strategy is available".to_string())
     }
 
     /// Stores the result of one job.
@@ -513,7 +539,10 @@ fn drawn_index<T>(kept: &[(usize, &T)], drawn: Option<usize>) -> Option<usize> {
 ///
 /// The session holds P2's own team, so every species is known. An index outside
 /// the roster cannot happen, and the fallback keeps the row complete.
-fn roster_names(mons: &[poke_rust::state::pokemon::PokemonState], indices: &[usize]) -> Vec<String> {
+fn roster_names(
+    mons: &[poke_rust::state::pokemon::PokemonState],
+    indices: &[usize],
+) -> Vec<String> {
     indices
         .iter()
         .map(|&index| match mons.get(index) {
@@ -587,6 +616,11 @@ pub fn start_job(
     };
 
     let job = session.analysis.start();
+    if let Some(checkpoint) = forced_checkpoint(session, &dexes, seed, replay.clone()) {
+        let line = session.analysis.accept(&job, Ok(checkpoint));
+        eprintln!("{line}");
+        return;
+    }
     let battle_id = battle_id.to_string();
     eprintln!(
         "analysis job {} (generation {}): start, algorithm {}, preset {}, depth {}, {}",
@@ -598,14 +632,14 @@ pub fn start_job(
         // `resolve` fills this field for every profile, and `Debug` would print
         // `Some(20000)` where the line names a count of milliseconds.
         time_ms.map_or_else(
-            || "no time limit".to_string(),
-            |limit| format!("time {limit} ms")
+            || "no time estimate".to_string(),
+            |estimate| format!("estimated time {estimate} ms")
         )
     );
 
     tokio::task::spawn_blocking(move || {
         // A cancel before the search saves the whole search.
-        if job.cancel.is_cancelled() {
+        if job.cancel.is_cancelled() && !job.should_publish_cancelled_result() {
             eprintln!(
                 "analysis job {} (generation {}): cancelled before the search started",
                 job.id, job.generation
@@ -615,7 +649,6 @@ pub fn start_job(
         let outcome = run_search(
             search,
             seed,
-            time_ms,
             generation,
             &state,
             belief_p2.as_ref(),
@@ -630,7 +663,7 @@ pub fn start_job(
         // A partial answer must not replace the last complete checkpoint. A
         // cancelled job must also leave the record of the replacement job.
         // The ticket check in `accept` protects the race after this flag check.
-        if job.cancel.is_cancelled() {
+        if job.cancel.is_cancelled() && !job.should_publish_cancelled_result() {
             eprintln!(
                 "analysis job {} (generation {}): cancelled during the search, \
                  so it reports no result",
@@ -668,6 +701,76 @@ fn random_seed() -> u64 {
     rand::random::<u64>() & MAX_SAFE_INTEGER
 }
 
+/// Returns an immediate checkpoint when Player 2 has one legal choice.
+fn forced_checkpoint(
+    session: &BattleSession,
+    dexes: &Dexes,
+    seed: u64,
+    mut replay: AnalysisReplay,
+) -> Option<AnalysisCheckpoint> {
+    let (turn_number, strategy) = match &session.state {
+        MatchState::BattleState(battle) => {
+            let joint = solver::actions::joint_actions(
+                battle,
+                Player::P2,
+                solver::actions::phase_of(&session.state),
+                &dexes.move_dex,
+                &dexes.pokemon_dex,
+                None,
+                false,
+            );
+            let legal: Vec<Vec<BattleCommand>> = joint
+                .actions
+                .into_iter()
+                .filter(|commands| accept(session, dexes, commands).is_some())
+                .collect();
+            if legal.len() != 1 {
+                return None;
+            }
+            (
+                battle.turn_number,
+                P2Strategy::Battle(vec![JointActionProb {
+                    commands: legal.into_iter().next().unwrap(),
+                    probability: 1.0,
+                }]),
+            )
+        }
+        MatchState::TeamPreviewState(preview) => {
+            let legal: Vec<TeamPreviewCommand> =
+                solver::preview::preview_choices(preview, Player::P2)
+                    .into_iter()
+                    .filter(|choice| accept_preview(session, dexes, choice).is_some())
+                    .collect();
+            if legal.len() != 1 {
+                return None;
+            }
+            (
+                0,
+                P2Strategy::Preview(vec![PreviewChoiceProb {
+                    choice: legal.into_iter().next().unwrap(),
+                    probability: 1.0,
+                }]),
+            )
+        }
+        MatchState::GameOverState { .. } => return None,
+    };
+    replay.turn_number = turn_number;
+    Some(AnalysisCheckpoint {
+        generation: session.analysis.generation(),
+        turn_number,
+        p2_win_odds: 0.5,
+        p2_strategy: strategy,
+        depth_reached: 0,
+        turns_simulated: 0,
+        nodes: 0,
+        elapsed: Duration::ZERO,
+        seed,
+        replay,
+        strategy_is_playable: true,
+        warnings: vec!["Player 2 has one legal choice, so the solver did not search.".to_string()],
+    })
+}
+
 /// Copies the inference rules of a session for a belief search.
 ///
 /// `InferenceConfig` lives in the engine, and the determinizer needs an owned
@@ -693,7 +796,6 @@ pub fn clone_inference_config(config: &InferenceConfig) -> InferenceConfig {
 fn run_search(
     search: BotSearchConfig,
     seed: u64,
-    time_ms: Option<u64>,
     generation: u64,
     state: &MatchState,
     belief_p2: Option<&UnknownMatchState>,
@@ -719,7 +821,7 @@ fn run_search(
     // report it as an ordinary job failure.
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match state {
         MatchState::TeamPreviewState(preview) => one_preview_search(
-            search, seed, time_ms, preview, belief_p2, dexes, meta, inference, cancel,
+            search, seed, preview, belief_p2, dexes, meta, inference, cancel,
         ),
         _ => one_search(
             search, seed, state, belief_p2, dexes, meta, inference, cancel,
@@ -741,18 +843,7 @@ fn run_search(
     if let Some(line) = perfect_information_warning(search, belief_p2.is_some()) {
         checkpoint.warnings.push(line);
     }
-    // An exact search maps the limit to `SolveConfig::deadline`, and a sampling
-    // search holds no deadline field. Neither one stops on the exact
-    // millisecond, so measure the whole job and report the overrun.
-    if let Some(limit) = time_ms {
-        let elapsed = started.elapsed();
-        if elapsed > Duration::from_millis(limit) {
-            checkpoint.warnings.push(format!(
-                "The search took {} ms, which is past the {limit} ms limit.",
-                elapsed.as_millis()
-            ));
-        }
-    }
+    let _ = started;
     Ok(checkpoint)
 }
 
@@ -870,13 +961,6 @@ fn one_search(
     }
 }
 
-/// The wall-clock limit of a preview search when the profile carries none.
-///
-/// `bot::resolve` fills `time_ms` for every profile, so this value is a guard
-/// rather than a normal path. A doubles preview holds 32,400 cells, and an
-/// unbounded solve of that matrix can run for hours.
-const PREVIEW_FALLBACK_MS: u64 = 2_000;
-
 /// Names the guess that a one-world preview search rests on.
 ///
 /// The preview solver reads concrete worlds rather than the belief, so a
@@ -913,7 +997,6 @@ const PREVIEW_MEAN_MATRIX_NOTE: &str = "The preview search solved the mean matri
 fn one_preview_search(
     search: BotSearchConfig,
     seed: u64,
-    time_ms: Option<u64>,
     preview: &TeamPreviewState,
     belief_p2: Option<&UnknownMatchState>,
     dexes: &Dexes,
@@ -921,12 +1004,11 @@ fn one_preview_search(
     inference: Option<InferenceConfig>,
     cancel: &CancelFlag,
 ) -> Result<AnalysisCheckpoint, String> {
-    let deadline = Duration::from_millis(time_ms.unwrap_or(PREVIEW_FALLBACK_MS));
-    let battle = preview_battle_config(search, deadline);
+    let battle = preview_battle_config(search);
     let depth = battle.depth;
     let config = PreviewConfig {
         battle,
-        deadline: Some(deadline),
+        deadline: None,
     };
 
     // Only a belief algorithm reads the belief, and a belief algorithm reads
@@ -1263,26 +1345,21 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
     match playable_checkpoint(&session.analysis) {
         Err(reason) => uniform_draw_line(generation, reason),
         Ok(checkpoint) => match battle_rows(&checkpoint.p2_strategy)
-            .and_then(|rows| sample_strategy(rows, &mut rng))
+            .and_then(|rows| sample_legal_strategy(session, dexes, rows, &mut rng))
         {
             None => uniform_draw_line(
                 generation,
-                "the strategy holds no action with a positive weight for this position",
+                "the strategy holds no legal action with a positive weight for this position",
             ),
-            Some((index, commands)) => match accept(session, dexes, commands) {
-                None => {
-                    uniform_draw_line(generation, "the legality check rejected the sampled action")
-                }
-                Some(command) => {
-                    return Ok(P2Draw {
-                        command,
-                        source: DrawSource::Strategy,
-                        seed,
-                        replay: Some(checkpoint.replay.clone()),
-                        strategy: revealed_strategy(session, checkpoint, index),
-                    });
-                }
-            },
+            Some((index, command)) => {
+                return Ok(P2Draw {
+                    command,
+                    source: DrawSource::Strategy,
+                    seed,
+                    replay: Some(checkpoint.replay.clone()),
+                    strategy: revealed_strategy(session, checkpoint, index),
+                });
+            }
         },
     }
 
@@ -1310,6 +1387,71 @@ pub fn draw_p2_command(session: &BattleSession, dexes: &Dexes) -> Result<P2Draw,
             strategy: None,
         })
         .ok_or_else(|| "P2 has no legal command right now".to_string())
+}
+
+/// Samples only strategy rows that the server accepts in the current state.
+/// The remaining weights are normalized by the weighted draw.
+fn sample_legal_strategy(
+    session: &BattleSession,
+    dexes: &Dexes,
+    rows: &[JointActionProb],
+    rng: &mut StdRng,
+) -> Option<(usize, PlayerCommand)> {
+    let legal: Vec<(usize, f64, PlayerCommand)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.probability.is_finite() && row.probability > 0.0)
+        .filter_map(|(index, row)| {
+            accept(session, dexes, &row.commands).map(|command| (index, row.probability, command))
+        })
+        .collect();
+    let total: f64 = legal.iter().map(|(_, weight, _)| *weight).sum();
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let mut roll = rng.gen_range(0.0..total);
+    for (index, weight, command) in &legal {
+        if roll < *weight {
+            return Some((*index, command.clone()));
+        }
+        roll -= *weight;
+    }
+    legal
+        .last()
+        .map(|(index, _, command)| (*index, command.clone()))
+}
+
+/// Samples only preview rows that the server accepts in the current state.
+/// The remaining weights are normalized by the weighted draw.
+fn sample_legal_preview_strategy(
+    session: &BattleSession,
+    dexes: &Dexes,
+    rows: &[PreviewChoiceProb],
+    rng: &mut StdRng,
+) -> Option<(usize, PlayerCommand)> {
+    let legal: Vec<(usize, f64, PlayerCommand)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.probability.is_finite() && row.probability > 0.0)
+        .filter_map(|(index, row)| {
+            accept_preview(session, dexes, &row.choice)
+                .map(|command| (index, row.probability, command))
+        })
+        .collect();
+    let total: f64 = legal.iter().map(|(_, weight, _)| *weight).sum();
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let mut roll = rng.gen_range(0.0..total);
+    for (index, weight, command) in &legal {
+        if roll < *weight {
+            return Some((*index, command.clone()));
+        }
+        roll -= *weight;
+    }
+    legal
+        .last()
+        .map(|(index, _, command)| (*index, command.clone()))
 }
 
 /// The strategy that one draw sampled from, for a session that reveals it.
@@ -1389,26 +1531,21 @@ fn draw_preview_command(
     match playable_checkpoint(&session.analysis) {
         Err(reason) => uniform_draw_line(generation, reason),
         Ok(checkpoint) => match preview_rows(&checkpoint.p2_strategy)
-            .and_then(|rows| sample_preview(rows, rng))
+            .and_then(|rows| sample_legal_preview_strategy(session, dexes, rows, rng))
         {
             None => uniform_draw_line(
                 generation,
-                "the strategy holds no choice with a positive weight for this position",
+                "the strategy holds no legal choice with a positive weight for this position",
             ),
-            Some((index, choice)) => match accept_preview(session, dexes, choice) {
-                None => {
-                    uniform_draw_line(generation, "the legality check rejected the sampled choice")
-                }
-                Some(command) => {
-                    return Ok(P2Draw {
-                        command,
-                        source: DrawSource::Strategy,
-                        seed,
-                        replay: Some(checkpoint.replay.clone()),
-                        strategy: revealed_strategy(session, checkpoint, index),
-                    });
-                }
-            },
+            Some((index, command)) => {
+                return Ok(P2Draw {
+                    command,
+                    source: DrawSource::Strategy,
+                    seed,
+                    replay: Some(checkpoint.replay.clone()),
+                    strategy: revealed_strategy(session, checkpoint, index),
+                });
+            }
         },
     }
 
@@ -1512,6 +1649,7 @@ fn mix_draw_seed(profile_seed: Option<u64>, generation: u64) -> u64 {
 ///
 /// Returns the index and the drawn row, so a reveal can identify it.
 /// Returns `None` when no finite positive weight exists.
+#[cfg(test)]
 fn sample_strategy<'a>(
     strategy: &'a [JointActionProb],
     rng: &mut StdRng,
@@ -1523,6 +1661,7 @@ fn sample_strategy<'a>(
 /// Draws one bring-and-lead choice from a preview strategy.
 ///
 /// The index and the weight rules are those of [`sample_strategy`].
+#[cfg(test)]
 fn sample_preview<'a>(
     strategy: &'a [PreviewChoiceProb],
     rng: &mut StdRng,
@@ -1535,6 +1674,7 @@ fn sample_preview<'a>(
 /// Returns the index and the drawn row.
 /// Returns `None` when no finite positive weight exists.
 /// A negative weight counts as zero.
+#[cfg(test)]
 fn sample_weighted<'a, T>(
     rows: &'a [T],
     weight: impl Fn(&T) -> f64,
@@ -1665,6 +1805,31 @@ mod tests {
         let view = state.progress();
         assert_eq!(view.generation, 1);
         assert!(view.checkpoint.unwrap().stale);
+    }
+
+    #[test]
+    fn finish_now_keeps_the_cancelled_jobs_result() {
+        let mut state = AnalysisState::default();
+        let job = state.start();
+
+        state.finish_now().unwrap();
+
+        assert!(job.cancel.is_cancelled());
+        assert!(job.should_publish_cancelled_result());
+        state.accept(&job, Ok(checkpoint(0, 1)));
+        assert_eq!(state.current_checkpoint().unwrap().turn_number, 1);
+    }
+
+    #[test]
+    fn invalidation_still_discards_an_early_result() {
+        let mut state = AnalysisState::default();
+        let job = state.start();
+        state.finish_now().unwrap();
+        state.invalidate();
+
+        state.accept(&job, Ok(checkpoint(0, 1)));
+
+        assert!(state.current_checkpoint().is_none());
     }
 
     #[test]
@@ -2329,7 +2494,10 @@ mod tests {
         let mut counts = [0u32; 2];
 
         for _ in 0..20_000 {
-            counts[sample_preview(&strategy, &mut rng).unwrap().1.active_indices[0]] += 1;
+            counts[sample_preview(&strategy, &mut rng)
+                .unwrap()
+                .1
+                .active_indices[0]] += 1;
         }
 
         let second = f64::from(counts[1]) / 20_000.0;
@@ -2456,13 +2624,13 @@ mod tests {
         use super::*;
         use crate::bot::{BotProfile, BotProfileRequest};
         use crate::session::SessionConfig;
+        use poke_rust::data::pokemon_move::PokemonMove;
+        use poke_rust::data::species::Species;
         use poke_rust::simulator::{simulate_turn, team_preview_state_from_team_strings};
         use poke_rust::state::battle::{AttackCommand, BattleState};
         use poke_rust::state::dex_data::{
             MoveData, PokemonData, parse_move_dex, parse_pokemon_dex,
         };
-        use poke_rust::data::pokemon_move::PokemonMove;
-        use poke_rust::data::species::Species;
         use std::sync::OnceLock;
 
         const TEAM_P1: &str = "Pikachu\nAbility: Static\nLevel: 50\n- Thunderbolt\n- Protect\n\n\
@@ -2472,6 +2640,7 @@ mod tests {
 
         static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
         static MOVE_DEX: OnceLock<HashMap<PokemonMove, MoveData>> = OnceLock::new();
+        static DEXES: OnceLock<Dexes> = OnceLock::new();
 
         fn pokemon_dex() -> &'static HashMap<Species, PokemonData> {
             POKEMON_DEX.get_or_init(|| parse_pokemon_dex("../pokemon_info/showdownDex.txt"))
@@ -2479,6 +2648,19 @@ mod tests {
 
         fn move_dex() -> &'static HashMap<PokemonMove, MoveData> {
             MOVE_DEX.get_or_init(|| parse_move_dex("../pokemon_info/showdownMoves.txt"))
+        }
+
+        fn dexes() -> &'static Dexes {
+            DEXES.get_or_init(|| Dexes {
+                pokemon_dex: parse_pokemon_dex("../pokemon_info/showdownDex.txt"),
+                move_dex: parse_move_dex("../pokemon_info/showdownMoves.txt"),
+                ability_dex: poke_rust::state::dex_data::parse_ability_dex(
+                    "../pokemon_info/showdownAbilities.txt",
+                ),
+                learnset_dex: poke_rust::state::dex_data::parse_learnset_dex(
+                    "../pokemon_info/showdownLearnsets.txt",
+                ),
+            })
         }
 
         /// A singles preview of two two-Pokemon rosters.
@@ -2698,8 +2880,7 @@ mod tests {
 
             // A drawn row that the zero-rate rule removed has no place in the
             // list, and the block says so rather than naming another row.
-            let dropped =
-                strategy_dto(&state, &battle_strategy([0.6, 0.0, 0.4]), Some(1)).unwrap();
+            let dropped = strategy_dto(&state, &battle_strategy([0.6, 0.0, 0.4]), Some(1)).unwrap();
             assert_eq!(dropped.drawn_index, None);
         }
 
@@ -2756,6 +2937,64 @@ mod tests {
             assert!(stored(&hidden).is_none());
             let revealed = stored(&open).expect("an open session reveals the draw");
             assert_eq!(revealed.drawn_index, Some(1));
+        }
+
+        #[test]
+        fn a_replacement_draw_skips_an_invalid_strategy_row() {
+            let mut battle = battle_state();
+            battle.p2_active_mons[0].hp = 0;
+            battle.p2_active_mons[0].fainted = true;
+            battle.turn_started = true;
+            battle.turn_ended = true;
+            let session = session(MatchState::BattleState(battle), false);
+            let rows = vec![
+                JointActionProb {
+                    commands: vec![BattleCommand::Pass],
+                    probability: 0.9,
+                },
+                JointActionProb {
+                    commands: vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })],
+                    probability: 0.1,
+                },
+            ];
+            let mut rng = StdRng::seed_from_u64(7);
+
+            let (index, command) = sample_legal_strategy(&session, dexes(), &rows, &mut rng)
+                .expect("the legal replacement remains");
+
+            assert_eq!(index, 1);
+            assert!(matches!(
+                command,
+                PlayerCommand::Battle(commands)
+                    if matches!(commands.as_slice(), [BattleCommand::Switch(command)] if command.party_index == 0)
+            ));
+        }
+
+        #[test]
+        fn one_replacement_choice_skips_the_search() {
+            let mut battle = battle_state();
+            battle.p2_active_mons[0].hp = 0;
+            battle.p2_active_mons[0].fainted = true;
+            battle.turn_started = true;
+            battle.turn_ended = true;
+            let session = session(MatchState::BattleState(battle), false);
+            let replay = AnalysisReplay {
+                generation: 0,
+                turn_number: 1,
+                search_seed: 7,
+                ..AnalysisReplay::default()
+            };
+
+            let checkpoint = forced_checkpoint(&session, dexes(), 7, replay)
+                .expect("one replacement produces an immediate strategy");
+
+            let P2Strategy::Battle(rows) = checkpoint.p2_strategy else {
+                panic!("the replacement must be a battle strategy");
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].probability, 1.0);
+            assert!(matches!(rows[0].commands[0], BattleCommand::Switch(_)));
+            assert_eq!(checkpoint.turns_simulated, 0);
         }
     }
 }

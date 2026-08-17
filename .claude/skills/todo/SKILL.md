@@ -1,6 +1,6 @@
 ---
 name: todo
-description: Take one task from TODO.md, or from the given text, then research it, write a plan, get the plan approved, implement it, and commit it on the current branch. Use this skill when the user types "/todo", or asks to "work the next TODO item", "take the top TODO and plan it", or "plan it and ping me for approval". The skill runs safely in a loop and finishes an active task before it starts a new one.
+description: Take the topmost item of TODO.md with all of its sub-bullets, or take the given text, then research it, write a plan, get the plan approved, implement it, and commit it on the current branch. Report the next three TODO items at the end. Use this skill when the user types "/todo", or asks to "work the next TODO item", "take the top TODO and plan it", or "plan it and ping me for approval". The skill runs safely in a loop and finishes an active task before it starts a new one.
 argument-hint: [task description]
 disable-model-invocation: true
 allowed-tools:
@@ -62,7 +62,8 @@ Handoff block:
 - arguments: <$ARGUMENTS, or the word none>
 
 You send no push notification. The main thread sends it.
-End your report with one line from the return contract in WORKFLOW.md.
+End your report with the next-item block, the screenshot block, and one line
+from the return contract in WORKFLOW.md, in that order.
 ```
 
 Start one subagent for each run. Never start two at the same time.
@@ -78,7 +79,7 @@ Map the last line of the subagent report to this action:
 |---|---|
 | `PAUSED: awaiting-approval` | Print the plan summary. Surface `.claude/todo/plan.md` with `SendUserFile`. Ask for an approval. |
 | `PAUSED: question` | Print the question and the options. |
-| `DONE: <hash>` | Print the hash, the subject, and the facts that the user must know. |
+| `DONE: <hash>` | Print the hash, the subject, and the facts that the user must know. Then print the next-item block. |
 | `BLOCKED: <error>` | Print the error and the repository state. |
 
 Print the facts that change what the user does next. A defect that the Codex
@@ -87,9 +88,25 @@ review found is one example. A limit that the run left in place is another.
 Never invent a result. If the subagent returns no contract line, do not guess
 the outcome. See the section *A run with no status*.
 
+### The next-item block
+
+A `DONE:` report holds a `NEXT:` block with the next three `TODO.md` items.
+Print that block under the heading `Next 3 TODO items`. Keep the order of the
+block.
+
+Print the items exactly as the subagent wrote them. Never invent an item, and
+never read `TODO.md` to build the list yourself. The subagent reads the file
+after it removes the finished item, so only its list is current.
+
+Print nothing for this section when the block reads `NEXT: none`.
+
+If a `DONE:` report holds no `NEXT:` block, ask the subagent for one with
+`SendMessage`.
+
 ## 4. Show the screenshots
 
-The subagent ends its report with a `SCREENSHOTS:` block. Read that block.
+Every subagent report holds a `SCREENSHOTS:` block near its end. Read that
+block.
 
 1. If the block lists one path or more, call `SendUserFile` with every path.
 2. Set `status` to `normal` and `display` to `render`.

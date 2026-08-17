@@ -18,8 +18,6 @@
 //! job, and `tracker_analysis.rs` owns the tracker job. Both read
 //! `BotProfile::search`.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 use poke_rust::solver::ismcts::IsmctsConfig;
@@ -119,9 +117,7 @@ impl BotPreset {
 
 /// Every limit of one preset.
 ///
-/// `time_ms` bounds the whole analysis job. An exact search also maps it to
-/// [`SolveConfig::deadline`]. The sampling searches hold no deadline field, so
-/// the job enforces the limit around the search.
+/// `time_ms` is the expected duration. It does not stop the search.
 #[derive(Debug, Clone, Copy)]
 struct PresetLimits {
     time_ms: u64,
@@ -138,8 +134,7 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// The limits of each preset.
 ///
-/// The interactive move limit is 45 seconds, so the strong preset stays under
-/// it. `TODO.md` records that limit.
+/// The client uses these times to estimate progress.
 fn preset_limits(preset: BotPreset) -> PresetLimits {
     match preset {
         BotPreset::Fast => PresetLimits {
@@ -159,7 +154,7 @@ fn preset_limits(preset: BotPreset) -> PresetLimits {
             max_actions_per_player: Some(12),
         },
         BotPreset::Strong => PresetLimits {
-            time_ms: 40_000,
+            time_ms: 80_000,
             node_budget: 4_000_000,
             depth: 3,
             iterations: 20_000,
@@ -258,10 +253,9 @@ impl BotSearchConfig {
     /// from one through the configured depth, so it needs this copy.
     pub fn with_depth(self, depth: u8) -> BotSearchConfig {
         match self {
-            BotSearchConfig::Exact(config) => BotSearchConfig::Exact(SolveConfig {
-                depth,
-                ..config
-            }),
+            BotSearchConfig::Exact(config) => {
+                BotSearchConfig::Exact(SolveConfig { depth, ..config })
+            }
             BotSearchConfig::Mcts(config) => BotSearchConfig::Mcts(MctsConfig { depth, ..config }),
             BotSearchConfig::Ismcts(config) => BotSearchConfig::Ismcts(IsmctsConfig {
                 search: MctsConfig {
@@ -277,20 +271,6 @@ impl BotSearchConfig {
                 },
                 ..config
             }),
-        }
-    }
-
-    /// The same configuration with a new wall-clock deadline.
-    ///
-    /// Only an exact search reads a deadline. A sampling search holds no
-    /// deadline field, so the caller bounds it around the search.
-    pub fn with_deadline(self, deadline: Duration) -> BotSearchConfig {
-        match self {
-            BotSearchConfig::Exact(config) => BotSearchConfig::Exact(SolveConfig {
-                deadline: Some(deadline),
-                ..config
-            }),
-            other => other,
         }
     }
 }
@@ -493,19 +473,10 @@ pub fn resolve(
             "The {budget}-node budget can stop a deeper pass. The bot then uses the last complete depth or a partial first pass."
         ));
     }
-    if exact {
-        approximations.push(format!(
-            "The {time_ms} ms limit can stop a deeper pass. The bot then uses the last complete depth or a partial first pass."
-        ));
-    } else {
-        approximations.push(format!("The search has a {time_ms} ms limit."));
-    }
-
     let search = build_search(
         algorithm,
         depth,
         replacement_depth,
-        time_ms,
         node_budget,
         iterations,
         particles,
@@ -542,7 +513,6 @@ fn build_search(
     algorithm: BotAlgorithm,
     depth: u8,
     replacement_depth: Option<u8>,
-    time_ms: u64,
     node_budget: Option<u64>,
     iterations: Option<u32>,
     particles: Option<usize>,
@@ -560,7 +530,7 @@ fn build_search(
             algorithm: algorithm.exact_algorithm(),
             max_actions_per_player,
             node_budget,
-            deadline: Some(Duration::from_millis(time_ms)),
+            deadline: None,
             ..SolveConfig::default()
         });
     }
@@ -618,7 +588,7 @@ mod tests {
         for (name, depth, budget, time) in [
             ("fast", 1, 50_000, 2_000),
             ("balanced", 2, 500_000, 10_000),
-            ("strong", 3, 4_000_000, 40_000),
+            ("strong", 3, 4_000_000, 80_000),
         ] {
             let profile = resolve("botP2", &request("doubleOracle", name), 16, true).unwrap();
             assert_eq!(profile.view.depth, depth);
@@ -765,23 +735,43 @@ mod tests {
     fn an_out_of_range_limit_is_rejected() {
         let mut req = request("doubleOracle", "fast");
         req.depth = Some(0);
-        assert!(resolve("botP2", &req, 16, true).unwrap_err().contains("depth"));
+        assert!(
+            resolve("botP2", &req, 16, true)
+                .unwrap_err()
+                .contains("depth")
+        );
 
         let mut req = request("ismcts", "fast");
         req.particles = Some(10_000);
-        assert!(resolve("botP2", &req, 16, true).unwrap_err().contains("particles"));
+        assert!(
+            resolve("botP2", &req, 16, true)
+                .unwrap_err()
+                .contains("particles")
+        );
 
         let mut req = request("mcts", "fast");
         req.seed = Some(MAX_SAFE_INTEGER + 1);
-        assert!(resolve("botP2", &req, 16, true).unwrap_err().contains("seed"));
+        assert!(
+            resolve("botP2", &req, 16, true)
+                .unwrap_err()
+                .contains("seed")
+        );
     }
 
     #[test]
     fn an_unknown_name_is_rejected() {
         let mut req = request("minimax", "fast");
-        assert!(resolve("botP2", &req, 16, true).unwrap_err().contains("algorithm"));
+        assert!(
+            resolve("botP2", &req, 16, true)
+                .unwrap_err()
+                .contains("algorithm")
+        );
         req = request("doubleOracle", "instant");
-        assert!(resolve("botP2", &req, 16, true).unwrap_err().contains("preset"));
+        assert!(
+            resolve("botP2", &req, 16, true)
+                .unwrap_err()
+                .contains("preset")
+        );
     }
 
     #[test]
@@ -817,7 +807,7 @@ mod tests {
         assert_eq!(config.depth, 1);
         assert!(config.iterative_deepening);
         assert_eq!(config.node_budget, Some(50_000));
-        assert_eq!(config.deadline, Some(Duration::from_millis(2_000)));
+        assert_eq!(config.deadline, None);
         assert_eq!(config.damage_rolls, 16);
         assert!(config.consider_crit);
     }
@@ -849,7 +839,7 @@ mod tests {
         assert!(!joined.contains("action(s)"));
         assert!(joined.contains("leaf evaluator"));
         assert!(joined.contains("node budget"));
-        assert!(joined.contains("ms"));
+        assert!(!joined.contains("time limit"));
     }
 
     #[test]
@@ -942,28 +932,16 @@ mod tests {
         }
     }
 
-    /// Only an exact search reads a deadline, so the copy must leave a sampling
-    /// configuration alone.
+    /// The profile time is an estimate. It must not create a solver deadline.
     #[test]
-    fn with_deadline_changes_the_exact_configuration_only() {
-        let exact = resolve("botP2", &request("doubleOracle", "balanced"), 16, true).unwrap();
-        let BotSearchConfig::Exact(config) = exact.search.with_deadline(Duration::from_millis(25))
-        else {
-            panic!("doubleOracle must build an exact configuration");
-        };
-        assert_eq!(config.deadline, Some(Duration::from_millis(25)));
-
-        let sampled = resolve("botP2", &request("ismcts", "balanced"), 16, true).unwrap();
-        let BotSearchConfig::Ismcts(before) = sampled.search else {
-            panic!("ismcts must build an ismcts configuration");
-        };
-        let BotSearchConfig::Ismcts(after) =
-            sampled.search.with_deadline(Duration::from_millis(25))
-        else {
-            panic!("a deadline must not change the variant");
-        };
-        assert_eq!(after.search.iterations, before.search.iterations);
-        assert_eq!(after.particles, before.particles);
+    fn profile_times_do_not_create_deadlines() {
+        for preset in ["fast", "balanced", "strong"] {
+            let profile = resolve("botP2", &request("doubleOracle", preset), 16, true).unwrap();
+            let BotSearchConfig::Exact(config) = profile.search else {
+                panic!("doubleOracle must build an exact configuration");
+            };
+            assert_eq!(config.deadline, None, "{preset}");
+        }
     }
 
     /// The reveal is a fog-of-war boundary, so an absent field must close it.
@@ -975,7 +953,12 @@ mod tests {
 
         let mut req = request("doubleOracle", "fast");
         req.reveal_strategy = Some(false);
-        assert!(!resolve("botP2", &req, 16, true).unwrap().view.reveal_strategy);
+        assert!(
+            !resolve("botP2", &req, 16, true)
+                .unwrap()
+                .view
+                .reveal_strategy
+        );
 
         req.reveal_strategy = Some(true);
         let revealed = resolve("botP2", &req, 16, true).unwrap();

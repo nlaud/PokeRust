@@ -15,26 +15,6 @@ import { useTracker } from '../../store/trackerStore'
 
 const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
   {
-    value: 'doubleOracle',
-    label: 'Double Oracle (exact)',
-    hint: 'Exact: it solves the drawn world to the depth horizon and returns the true mixed strategy of that horizon.',
-  },
-  {
-    value: 'serializedBounds',
-    label: 'Serialized Bounds (exact)',
-    hint: 'Exact: the same answer as Double Oracle through alpha-beta bounds.',
-  },
-  {
-    value: 'backwardInduction',
-    label: 'Backward Induction (exact)',
-    hint: 'Exact: it builds the whole payoff matrix of every turn. The slowest exact algorithm.',
-  },
-  {
-    value: 'mcts',
-    label: 'MCTS (sampled)',
-    hint: 'Sampled: it plays random lines through the drawn world and keeps the best. The answer is an estimate.',
-  },
-  {
     value: 'ismcts',
     label: 'ISMCTS (sampled belief)',
     hint: 'Sampled: it draws several possible opponents from the belief, then searches all of them.',
@@ -49,20 +29,8 @@ const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] 
 const PRESET_OPTIONS: { value: BotPreset; label: string; hint: string }[] = [
   { value: 'fast', label: 'Fast', hint: 'One turn deep, about a second.' },
   { value: 'balanced', label: 'Balanced', hint: 'Two turns deep, about ten seconds.' },
-  { value: 'strong', label: 'Strong', hint: 'Three turns deep, up to forty seconds.' },
+  { value: 'strong', label: 'Strong', hint: 'Three turns deep, about eighty seconds.' },
 ]
-
-/** The algorithms that enumerate every damage roll of every turn. */
-const EXACT_ALGORITHMS: BotAlgorithm[] = ['doubleOracle', 'serializedBounds', 'backwardInduction']
-
-/** Warns that an exact search costs much more than a sampled search.
- *
- * The solver enumerates every damage roll of every turn, so one turn of a
- * multi-hit or spread move holds many branches. The time limit now stops a turn
- * simulation that already runs, and the search scores that position statically.
- * A sampling algorithm draws one outcome, so it does not have this cost. */
-const EXACT_TIME_NOTE =
-  'An exact algorithm enumerates every damage roll, so it reaches a smaller depth in the same time. The time limit stops a turn that already runs, and the search scores that position from its evaluator.'
 
 /** How often the panel reads the newest rung while a search runs.
  *
@@ -96,34 +64,53 @@ function actionLabel(row: StrategyRow): string {
   return row.commands.map((option) => option.description).join(' · ')
 }
 
-/** Shows the depth in progress and the spent part of its time budget.
+/** Shows the depth in progress and its elapsed fraction of expected time.
  *
  * The server reports no node count while a search runs, so this figure is a
  * time estimate. The label says so. */
 function RungProgress({ rung, targetDepth }: { rung: TrackerAnalysisRung; targetDepth: number | null }) {
-  const percent = Math.round(100 * rung.fraction)
+  const progress = Math.min(99, Math.round(100 * rung.fraction))
   return (
     <div className="mt-1" data-testid="tracker-solver-progress">
       <div className="flex items-baseline justify-between gap-2 text-ink-muted">
         <span>
           Searching depth {rung.depth}
-          {targetDepth !== null ? ` of ${targetDepth}` : ''} · about {percent}% of its{' '}
-          {(rung.budgetMs / 1000).toFixed(1)} s budget
+          {targetDepth !== null ? ` of ${targetDepth}` : ''} · about {progress}% of its{' '}
+          {(rung.budgetMs / 1000).toFixed(1)} s estimate
         </span>
         <span className="shrink-0 font-mono">{(rung.elapsedMs / 1000).toFixed(1)} s</span>
       </div>
       <div className="mt-0.5 h-1 w-full overflow-hidden rounded-card bg-subtle">
         <div
           className="h-full bg-primary"
-          style={{ width: `${percent}%` }}
+          style={{ width: `${progress}%` }}
           role="progressbar"
-          aria-valuenow={percent}
+          aria-valuenow={progress}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-label="Search progress toward the next depth"
         />
       </div>
     </div>
+  )
+}
+
+/** Shows notes only when the user points to or focuses the label. */
+function NotesTooltip({ label, lines }: { label: string; lines: string[] }) {
+  if (lines.length === 0) return null
+  return (
+    <span className="group relative shrink-0">
+      <button type="button" className="text-ink-muted underline" aria-label={`Show ${label}`}>
+        {label}
+      </button>
+      <span className="pointer-events-none absolute bottom-full right-0 z-50 mb-1 hidden w-80 rounded-card border border-subtle bg-card p-2 text-left text-ink-muted shadow-lg group-hover:block group-focus-within:block">
+        {lines.map((line, index) => (
+          <span key={index} className="mb-1 block last:mb-0">
+            {line}
+          </span>
+        ))}
+      </span>
+    </span>
   )
 }
 
@@ -161,7 +148,6 @@ function CheckpointBody({
   previousP1WinOdds: number | null
   targetDepth: number | null
 }) {
-  const [showWarnings, setShowWarnings] = useState(false)
   const teamPreview = checkpoint.position === 'teamPreview'
   return (
     <div className="mt-2 border-t border-subtle pt-2">
@@ -215,20 +201,10 @@ function CheckpointBody({
 
       {checkpoint.warnings.length > 0 && (
         <div className="mt-2">
-          <button
-            onClick={() => setShowWarnings(!showWarnings)}
-            aria-expanded={showWarnings}
-            className="text-ink-muted underline"
-          >
-            {checkpoint.warnings.length} note(s) on this answer
-          </button>
-          {showWarnings && (
-            <ul className="mt-1 list-disc pl-4 text-ink-muted">
-              {checkpoint.warnings.map((line, index) => (
-                <li key={index}>{line}</li>
-              ))}
-            </ul>
-          )}
+          <NotesTooltip
+            label={`${checkpoint.warnings.length} note(s) on this answer`}
+            lines={checkpoint.warnings}
+          />
         </div>
       )}
     </div>
@@ -253,8 +229,7 @@ function CheckpointBody({
 export default function TrackerSolverPanel() {
   const { analysis, analysisError, startAnalysis, stopAnalysis, refreshAnalysis } = useTracker()
   const [open, setOpen] = useState(false)
-  // A sampling belief search is the default. It respects the fog of war, and it
-  // answers in a bounded time on every position. See `EXACT_TIME_NOTE`.
+  // A sampling belief search is the default. It respects the fog of war.
   const [algorithm, setAlgorithm] = useState<BotAlgorithm>('ismcts')
   const [preset, setPreset] = useState<BotPreset>('fast')
 
@@ -267,7 +242,8 @@ export default function TrackerSolverPanel() {
   const storedAlgorithm = analysis?.profile?.algorithm
   const storedPreset = analysis?.profile?.preset
   useEffect(() => {
-    if (storedAlgorithm) setAlgorithm(storedAlgorithm)
+    if (storedAlgorithm === 'ismcts' || storedAlgorithm === 'mccfr') setAlgorithm(storedAlgorithm)
+    else if (storedAlgorithm) setAlgorithm('ismcts')
     if (storedPreset) setPreset(storedPreset)
   }, [storedAlgorithm, storedPreset])
 
@@ -282,32 +258,38 @@ export default function TrackerSolverPanel() {
   }, [running, refreshAnalysis])
 
   return (
-    <div className="mx-1 mb-1 mt-1 text-[11px]" data-testid="tracker-solver-panel">
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        data-testid="tracker-solver-toggle"
-        className="flex w-full items-center gap-2 rounded-card border border-subtle bg-card px-2 py-1 text-left"
-      >
-        <span className="font-semibold">Solver</span>
-        {checkpoint && (
-          <span className="font-mono" data-testid="tracker-solver-summary">
-            You {percent(checkpoint.p1WinOdds)} · Opponent {percent(checkpoint.p2WinOdds)}
+    <div
+      className="mx-1 mb-1 mt-1 rounded-card border border-subtle bg-card text-[11px]"
+      data-testid="tracker-solver-panel"
+    >
+      <div className="flex items-center gap-2 px-2 py-1">
+        <button
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          data-testid="tracker-solver-toggle"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <span className="font-semibold">Solver</span>
+          {checkpoint && (
+            <span className="font-mono" data-testid="tracker-solver-summary">
+              You {percent(checkpoint.p1WinOdds)} · Opponent {percent(checkpoint.p2WinOdds)}
+            </span>
+          )}
+          {running && <span className="text-ink-muted">searching…</span>}
+          {!on && <span className="text-ink-muted">off</span>}
+          <span aria-hidden className="ml-auto text-ink-muted">
+            {open ? '▾' : '▸'}
           </span>
-        )}
-        {running && <span className="text-ink-muted">searching…</span>}
-        {!on && <span className="text-ink-muted">off</span>}
-        <span aria-hidden className="ml-auto text-ink-muted">
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
+        </button>
+        <NotesTooltip label="Approx." lines={analysis?.profile?.approximations ?? []} />
+      </div>
 
       {/* The panel grows upward, because the input bar sits at the bottom of
           the arena. The cap is the height of the window, less the room of that
           bar, so the controls and the answer need no scroll. Only an answer
           taller than the window scrolls. */}
       {open && (
-        <div className="mt-1 max-h-[calc(100vh-11rem)] overflow-y-auto rounded-card border border-subtle bg-card px-2 py-2">
+        <div className="max-h-[calc(100vh-11rem)] overflow-y-auto border-t border-subtle px-2 py-2">
           <div className="flex flex-wrap items-end gap-2">
             <label className="min-w-[11rem] flex-1">
               <span className="mb-0.5 block text-ink-muted">Algorithm</span>
@@ -348,12 +330,6 @@ export default function TrackerSolverPanel() {
           <p className="mt-1 text-ink-muted">
             {ALGORITHM_OPTIONS.find((o) => o.value === algorithm)?.hint}
           </p>
-          {EXACT_ALGORITHMS.includes(algorithm) && (
-            <p className="mt-1 text-warning" data-testid="tracker-solver-exact-note">
-              {EXACT_TIME_NOTE}
-            </p>
-          )}
-
           {analysisError && (
             <p className="mt-1 text-danger" data-testid="tracker-solver-request-error">
               {analysisError}

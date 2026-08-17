@@ -154,7 +154,7 @@ test.describe('Tracker solver panel', () => {
     await page.keyboard.press('Shift+Enter')
     await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
 
-    await pickSelectOption(page, 'Algorithm', 'MCTS (sampled)')
+    await pickSelectOption(page, 'Algorithm', 'ISMCTS (sampled belief)')
     await pickSelectOption(page, 'Preset', 'Fast')
     await page.getByTestId('tracker-solver-start').click()
 
@@ -167,7 +167,7 @@ test.describe('Tracker solver panel', () => {
     await panel.getByTestId('tracker-solver-toggle').click()
     await expect(
       panel.locator('label').filter({ hasText: 'Algorithm' }).getByRole('button').first(),
-    ).toContainText('MCTS (sampled)')
+    ).toContainText('ISMCTS (sampled belief)')
     await expect(
       panel.locator('label').filter({ hasText: 'Preset' }).getByRole('button').first(),
     ).toContainText('Fast')

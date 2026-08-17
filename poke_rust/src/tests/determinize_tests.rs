@@ -1256,6 +1256,34 @@ fn an_empty_item_domain_is_an_error() {
     );
 }
 
+/// A used item leaves an empty slot. The format whitelist lists held items,
+/// so it does not need an entry for that empty slot.
+#[test]
+fn a_used_focus_sash_determinizes_with_an_item_whitelist() {
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 0);
+    let opponent = &mut belief.p2_active_mons[0];
+    opponent.item = Unknown::Known(Item::None);
+    opponent.consumed_item = Some(Item::FocusSash);
+
+    let mut legal_items = HashSet::new();
+    legal_items.insert(Item::FocusSash);
+    let cfg = DeterminizeConfig {
+        inference: InferenceConfig {
+            legal_items: Some(legal_items),
+            ..InferenceConfig::default()
+        },
+        observer: Player::P1,
+        ..DeterminizeConfig::default()
+    };
+
+    let world = determinize_seeded(2, &belief, meta, pokemon_dex(), move_dex(), &cfg)
+        .expect("an empty current item slot is legal");
+    let mon = &world.state.p2_active_mons[0];
+    assert_eq!(mon.item, Item::None);
+    assert_eq!(mon.consumed_item, Some(Item::FocusSash));
+}
+
 #[test]
 fn a_learnset_rejection_is_not_bypassed() {
     with_meta!(meta);

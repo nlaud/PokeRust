@@ -377,6 +377,11 @@ pub async fn start_tracker_analysis(
             Ok(profile) => profile,
             Err(message) => return unprocessable(message),
         };
+    if !tracker_search_is_belief_aware(profile.search) {
+        return unprocessable(
+            "analysis.algorithm: tracker analysis requires ismcts or mccfr".to_string(),
+        );
+    }
 
     let mut sessions = lock(&app);
     let Some(session) = sessions.get_mut(&id) else {
@@ -393,6 +398,13 @@ pub async fn start_tracker_analysis(
         Arc::clone(&app.tracker_sessions),
     );
     Json(session.analysis.view(session.solver_profile.as_ref())).into_response()
+}
+
+fn tracker_search_is_belief_aware(search: crate::bot::BotSearchConfig) -> bool {
+    matches!(
+        search,
+        crate::bot::BotSearchConfig::Ismcts(_) | crate::bot::BotSearchConfig::Mccfr(_)
+    )
 }
 
 /// `GET /api/tracker/{id}/analysis` — the record of the solver panel.
@@ -453,9 +465,7 @@ fn split_into_turns(lines: Vec<TrackerLine>) -> Result<Vec<ParsedTurn>, String> 
             TrackerLine::Event(ev) => current.push(ev),
             TrackerLine::LeadsWithBack { event, back } => {
                 if declared_p1_back.is_some() {
-                    return Err(
-                        "one turn accepts one leads line with a 'back' clause".to_string()
-                    );
+                    return Err("one turn accepts one leads line with a 'back' clause".to_string());
                 }
                 declared_p1_back = Some(back);
                 current.push(event);
@@ -1233,6 +1243,30 @@ mod tests {
     use poke_rust::state::dex_data::PokemonData;
     use std::sync::OnceLock;
 
+    #[test]
+    fn tracker_accepts_only_belief_searches() {
+        for (name, allowed) in [
+            ("doubleOracle", false),
+            ("serializedBounds", false),
+            ("backwardInduction", false),
+            ("mcts", false),
+            ("ismcts", true),
+            ("mccfr", true),
+        ] {
+            let request = crate::bot::BotProfileRequest {
+                algorithm: Some(name.to_string()),
+                preset: Some("fast".to_string()),
+                ..Default::default()
+            };
+            let profile = crate::bot::resolve("analysis", &request, 4, false).unwrap();
+            assert_eq!(
+                tracker_search_is_belief_aware(profile.search),
+                allowed,
+                "{name}"
+            );
+        }
+    }
+
     static POKEMON_DEX: OnceLock<HashMap<Species, PokemonData>> = OnceLock::new();
     fn pokemon_dex() -> &'static HashMap<Species, PokemonData> {
         POKEMON_DEX.get_or_init(|| {
@@ -1858,7 +1892,10 @@ mod tests {
     #[test]
     fn a_back_species_off_the_player_one_roster_reports_a_line_error() {
         // Tyranitar is on the opponent's roster only.
-        let error = parse_error_of(&opening_belief(), "leads p pikachu back tyranitar o garchomp");
+        let error = parse_error_of(
+            &opening_belief(),
+            "leads p pikachu back tyranitar o garchomp",
+        );
         assert!(
             error.message.contains("not on the Player 1 roster"),
             "{error:?}"
@@ -1867,7 +1904,10 @@ mod tests {
 
     #[test]
     fn a_back_clause_on_the_opponent_side_reports_a_line_error() {
-        let error = parse_error_of(&opening_belief(), "leads p pikachu o garchomp back tyranitar");
+        let error = parse_error_of(
+            &opening_belief(),
+            "leads p pikachu o garchomp back tyranitar",
+        );
         assert!(error.message.contains("hidden"), "{error:?}");
     }
 

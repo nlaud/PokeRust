@@ -112,7 +112,10 @@ async fn main() {
         )
         .route("/api/battles/{id}/commands", get(routes::get_commands))
         .route("/api/battles/{id}/turn", post(routes::submit_turn))
-        .route("/api/battles/{id}/analysis", get(routes::get_analysis))
+        .route(
+            "/api/battles/{id}/analysis",
+            get(routes::get_analysis).post(routes::finish_analysis),
+        )
         .route("/api/tracker", post(tracker::create_tracker))
         .route(
             "/api/tracker/{id}",
