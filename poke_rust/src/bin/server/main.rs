@@ -8,6 +8,7 @@ mod dto;
 mod mapping;
 mod routes;
 mod session;
+mod solve;
 mod tracker;
 mod tracker_analysis;
 mod tracker_effects;
@@ -102,6 +103,7 @@ async fn main() {
         sprite_cache_dir,
         http: reqwest::Client::new(),
         benchmark_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        solve_jobs: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let app = Router::new()
@@ -131,6 +133,9 @@ async fn main() {
                 .post(tracker::start_tracker_analysis)
                 .delete(tracker::stop_tracker_analysis),
         )
+        .route("/api/solve", post(solve::start_solve))
+        .route("/api/solve/{id}", axum::routing::delete(solve::cancel_solve))
+        .route("/api/solve/{id}/events", get(solve::solve_events))
         .route("/api/dex/species", get(routes::get_species_list))
         .route("/api/benchmark", get(routes::run_benchmark))
         .route("/api/sprites", get(routes::get_sprite))

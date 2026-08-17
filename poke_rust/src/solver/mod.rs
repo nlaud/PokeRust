@@ -586,6 +586,35 @@ impl fmt::Display for SolveError {
 
 impl std::error::Error for SolveError {}
 
+/// The answer of one double-oracle round at the root position.
+///
+/// [`double_oracle`](matrix::double_oracle) adds actions until neither player
+/// has a better response. Each round therefore holds a complete answer over the
+/// actions that the round reached. A caller that reports progress can publish
+/// that answer before the whole search finishes.
+///
+/// The round is not an equilibrium of the whole game. Only the last round of a
+/// converged run is.
+#[derive(Debug, Clone)]
+pub struct RootRound {
+    /// The depth of the deepening pass that this round belongs to.
+    pub depth: u8,
+    /// The value of the restricted game, as P1's win probability.
+    pub value: f64,
+    /// P1's strategy over the actions that this round reached.
+    pub p1_strategy: Vec<JointActionProb>,
+    /// P2's strategy, likewise.
+    pub p2_strategy: Vec<JointActionProb>,
+    /// The search statistics up to this round.
+    pub stats: SolveStats,
+}
+
+/// Reads each root round while the search runs.
+///
+/// The search calls this pointer on its own thread, between two matrix cells. A
+/// slow call therefore slows the search. Keep the call short.
+pub type RootProgress<'a> = &'a dyn Fn(RootRound);
+
 /// An equilibrium for one position.
 #[derive(Debug, Clone)]
 pub struct SolveResult {
@@ -632,7 +661,7 @@ pub fn solve(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &SolveConfig,
 ) -> Result<SolveResult, SolveError> {
-    search::run(state, pokemon_dex, move_dex, config, None)
+    search::run(state, pokemon_dex, move_dex, config, None, None)
 }
 
 /// [`solve`], made deterministic in `seed`.
@@ -667,6 +696,27 @@ pub fn solve_seeded_cancellable(
     config: &SolveConfig,
     cancel: Option<&CancelFlag>,
 ) -> Result<SolveResult, SolveError> {
+    solve_seeded_progress_cancellable(seed, state, pokemon_dex, move_dex, config, None, cancel)
+}
+
+/// [`solve_seeded_cancellable`], with a progress hook for the root rounds.
+///
+/// The hook fires after both full best-response checks of each double-oracle
+/// round at the root position. It does not fire below the root, and it does not
+/// fire for the other two algorithms, because only double oracle has rounds.
+///
+/// The hook cannot change the search. It reads one [`RootRound`] and returns.
+///
+/// `None` gives the behavior of [`solve_seeded_cancellable`].
+pub fn solve_seeded_progress_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &SolveConfig,
+    progress: Option<RootProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<SolveResult, SolveError> {
     let _guard = scoped_sample_rng(seed);
-    search::run(state, pokemon_dex, move_dex, config, cancel)
+    search::run(state, pokemon_dex, move_dex, config, progress, cancel)
 }

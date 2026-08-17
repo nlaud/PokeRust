@@ -96,8 +96,8 @@ pub struct TrackerSession {
 /// records a real battle rather than resolving one. The panel therefore uses
 /// the engine defaults, which are the same values that the simulator setup
 /// panel sends.
-const SOLVER_DAMAGE_ROLLS: u8 = 16;
-const SOLVER_CONSIDER_CRIT: bool = true;
+pub(crate) const SOLVER_DAMAGE_ROLLS: u8 = 16;
+pub(crate) const SOLVER_CONSIDER_CRIT: bool = true;
 
 #[derive(Debug)]
 pub(crate) enum SubmitTrackerError {
@@ -356,6 +356,7 @@ pub async fn delete_tracker(State(app): State<AppState>, Path(id): Path<String>)
     if let Some(mut session) = lock(&app).remove(&id) {
         session.analysis.cancel_running();
     }
+    crate::solve::cancel_jobs_for(&app, crate::solve::SolveSource::Tracker, &id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -440,6 +441,9 @@ pub async fn stop_tracker_analysis(
 /// `rebuild_tracker_history` have raised the generation and cancelled the job
 /// of the old position.
 fn restart_analysis(app: &AppState, id: &str, session: &mut TrackerSession) {
+    // The position moved, so every streaming job of this session now answers an
+    // old question. Each such job ends with a `cancelled` event.
+    crate::solve::cancel_jobs_for(app, crate::solve::SolveSource::Tracker, id);
     crate::tracker_analysis::start_job(
         id,
         session,

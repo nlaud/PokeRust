@@ -1122,6 +1122,7 @@ impl<'a> PreviewContext<'a> {
             self.pokemon_dex,
             self.move_dex,
             &self.config.battle,
+            None,
             self.cancel,
         ) {
             Ok(result) => {

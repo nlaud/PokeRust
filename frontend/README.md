@@ -258,25 +258,35 @@ The controls hold the same knobs as the simulator setup panel.
 These endpoints control the search:
 
 ```text
-POST   /api/tracker/{id}/analysis
-GET    /api/tracker/{id}/analysis
-DELETE /api/tracker/{id}/analysis
+POST   /api/solve
+GET    /api/solve/{jobId}/events
+DELETE /api/solve/{jobId}
 ```
+
+`solveStore.ts` registers one job, opens the event stream, and holds each
+answer. `POST` returns a job ID, and the search starts when the store opens the
+stream.
 
 The tracker holds a belief, not a concrete battle state.
 The server draws one world from the belief with the determinizer.
-The tracker accepts `ismcts` and `mccfr` only.
-Both searches read the belief and render their rows against the drawn world.
+An `ismcts` or `mccfr` profile reads the belief itself, and it renders its rows
+against the drawn world.
+A `doubleOracle` profile is exact for its depth, and it reads the drawn world
+alone.
 
 The server runs one search for each depth from one through the configured depth.
-Each depth publishes a complete answer.
-The store reads the newest answer two times each second.
+Each depth sends a complete answer, and a `doubleOracle` search also sends one
+answer after each of its rounds.
 The numbers therefore move while the search goes deeper.
 
-Between two answers the panel shows the depth that runs and a progress bar.
-The bar compares elapsed time with the expected duration of that depth.
-The solver reports no live node count, so this figure is an estimate.
-It stays at or below 99 percent until the server publishes an answer.
+The store keeps the last complete answer while the next depth runs.
+The panel shows that answer, the depth in progress, and the count of answers so
+far.
+
+The panel compares the last two complete answers.
+It shows the change in win odds between the two depths.
+It also names each action that entered the strategy and each action that left
+it.
 
 ### Team preview
 
@@ -296,13 +306,14 @@ The answer names the count, because one world gives the whole answer one guess
 of the opponent's hidden data.
 
 The panel shows the win odds of both players.
-It also shows the change since the last committed turn.
-The tracker user typed both rosters, so both action lists appear.
+The tracker user typed both rosters, so both complete strategies appear.
 A belief search mixes the opponent's private builds.
 The panel labels that list as a summary, not as one playable strategy.
 
-Every committed turn cancels the running search and starts a new one.
-The panel marks an answer of an older position as stale.
+Every row is text. The panel never writes a command to the input bar.
+
+Every committed turn cancels the running job on the server.
+The stream then sends `cancelled`, and the last answer stays on screen.
 
 ## Tracker grammar
 

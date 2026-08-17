@@ -1,12 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import Select from '../../components/common/Select'
-import type {
-  BotAlgorithm,
-  BotPreset,
-  StrategyRow,
-  TrackerAnalysisCheckpoint,
-  TrackerAnalysisRung,
-} from '../../api/types'
+import type { BotAlgorithm, BotPreset, SolveUpdate, StrategyRow } from '../../api/types'
+import { useSolve } from '../../store/solveStore'
 import { useTracker } from '../../store/trackerStore'
 
 // The knobs mirror the simulator's `botP2` profile: one algorithm and one
@@ -24,6 +19,11 @@ const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] 
     label: 'MCCFR (sampled belief)',
     hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief.',
   },
+  {
+    value: 'doubleOracle',
+    label: 'Double oracle (exact, one world)',
+    hint: 'Exact for its depth, but it reads one drawn opponent. It reports each round while it runs.',
+  },
 ]
 
 const PRESET_OPTIONS: { value: BotPreset; label: string; hint: string }[] = [
@@ -32,20 +32,13 @@ const PRESET_OPTIONS: { value: BotPreset; label: string; hint: string }[] = [
   { value: 'strong', label: 'Strong', hint: 'Three turns deep, about eighty seconds.' },
 ]
 
-/** How often the panel reads the newest rung while a search runs.
- *
- * The progress bar moves on each read, so the interval also sets how smooth
- * that bar looks. */
-const POLL_MS = 500
-
 /** Renders one probability as a whole-percent label. */
 function percent(odds: number): string {
   return `${(100 * odds).toFixed(1)}%`
 }
 
-/** Renders the change in Player 1's win odds since the last committed turn. */
-function deltaLabel(current: number, previous: number): string {
-  const change = 100 * (current - previous)
+/** Renders one change in win odds as a signed point count. */
+function points(change: number): string {
   if (Math.abs(change) < 0.05) return 'no change'
   return `${change > 0 ? '+' : ''}${change.toFixed(1)} pts`
 }
@@ -64,35 +57,22 @@ function actionLabel(row: StrategyRow): string {
   return row.commands.map((option) => option.description).join(' · ')
 }
 
-/** Shows the depth in progress and its elapsed fraction of expected time.
- *
- * The server reports no node count while a search runs, so this figure is a
- * time estimate. The label says so. */
-function RungProgress({ rung, targetDepth }: { rung: TrackerAnalysisRung; targetDepth: number | null }) {
-  const progress = Math.min(99, Math.round(100 * rung.fraction))
-  return (
-    <div className="mt-1" data-testid="tracker-solver-progress">
-      <div className="flex items-baseline justify-between gap-2 text-ink-muted">
-        <span>
-          Searching depth {rung.depth}
-          {targetDepth !== null ? ` of ${targetDepth}` : ''} · about {progress}% of its{' '}
-          {(rung.budgetMs / 1000).toFixed(1)} s estimate
-        </span>
-        <span className="shrink-0 font-mono">{(rung.elapsedMs / 1000).toFixed(1)} s</span>
-      </div>
-      <div className="mt-0.5 h-1 w-full overflow-hidden rounded-card bg-subtle">
-        <div
-          className="h-full bg-primary"
-          style={{ width: `${progress}%` }}
-          role="progressbar"
-          aria-valuenow={progress}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Search progress toward the next depth"
-        />
-      </div>
-    </div>
-  )
+/** The actions that one strategy plays. */
+function support(rows: StrategyRow[]): string[] {
+  return rows.filter((row) => row.probability > 0).map(actionLabel)
+}
+
+/** Which actions entered the support, and which ones left it. */
+function supportChange(
+  before: StrategyRow[],
+  after: StrategyRow[],
+): { entered: string[]; left: string[] } {
+  const old = new Set(support(before))
+  const now = new Set(support(after))
+  return {
+    entered: [...now].filter((label) => !old.has(label)),
+    left: [...old].filter((label) => !now.has(label)),
+  }
 }
 
 /** Shows notes only when the user points to or focuses the label. */
@@ -114,96 +94,139 @@ function NotesTooltip({ label, lines }: { label: string; lines: string[] }) {
   )
 }
 
-/** Shows the strategy of one player, highest rate first. */
+/** Shows the complete mixed strategy of one player, highest rate first.
+ *
+ * Every row is text. The panel submits no command, so a suggestion never
+ * reaches the input bar on its own. */
 function StrategyList({
   title,
   rows,
   testId,
 }: {
   title: string
-  rows: StrategyRow[]
+  rows: StrategyRow[] | null
   testId: string
 }) {
   return (
     <div className="min-w-0 flex-1" data-testid={testId}>
       <p className="mb-1 font-semibold">{title}</p>
-      {rows.length === 0 && <p className="text-ink-muted">No action available.</p>}
-      {rows.map((row, index) => (
-        <div key={index} className="flex items-baseline justify-between gap-2">
-          <span className="truncate text-ink-muted">{actionLabel(row)}</span>
-          <span className="shrink-0 font-mono">{percent(row.probability)}</span>
+      {rows === null && <p className="text-ink-muted">This profile hides these rows.</p>}
+      {rows !== null && rows.length === 0 && <p className="text-ink-muted">No action available.</p>}
+      {rows !== null && (
+        <div className="max-h-48 overflow-y-auto">
+          {rows.map((row, index) => (
+            <div key={index} className="flex items-baseline justify-between gap-2">
+              <span className="truncate text-ink-muted">{actionLabel(row)}</span>
+              <span className="shrink-0 font-mono">{percent(row.probability)}</span>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   )
 }
 
-/** Shows the win odds, the depth, and both strategies of one rung. */
-function CheckpointBody({
-  checkpoint,
-  previousP1WinOdds,
-  targetDepth,
+/** Names how much the answer moved between the last two depths.
+ *
+ * A small change means that another depth is unlikely to change the plan. A
+ * large change means the opposite. */
+function Stability({ current, previous }: { current: SolveUpdate; previous: SolveUpdate }) {
+  const change = supportChange(previous.p1Strategy, current.p1Strategy)
+  return (
+    <div className="mt-1 text-ink-muted" data-testid="tracker-solver-stability">
+      <p>
+        Depth {previous.depth} to depth {current.depth}:{' '}
+        {points(100 * (current.value - previous.value))}
+      </p>
+      {change.entered.length === 0 && change.left.length === 0 ? (
+        <p>Your support held the same actions.</p>
+      ) : (
+        <>
+          {change.entered.length > 0 && <p>Entered: {change.entered.join(', ')}</p>}
+          {change.left.length > 0 && <p>Left: {change.left.join(', ')}</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** Shows the cost of the search, the seed, and the sampling detail.
+ *
+ * The seed makes the answer reproducible, so it belongs to every search, not
+ * to a sampled search alone. */
+function CostLine({ update, seed }: { update: SolveUpdate; seed: number | null }) {
+  const { stats, sampling } = update
+  const cells =
+    stats.matrixCellsTotal > 0
+      ? ` · ${stats.matrixCellsEvaluated} of ${stats.matrixCellsTotal} cells`
+      : ''
+  const sampled = sampling
+    ? ` · ${sampling.algorithm}, ${sampling.iterations} iterations${
+        sampling.particles === null ? '' : `, ${sampling.particles} worlds`
+      } · ${sampling.evaluator} evaluator`
+    : ''
+  return (
+    <p className="mt-1 text-ink-muted" data-testid="tracker-solver-cost">
+      {stats.turnsSimulated} turns simulated{cells}
+      {sampled}
+      {seed === null ? '' : ` · seed ${seed}`}
+    </p>
+  )
+}
+
+/** Shows the win odds, the depth, and both strategies of one answer. */
+function AnswerBody({
+  answer,
+  previous,
+  seed,
 }: {
-  checkpoint: TrackerAnalysisCheckpoint
-  previousP1WinOdds: number | null
-  targetDepth: number | null
+  answer: SolveUpdate
+  previous: SolveUpdate | null
+  seed: number | null
 }) {
-  const teamPreview = checkpoint.position === 'teamPreview'
+  const teamPreview = answer.p1Strategy.some((row) => row.preview !== null)
   return (
     <div className="mt-2 border-t border-subtle pt-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="rounded-card bg-primary px-2 py-0.5 font-semibold text-white">
-          You {percent(checkpoint.p1WinOdds)}
+          You {percent(answer.p1WinOdds)}
         </span>
         <span className="font-semibold" data-testid="tracker-solver-opponent-odds">
-          Opponent {percent(checkpoint.p2WinOdds)}
+          Opponent {percent(answer.p2WinOdds)}
         </span>
-        {/* A stale answer describes the previous position, so its odds are the
-            comparison value itself. The change means nothing until a rung of
-            the current position arrives. */}
-        {previousP1WinOdds !== null && !checkpoint.stale && (
-          <span className="text-ink-muted">
-            {deltaLabel(checkpoint.p1WinOdds, previousP1WinOdds)} since the last turn
-          </span>
-        )}
         <span className="ml-auto text-ink-muted" data-testid="tracker-solver-depth">
-          Depth {checkpoint.depthReached}
-          {targetDepth !== null ? ` of ${targetDepth}` : ''} ·{' '}
-          {teamPreview ? 'team preview' : `turn ${checkpoint.turnNumber}`} ·{' '}
-          {(checkpoint.elapsedMs / 1000).toFixed(1)} s
+          Depth {answer.depth} of {answer.depthTarget} · {(answer.elapsedMs / 1000).toFixed(1)} s ·
+          revision {answer.revision}
         </span>
       </div>
 
-      {checkpoint.stale && (
-        <p className="mt-1 text-warning" data-testid="tracker-solver-stale">
-          This answer describes the position before the last committed turn.
-        </p>
-      )}
+      {previous && <Stability current={answer} previous={previous} />}
+      <CostLine update={answer} seed={seed} />
 
       <div className="mt-2 flex flex-col gap-3 sm:flex-row">
         <StrategyList
           title={teamPreview ? 'Your best bring and lead' : 'Your best strategy'}
-          rows={checkpoint.p1Strategy}
+          rows={answer.p1Strategy}
           testId="tracker-solver-p1-strategy"
         />
         <StrategyList
           title={
             teamPreview
               ? "Opponent's best bring and lead"
-              : checkpoint.p2StrategyIsPlayable
+              : answer.p2StrategyIsPlayable
                 ? "Opponent's best strategy"
                 : 'Opponent action summary'
           }
-          rows={checkpoint.p2Strategy}
+          rows={answer.p2Strategy}
           testId="tracker-solver-p2-strategy"
         />
       </div>
 
-      {checkpoint.warnings.length > 0 && (
+      {answer.warnings.length > 0 && (
         <div className="mt-2">
           <NotesTooltip
-            label={`${checkpoint.warnings.length} note(s) on this answer`}
-            lines={checkpoint.warnings}
+            label={`${answer.warnings.length} note(s) on this answer`}
+            lines={answer.warnings}
           />
         </div>
       )}
@@ -219,43 +242,25 @@ function CheckpointBody({
  * a battle, and the answer is one command for each active slot.
  *
  * The tracker holds a belief, so the server draws worlds from it and searches
- * them. The panel shows the win odds and the best strategy of both players,
+ * them. The panel shows the win odds and the complete strategy of both players,
  * because the tracker user typed both rosters.
  *
- * A battle search runs one rung for each depth, so the numbers move while the
- * search goes deeper. This component reads the newest answer and the progress
- * of the running rung twice each second.
+ * `POST /api/solve` registers one job, and its event stream sends each answer.
+ * The panel keeps the last complete answer on screen while the next depth runs.
+ *
+ * The panel writes no command to the input bar. Every row is text, and the user
+ * types the command they choose.
  */
 export default function TrackerSolverPanel() {
-  const { analysis, analysisError, startAnalysis, stopAnalysis, refreshAnalysis } = useTracker()
+  const trackerId = useTracker((state) => state.trackerId)
+  const { phase, started, complete, previousComplete, live, stale, error, start, stop } = useSolve()
   const [open, setOpen] = useState(false)
   // A sampling belief search is the default. It respects the fog of war.
   const [algorithm, setAlgorithm] = useState<BotAlgorithm>('ismcts')
   const [preset, setPreset] = useState<BotPreset>('fast')
 
-  const running = analysis?.phase === 'running'
-  const on = analysis !== null && analysis.phase !== 'off'
-  const checkpoint = analysis?.checkpoint ?? null
-
-  // Restore the controls from the profile that the server stored. A page
-  // reload keeps the session, so the controls have to follow it.
-  const storedAlgorithm = analysis?.profile?.algorithm
-  const storedPreset = analysis?.profile?.preset
-  useEffect(() => {
-    if (storedAlgorithm === 'ismcts' || storedAlgorithm === 'mccfr') setAlgorithm(storedAlgorithm)
-    else if (storedAlgorithm) setAlgorithm('ismcts')
-    if (storedPreset) setPreset(storedPreset)
-  }, [storedAlgorithm, storedPreset])
-
-  // Read the newest rung while the ladder runs. The timer belongs to this
-  // component, so it stops when the user leaves the tracker screen.
-  useEffect(() => {
-    if (!running) return
-    const timer = setInterval(() => {
-      void refreshAnalysis()
-    }, POLL_MS)
-    return () => clearInterval(timer)
-  }, [running, refreshAnalysis])
+  const running = phase === 'starting' || phase === 'running'
+  const on = phase !== 'off'
 
   return (
     <div
@@ -270,9 +275,10 @@ export default function TrackerSolverPanel() {
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <span className="font-semibold">Solver</span>
-          {checkpoint && (
+          {complete && (
             <span className="font-mono" data-testid="tracker-solver-summary">
-              You {percent(checkpoint.p1WinOdds)} · Opponent {percent(checkpoint.p2WinOdds)}
+              You {percent(complete.p1WinOdds)} · Opponent {percent(complete.p2WinOdds)}
+              {stale ? ' · old position' : ''}
             </span>
           )}
           {running && <span className="text-ink-muted">searching…</span>}
@@ -281,7 +287,7 @@ export default function TrackerSolverPanel() {
             {open ? '▾' : '▸'}
           </span>
         </button>
-        <NotesTooltip label="Approx." lines={analysis?.profile?.approximations ?? []} />
+        <NotesTooltip label="Approx." lines={started?.profile.approximations ?? []} />
       </div>
 
       {/* The panel grows upward, because the input bar sits at the bottom of
@@ -310,15 +316,22 @@ export default function TrackerSolverPanel() {
               />
             </label>
             <button
-              onClick={() => void startAnalysis({ algorithm, preset })}
+              onClick={() => {
+                if (trackerId === null) return
+                void start({
+                  source: 'tracker',
+                  sessionId: trackerId,
+                  profile: { algorithm, preset },
+                })
+              }}
               data-testid="tracker-solver-start"
               className="lift rounded-card bg-primary px-3 py-2 font-semibold text-white"
             >
               {on ? 'Search again' : 'Start search'}
             </button>
-            {on && (
+            {running && (
               <button
-                onClick={() => void stopAnalysis()}
+                onClick={() => void stop()}
                 data-testid="tracker-solver-stop"
                 className="lift rounded-card border border-subtle px-3 py-2 font-semibold text-ink-muted"
               >
@@ -330,31 +343,37 @@ export default function TrackerSolverPanel() {
           <p className="mt-1 text-ink-muted">
             {ALGORITHM_OPTIONS.find((o) => o.value === algorithm)?.hint}
           </p>
-          {analysisError && (
-            <p className="mt-1 text-danger" data-testid="tracker-solver-request-error">
-              {analysisError}
-            </p>
-          )}
-          {analysis?.error && (
+          <p className="mt-1 text-ink-muted" data-testid="tracker-solver-no-submit">
+            The panel shows each suggested command as text. It never writes one to the input bar.
+          </p>
+          {error && (
             <p className="mt-1 text-danger" data-testid="tracker-solver-error">
-              {analysis.error}
+              {error}
             </p>
           )}
-          {on && !checkpoint && !analysis?.error && (
+          {on && !complete && !error && (
             <p className="mt-1 text-ink-muted">
               {running ? 'Searching this position…' : 'No answer yet.'}
             </p>
           )}
 
-          {running && analysis?.rung && (
-            <RungProgress rung={analysis.rung} targetDepth={analysis.targetDepth ?? null} />
+          {running && live && (
+            <p className="mt-1 text-ink-muted" data-testid="tracker-solver-progress">
+              Searching depth {live.depth} of {live.depthTarget} · {live.revision + 1} answer(s) so
+              far · {live.complete ? 'depth complete' : 'round in progress'}
+            </p>
           )}
 
-          {checkpoint && (
-            <CheckpointBody
-              checkpoint={checkpoint}
-              previousP1WinOdds={analysis?.previousP1WinOdds ?? null}
-              targetDepth={analysis?.targetDepth ?? null}
+          {complete && stale && (
+            <p className="mt-1 text-warning" data-testid="tracker-solver-stale">
+              This answer describes the position before the last tracker change.
+            </p>
+          )}
+          {complete && (
+            <AnswerBody
+              answer={complete}
+              previous={previousComplete}
+              seed={started?.seed ?? null}
             />
           )}
         </div>

@@ -338,7 +338,7 @@ impl AnalysisState {
     }
 
     /// The generation of the current position.
-    fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.generation
     }
 

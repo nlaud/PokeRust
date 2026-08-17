@@ -118,11 +118,15 @@ const SALT_SIMULTANEOUS: u64 = 0x243F_6A88_85A3_08D3;
 /// table, the turn cache, and the statistics.
 ///
 /// `cancel` stops the search from another thread. See the module documentation.
+///
+/// `progress` reads each double-oracle round of the root position. See
+/// [`super::solve_seeded_progress_cancellable`].
 pub(super) fn run(
     state: &MatchState,
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &SolveConfig,
+    progress: Option<super::RootProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<SolveResult, SolveError> {
     match state {
@@ -162,7 +166,16 @@ pub(super) fn run(
         let action_truncations = ctx.action_truncations;
         let (root_depth, root_chain) =
             super::root_descent(actions::phase_of(state), depth, config.replacement_depth);
-        let pass = ctx.solve_position(state, root_depth, root_chain, LOSS, WIN, seed.as_ref());
+        // Only this call is the root, so only this call reports its rounds.
+        let pass = ctx.solve_position(
+            state,
+            root_depth,
+            root_chain,
+            LOSS,
+            WIN,
+            seed.as_ref(),
+            progress.map(|hook| RootReport { hook, depth }),
+        );
 
         // `budget_hit`, `deadline_hit`, and `cancel_hit` latch, and the loop
         // stops at the first pass that sets one, so the flags describe this pass
@@ -308,6 +321,64 @@ struct Position {
 struct RootSeed {
     rows: Vec<usize>,
     cols: Vec<usize>,
+}
+
+/// Where one deepening pass sends its root rounds.
+///
+/// The pass depth belongs here rather than in the hook, because one hook serves
+/// every pass of one solve.
+#[derive(Clone, Copy)]
+struct RootReport<'a> {
+    hook: super::RootProgress<'a>,
+    depth: u8,
+}
+
+/// The cell oracle of one matrix game, and the reporter of its rounds.
+///
+/// [`matrix::double_oracle_with`] takes one value for both jobs. That is why
+/// this type exists: a cell closure and a round closure would both borrow the
+/// search context, and only one of them can.
+struct SearchOracle<'ctx, 'cfg, 'pos> {
+    ctx: &'ctx mut SearchContext<'cfg>,
+    state: &'pos MatchState,
+    p1: &'pos JointActions,
+    p2: &'pos JointActions,
+    depth: u8,
+    chain: u8,
+    /// `None` below the root, and `None` when the caller wants no progress.
+    report: Option<RootReport<'pos>>,
+}
+
+impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
+    fn cell(&mut self, row: usize, col: usize) -> f64 {
+        self.ctx.cell_value(
+            self.state,
+            &self.p1.actions[row],
+            &self.p2.actions[col],
+            self.depth,
+            self.chain,
+        )
+    }
+
+    fn round(&mut self, solution: &MatrixSolution, oracle: &matrix::OracleStats) {
+        let Some(report) = self.report else {
+            return;
+        };
+        // The run reports its own counters only when it returns, so add the
+        // work of this matrix by hand. A complete answer of the same pass then
+        // holds the same numbers.
+        let mut stats = self.ctx.stats.clone();
+        stats.lps_solved += oracle.lps_solved;
+        stats.ab_cutoffs += oracle.cutoffs;
+        stats.elapsed = self.ctx.started.elapsed();
+        (report.hook)(super::RootRound {
+            depth: report.depth,
+            value: solution.value,
+            p1_strategy: strategy_of(self.p1, &solution.row_strategy, EPS),
+            p2_strategy: strategy_of(self.p2, &solution.col_strategy, EPS),
+            stats,
+        });
+    }
 }
 
 struct SearchContext<'a> {
@@ -482,9 +553,10 @@ impl<'a> SearchContext<'a> {
         }
 
         // No seed below the root: the seed indexes the root action set, and it
-        // means nothing at any other position.
+        // means nothing at any other position. No report below the root either:
+        // a round of a child position answers a different question.
         let value = self
-            .solve_position(state, depth, chain, alpha, beta, None)
+            .solve_position(state, depth, chain, alpha, beta, None, None)
             .value;
         self.tt.store(key, depth, chain, value);
         value
@@ -494,6 +566,9 @@ impl<'a> SearchContext<'a> {
     ///
     /// `seed` is the previous deepening pass's root support. Only the root call
     /// supplies it, and only double oracle reads it.
+    ///
+    /// `report` publishes each double-oracle round. Only the root call supplies
+    /// it, for the same reason.
     #[allow(clippy::too_many_arguments)]
     fn solve_position(
         &mut self,
@@ -503,6 +578,7 @@ impl<'a> SearchContext<'a> {
         alpha: f64,
         beta: f64,
         seed: Option<&RootSeed>,
+        report: Option<RootReport<'_>>,
     ) -> Position {
         let battle = as_battle(state).expect("solve_position requires a battle position");
         let phase = actions::phase_of(state);
@@ -527,7 +603,7 @@ impl<'a> SearchContext<'a> {
 
         let solution = match self.cfg.algorithm {
             SolverAlgorithm::DoubleOracle => {
-                self.double_oracle(state, depth, chain, alpha, beta, &p1, &p2, seed)
+                self.double_oracle(state, depth, chain, alpha, beta, &p1, &p2, seed, report)
             }
             SolverAlgorithm::BackwardInduction | SolverAlgorithm::SerializedBounds => {
                 self.full_matrix(state, depth, chain, &p1.actions, &p2.actions)
@@ -617,6 +693,7 @@ impl<'a> SearchContext<'a> {
         p1: &JointActions,
         p2: &JointActions,
         seed: Option<&RootSeed>,
+        report: Option<RootReport<'_>>,
     ) -> MatrixSolution {
         let limits = matrix::OracleLimits {
             alpha,
@@ -628,12 +705,23 @@ impl<'a> SearchContext<'a> {
             rows: seed.map(|seed| seed.rows.as_slice()),
             cols: seed.map(|seed| seed.cols.as_slice()),
         };
-        let (solution, oracle) = matrix::double_oracle(
+        // The oracle owns the context for the whole run, so one type serves the
+        // cell calls and the round calls. Two closures cannot, because both
+        // would borrow the context.
+        let (solution, oracle) = matrix::double_oracle_with(
             p1.actions.len(),
             p2.actions.len(),
             seed,
             limits,
-            |i, j| self.cell_value(state, &p1.actions[i], &p2.actions[j], depth, chain),
+            SearchOracle {
+                ctx: self,
+                state,
+                p1,
+                p2,
+                depth,
+                chain,
+                report,
+            },
         );
         // `cell_value` counts the evaluated cells itself, so `cells_requested`
         // would double count them.

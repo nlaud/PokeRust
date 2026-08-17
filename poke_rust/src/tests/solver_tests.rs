@@ -43,7 +43,7 @@ use crate::solver::preview::{
 use crate::solver::{
     CHAIN_MASK, CancelFlag, EXTENDED_FLAG, JointActionProb, SolveConfig, SolveError, SolveResult,
     SolveWarning, SolverAlgorithm, eval, forced_descent, root_descent, solve, solve_seeded,
-    solve_seeded_cancellable,
+    solve_seeded_cancellable, solve_seeded_progress_cancellable,
 };
 use crate::state::battle::{
     BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
@@ -236,6 +236,71 @@ fn all_algorithms_agree_at_depth_two() {
         (double_oracle - reference).abs() < 1e-6,
         "double oracle returned {double_oracle}, backward induction returned {reference}"
     );
+}
+
+/// A progress hook must report the root rounds while the search runs, and it
+/// must not move the answer. The solver panel publishes each of those rounds.
+#[test]
+fn the_root_progress_hook_reports_each_round_without_moving_the_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let config = SolveConfig {
+        depth: 2,
+        algorithm: SolverAlgorithm::DoubleOracle,
+        ..base_config()
+    };
+
+    let reference =
+        solve_seeded_cancellable(7, &state, pokemon_dex, move_dex, &config, None).unwrap();
+
+    let rounds = Mutex::new(Vec::new());
+    let hook = |round: crate::solver::RootRound| {
+        rounds.lock().unwrap().push(round);
+    };
+    let reported = solve_seeded_progress_cancellable(
+        7,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&hook),
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        (reported.value - reference.value).abs() < 1e-9,
+        "the hook moved the value from {} to {}",
+        reference.value,
+        reported.value
+    );
+
+    let rounds = rounds.into_inner().unwrap();
+    assert!(!rounds.is_empty(), "the hook reported no round");
+    // Iterative deepening runs one pass for each depth, and each pass reports
+    // its own rounds, so the depth never falls.
+    for pair in rounds.windows(2) {
+        assert!(pair[1].depth >= pair[0].depth);
+    }
+    assert_eq!(
+        rounds.last().unwrap().depth,
+        reported.depth_reached,
+        "the last round must belong to the returned pass"
+    );
+    for round in &rounds {
+        assert!((0.0..=1.0).contains(&round.value), "{}", round.value);
+        // A round holds a complete strategy over the actions that it reached.
+        let total: f64 = round.p1_strategy.iter().map(|a| a.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "P1 rates sum to {total}");
+        let total: f64 = round.p2_strategy.iter().map(|a| a.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "P2 rates sum to {total}");
+        // The statistics grow with the search, so a round can never report an
+        // empty count.
+        assert!(round.stats.matrix_cells_evaluated > 0);
+    }
+    // The last round of the last pass holds the answer that the search returns.
+    let last = rounds.last().unwrap();
+    assert!((last.value - reported.value).abs() < 1e-6);
 }
 
 /// Double oracle must reach the same answer having looked at strictly fewer

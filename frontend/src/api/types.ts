@@ -774,3 +774,120 @@ export interface TrackerCompletionsDto {
 export interface SpeciesListDto {
   species: string[]
 }
+
+// ── The streaming solve job ─────────────────────────────────────────────────
+// `POST /api/solve` registers one job. `GET /api/solve/{id}/events` runs it and
+// streams each answer. See `poke_rust/src/bin/server/solve.rs`.
+
+/** Which session a job answers. */
+export type SolveSource = 'battle' | 'tracker'
+
+/** The body of `POST /api/solve`. */
+export interface SolveRequest {
+  source: SolveSource
+  /** The battle ID or the tracker ID. */
+  sessionId: string
+  /** Each absent field takes its preset value. */
+  profile?: BotProfileRequest
+}
+
+/** The answer of `POST /api/solve`. */
+export interface SolveJobResponse {
+  /** Open `/api/solve/{jobId}/events` to run this job. */
+  jobId: string
+}
+
+/** The first event of one stream. */
+export interface SolveStarted {
+  jobId: string
+  source: SolveSource
+  sessionId: string
+  /** A `teamPreview` job answers the bring-and-lead choice. */
+  position: 'battle' | 'teamPreview'
+  /** The position counter of the position that this job reads. */
+  generation: number
+  /** The seed of the draw and the search.
+   *
+   * A profile with no seed gets a random one. The client reads this number, so
+   * the same answer can be searched again. */
+  seed: number
+  /** The depth horizon of the ladder. */
+  targetDepth: number
+  profile: BotProfileView
+}
+
+/** What one search cost.
+ * A sampling search builds no matrix, so every matrix counter is zero. */
+export interface SolveStats {
+  nodesExpanded: number
+  turnsSimulated: number
+  matrixCellsEvaluated: number
+  matrixCellsTotal: number
+  lpsSolved: number
+  abCutoffs: number
+  ttHits: number
+  turnCacheHits: number
+}
+
+/** The sampling detail of one approximate answer.
+ * An exact search sends none. */
+export interface SolveSampling {
+  algorithm: 'mcts' | 'ismcts' | 'mccfr'
+  /** The iterations that the search finished. */
+  iterations: number
+  /** The worlds that a belief search drew.
+   * Null for a search of one concrete position. */
+  particles: number | null
+  seed: number
+  /** The leaf evaluator that scored the depth horizon. */
+  evaluator: string
+}
+
+/** One published answer of a running job. */
+export interface SolveUpdate {
+  generation: number
+  /** The count of answers that this job sent before this one.
+   * It starts at zero, and it never falls. */
+  revision: number
+  depth: number
+  depthTarget: number
+  elapsedMs: number
+  /** True when this answer ends a depth.
+   * A false value marks one double-oracle round inside a depth. */
+  complete: boolean
+  value: number
+  p1WinOdds: number
+  p2WinOdds: number
+  /** The complete mixed strategy of Player 1. */
+  p1Strategy: StrategyRow[]
+  /** The complete mixed strategy of Player 2.
+   *
+   * A battle job sends null unless the profile holds `revealStrategy`. A
+   * tracker job always sends the rows. */
+  p2Strategy: StrategyRow[] | null
+  /** True when the Player 2 rows form one strategy for one private state. */
+  p2StrategyIsPlayable: boolean
+  stats: SolveStats
+  /** Null for an exact search. */
+  sampling: SolveSampling | null
+  /** Every reason that this answer is approximate. */
+  warnings: string[]
+}
+
+/** The last event of a job that finished its ladder. */
+export interface SolveDone {
+  jobId: string
+  updates: number
+}
+
+/** The last event of a job that produced no result. */
+export interface SolveFailed {
+  jobId: string
+  message: string
+}
+
+/** The last event of a job that a request or a new position stopped. */
+export interface SolveCancelled {
+  jobId: string
+  reason: string
+}

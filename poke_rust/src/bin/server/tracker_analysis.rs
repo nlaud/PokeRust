@@ -91,11 +91,11 @@ pub struct TrackerPreviewChoice {
 /// One joint action of a strategy, rendered against the drawn world.
 #[derive(Debug, Clone)]
 pub struct TrackerStrategyRow {
-    commands: Vec<crate::dto::CommandOptionDto>,
+    pub(crate) commands: Vec<crate::dto::CommandOptionDto>,
     /// The bring-and-lead choice of a team-preview row.
     /// `None` in a battle row.
-    preview: Option<TrackerPreviewChoice>,
-    probability: f64,
+    pub(crate) preview: Option<TrackerPreviewChoice>,
+    pub(crate) probability: f64,
 }
 
 /// Which question one rung answers.
@@ -108,7 +108,7 @@ pub enum PositionKind {
 }
 
 impl PositionKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             PositionKind::Battle => "battle",
             PositionKind::TeamPreview => "teamPreview",
@@ -207,6 +207,14 @@ impl TrackerAnalysisState {
         if let Some(job) = self.running.take() {
             job.cancel.cancel();
         }
+    }
+
+    /// The generation of the current position.
+    ///
+    /// `solve.rs` reads it, so a streaming job can tell its own position from a
+    /// newer one.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Cancels the running job and clears every stored answer.
@@ -401,7 +409,7 @@ fn checkpoint_dto(
     }
 }
 
-fn strategy_row_dto(row: &TrackerStrategyRow) -> StrategyRowDto {
+pub(crate) fn strategy_row_dto(row: &TrackerStrategyRow) -> StrategyRowDto {
     StrategyRowDto {
         commands: row.commands.clone(),
         preview: row.preview.as_ref().map(|choice| PreviewChoiceDto {
@@ -551,13 +559,9 @@ fn run_ladder(
     }
     leads_are_on_the_field(&inputs.belief)?;
 
-    let determinize = DeterminizeConfig {
-        inference: crate::analysis::clone_inference_config(&inputs.inference),
-        // The tracker user is Player 1, so the draw copies their own side and
-        // samples the live opponent.
-        observer: Player::P1,
-        ..DeterminizeConfig::default()
-    };
+    // The tracker user is Player 1, so the draw copies their own side and
+    // samples the live opponent.
+    let determinize = belief_draw_config(&inputs.inference);
     let drawn = determinize_seeded(
         inputs.seed,
         &inputs.belief,
@@ -570,6 +574,13 @@ fn run_ladder(
     let draw_warning_count = drawn.warnings.len();
     let battle = drawn.state;
     let state = MatchState::BattleState(battle.clone());
+    let search_inputs = SearchInputs {
+        seed: inputs.seed,
+        dexes: &inputs.dexes,
+        meta,
+        belief: Some(&inputs.belief),
+        determinize: belief_draw_config(&inputs.inference),
+    };
 
     for depth in 1..=inputs.target_depth {
         if cancel.is_cancelled() {
@@ -582,7 +593,7 @@ fn run_ladder(
         // A solver panic must not poison the session mutex, so catch it here
         // and report it as an ordinary job failure.
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            one_search(search, inputs, meta, &state, cancel)
+            one_search(search, &search_inputs, &state, None, cancel)
         }));
         let rung = match caught {
             Ok(result) => result?,
@@ -628,14 +639,57 @@ fn run_ladder(
     Ok(())
 }
 
+/// The sampling detail of one approximate rung.
+///
+/// An exact rung has none of this, because it reads every action of the depth
+/// horizon rather than a sample of them.
+#[derive(Debug, Clone)]
+pub(crate) struct RungSampling {
+    /// The name of the algorithm, as the profile spells it.
+    pub algorithm: &'static str,
+    /// The iterations that the search finished.
+    pub iterations: u64,
+    /// The worlds that a belief search drew. `None` for a concrete search.
+    pub particles: Option<usize>,
+    /// The seed of the draw and the search.
+    pub seed: u64,
+    /// The leaf evaluator that scored the depth horizon.
+    pub evaluator: &'static str,
+}
+
 /// The result of one rung, before the job renders it.
-struct RungResult {
-    depth_reached: u8,
-    p1_win_odds: f64,
-    p2_win_odds: f64,
-    p1_strategy: Vec<JointActionProb>,
-    p2_strategy: Vec<JointActionProb>,
-    warnings: Vec<String>,
+pub(crate) struct RungResult {
+    pub depth_reached: u8,
+    pub p1_win_odds: f64,
+    pub p2_win_odds: f64,
+    pub p1_strategy: Vec<JointActionProb>,
+    pub p2_strategy: Vec<JointActionProb>,
+    pub warnings: Vec<String>,
+    /// What the search cost.
+    ///
+    /// A sampling search fills the node count, the turn count, and the elapsed
+    /// time. It leaves every matrix counter at zero, because it builds no
+    /// matrix.
+    pub stats: solver::SolveStats,
+    /// `None` for an exact search.
+    pub sampling: Option<RungSampling>,
+}
+
+/// Names the leaf evaluator of one search.
+///
+/// The client shows this name, because the evaluator sets the value of every
+/// position at the depth horizon.
+fn evaluator_name(eval: poke_rust::solver::eval::LeafEvaluator) -> &'static str {
+    use poke_rust::solver::eval;
+    if std::ptr::fn_addr_eq(eval, eval::fitted as eval::LeafEvaluator) {
+        "fitted"
+    } else if std::ptr::fn_addr_eq(eval, eval::fitted_mlp as eval::LeafEvaluator) {
+        "fittedMlp"
+    } else if std::ptr::fn_addr_eq(eval, eval::heuristic as eval::LeafEvaluator) {
+        "heuristic"
+    } else {
+        "custom"
+    }
 }
 
 /// Converts an exact solver result without changing its completed depth.
@@ -647,30 +701,70 @@ fn exact_rung(result: solver::SolveResult) -> RungResult {
         p1_strategy: result.p1_strategy,
         p2_strategy: result.p2_strategy,
         warnings: warning_lines(&result.warnings),
+        stats: result.stats,
+        sampling: None,
     }
+}
+
+/// Converts the statistics of a sampling search to the shared shape.
+fn sampled_stats(stats: &poke_rust::solver::mcts::MctsStats) -> solver::SolveStats {
+    solver::SolveStats {
+        nodes_expanded: stats.nodes_created,
+        turns_simulated: stats.turns_simulated,
+        elapsed: stats.elapsed,
+        ..solver::SolveStats::default()
+    }
+}
+
+/// Everything that [`one_search`] needs, for either session kind.
+///
+/// A tracker session and a battle session build this record differently. The
+/// search itself is the same.
+pub(crate) struct SearchInputs<'a> {
+    /// The seed of the draw and the search.
+    pub seed: u64,
+    pub dexes: &'a Dexes,
+    pub meta: &'a MetaDex,
+    /// The belief that `ismcts` and `mccfr` read.
+    /// `None` for a session that holds no belief.
+    pub belief: Option<&'a UnknownBattleState>,
+    /// The draw rules of a belief search.
+    pub determinize: DeterminizeConfig,
+}
+
+/// Reports that the profile needs a belief that the session does not hold.
+fn no_belief() -> String {
+    "This algorithm searches a belief, and this position has none. Use an exact algorithm or \
+     mcts."
+        .to_string()
 }
 
 /// Routes one rung to its solver entry point.
 ///
 /// Every arm passes `cancel`, so a raised flag stops the search that runs.
-fn one_search(
+///
+/// `progress` reads each double-oracle round of the root position. Only the
+/// exact search has rounds, so every other arm ignores it.
+pub(crate) fn one_search(
     search: BotSearchConfig,
-    inputs: &LadderInputs,
-    meta: &MetaDex,
+    inputs: &SearchInputs<'_>,
     state: &MatchState,
+    progress: Option<solver::RootProgress<'_>>,
     cancel: &CancelFlag,
 ) -> Result<RungResult, String> {
     let pokemon_dex = &inputs.dexes.pokemon_dex;
     let move_dex = &inputs.dexes.move_dex;
+    let meta = inputs.meta;
     let cancel = Some(cancel);
     match search {
         BotSearchConfig::Exact(config) => {
-            let result = solver::solve_seeded_cancellable(
+            let result = solver::solve_seeded_progress_cancellable(
                 inputs.seed,
                 state,
                 pokemon_dex,
                 move_dex,
                 &config,
+                progress,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -693,18 +787,26 @@ fn one_search(
                 p1_strategy: result.p1_strategy,
                 p2_strategy: result.p2_strategy,
                 warnings: warning_lines(&result.warnings),
+                stats: sampled_stats(&result.stats),
+                sampling: Some(RungSampling {
+                    algorithm: "mcts",
+                    iterations: result.stats.iterations,
+                    particles: None,
+                    seed: inputs.seed,
+                    evaluator: evaluator_name(config.eval),
+                }),
             })
         }
         BotSearchConfig::Ismcts(config) => {
-            let determinize = belief_draw_config(inputs);
+            let belief = inputs.belief.ok_or_else(no_belief)?;
             let result = solver::ismcts::search_belief_cancellable(
                 inputs.seed,
-                &inputs.belief,
+                belief,
                 meta,
                 pokemon_dex,
                 move_dex,
                 &config,
-                &determinize,
+                &inputs.determinize,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -715,18 +817,26 @@ fn one_search(
                 p1_strategy: result.p1_strategy,
                 p2_strategy: result.p2_strategy,
                 warnings: warning_lines(&result.warnings),
+                stats: sampled_stats(&result.stats),
+                sampling: Some(RungSampling {
+                    algorithm: "ismcts",
+                    iterations: result.stats.iterations,
+                    particles: Some(result.particles),
+                    seed: inputs.seed,
+                    evaluator: evaluator_name(config.search.eval),
+                }),
             })
         }
         BotSearchConfig::Mccfr(config) => {
-            let determinize = belief_draw_config(inputs);
+            let belief = inputs.belief.ok_or_else(no_belief)?;
             let result = solver::mccfr::search_belief_cancellable(
                 inputs.seed,
-                &inputs.belief,
+                belief,
                 meta,
                 pokemon_dex,
                 move_dex,
                 &config,
-                &determinize,
+                &inputs.determinize,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -737,15 +847,25 @@ fn one_search(
                 p1_strategy: result.p1_strategy,
                 p2_strategy: result.p2_strategy,
                 warnings: warning_lines(&result.warnings),
+                stats: sampled_stats(&result.stats),
+                sampling: Some(RungSampling {
+                    algorithm: "mccfr",
+                    iterations: result.stats.iterations,
+                    particles: Some(config.particles),
+                    seed: inputs.seed,
+                    evaluator: evaluator_name(config.search.eval),
+                }),
             })
         }
     }
 }
 
-/// The draw rules of a belief search.
-fn belief_draw_config(inputs: &LadderInputs) -> DeterminizeConfig {
+/// The draw rules of a belief search that Player 1 asks for.
+///
+/// The draw copies the side of Player 1, and it samples the live opponent.
+pub(crate) fn belief_draw_config(inference: &InferenceConfig) -> DeterminizeConfig {
     DeterminizeConfig {
-        inference: crate::analysis::clone_inference_config(&inputs.inference),
+        inference: crate::analysis::clone_inference_config(inference),
         observer: Player::P1,
         ..DeterminizeConfig::default()
     }
@@ -755,7 +875,7 @@ fn belief_draw_config(inputs: &LadderInputs) -> DeterminizeConfig {
 ///
 /// The first `leads` line puts both sides on the field. Before it, one side or
 /// both sides have no active Pokemon, and no search can run.
-fn leads_are_on_the_field(belief: &UnknownBattleState) -> Result<(), String> {
+pub(crate) fn leads_are_on_the_field(belief: &UnknownBattleState) -> Result<(), String> {
     leads_error(
         belief.p1_active_mons.is_empty(),
         belief.p2_active_mons.is_empty(),
@@ -775,7 +895,7 @@ fn leads_error(p1_is_empty: bool, p2_is_empty: bool) -> Result<(), String> {
 // ── The team-preview rung ────────────────────────────────────────────────────
 
 /// Names the way that a preview answer falls short of the true game.
-const PREVIEW_MEAN_MATRIX_NOTE: &str = "The search solved the mean matrix of the drawn worlds, so both players play one strategy \
+pub(crate) const PREVIEW_MEAN_MATRIX_NOTE: &str = "The search solved the mean matrix of the drawn worlds, so both players play one strategy \
      for every world. A real opponent reads its own hidden stats and can pick another lead.";
 
 /// The belief to search when the position is the team preview.
@@ -800,7 +920,7 @@ fn preview_position(inputs: &LadderInputs) -> Option<&UnknownTeamPreviewState> {
 /// True when the position is the team preview.
 ///
 /// Both sides must have no active Pokemon, and no turn can have run.
-fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u16) -> bool {
+pub(crate) fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u16) -> bool {
     p1_is_empty && p2_is_empty && turn_number == 0
 }
 
@@ -872,7 +992,7 @@ fn run_preview_rung(
         worlds: preview_worlds(inputs.search),
         seed: inputs.seed,
     };
-    let determinize = belief_draw_config(inputs);
+    let determinize = belief_draw_config(&inputs.inference);
 
     // A solver panic must not poison the session mutex, so catch it here and
     // report it as an ordinary job failure.
@@ -939,7 +1059,7 @@ fn run_preview_rung(
 ///
 /// [`sampling_error_line`] measures the spread of two or more worlds, and one
 /// world has no spread, so this line is the only warning of a one-world rung.
-fn preview_worlds_note(worlds: usize) -> String {
+pub(crate) fn preview_worlds_note(worlds: usize) -> String {
     if worlds == 1 {
         "The search drew one world of the belief, so the whole answer assumes one guess of the \
          opponent's hidden data. Only ismcts and mccfr draw more than one world."
@@ -955,7 +1075,7 @@ fn preview_worlds_note(worlds: usize) -> String {
 /// Reports how much the drawn worlds disagree about the win odds.
 ///
 /// One world gives no spread to measure, so the line appears from two worlds.
-fn sampling_error_line(worlds: usize, standard_error: Option<f64>) -> Option<String> {
+pub(crate) fn sampling_error_line(worlds: usize, standard_error: Option<f64>) -> Option<String> {
     standard_error.map(|error| {
         format!(
             "The {worlds} drawn world(s) give a standard error of {:.1} points on the win odds.",
@@ -965,7 +1085,7 @@ fn sampling_error_line(worlds: usize, standard_error: Option<f64>) -> Option<Str
 }
 
 /// The highest-rate preview choices of one player, rendered from its roster.
-fn preview_rows(
+pub(crate) fn preview_rows(
     mons: &[UnknownPokemonState],
     strategy: &[PreviewChoiceProb],
 ) -> Vec<TrackerStrategyRow> {
@@ -999,7 +1119,7 @@ fn roster_names(mons: &[UnknownPokemonState], indices: &[usize]) -> Vec<String> 
         .collect()
 }
 
-fn no_usage_cache() -> String {
+pub(crate) fn no_usage_cache() -> String {
     "The search draws the opponent's hidden data from usage data, and no usage cache is loaded \
      (see meta_scraper/README.md)."
         .to_string()
@@ -1011,7 +1131,7 @@ fn no_usage_cache() -> String {
 /// every hidden value. A belief search reads the whole belief and unions the
 /// actions of several worlds, so its rows still name the moves of one drawn
 /// world.
-fn drawn_world_note(search: BotSearchConfig) -> String {
+pub(crate) fn drawn_world_note(search: BotSearchConfig) -> String {
     match search {
         BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_) => {
             "This algorithm searched the belief. Each row names the moves of one drawn world. \
@@ -1033,7 +1153,7 @@ fn drawn_world_note(search: BotSearchConfig) -> String {
 /// Player 1 cannot make.
 ///
 /// Returns `None` once the roster matches the bring of the format.
-fn unknown_bring_line(belief: &UnknownBattleState) -> Option<String> {
+pub(crate) fn unknown_bring_line(belief: &UnknownBattleState) -> Option<String> {
     let roster = belief.p1_active_mons.len()
         + belief.p1_known_back_mons.len()
         + belief.p1_possible_back_mons.len()
@@ -1049,7 +1169,7 @@ fn unknown_bring_line(belief: &UnknownBattleState) -> Option<String> {
 }
 
 /// True when the P2 rows describe one private state.
-fn p2_strategy_is_playable(search: BotSearchConfig) -> bool {
+pub(crate) fn p2_strategy_is_playable(search: BotSearchConfig) -> bool {
     !matches!(
         search,
         BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
@@ -1091,7 +1211,7 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
 }
 
 /// Every distinct warning of one rung, in order.
-fn warning_lines(warnings: &[solver::SolveWarning]) -> Vec<String> {
+pub(crate) fn warning_lines(warnings: &[solver::SolveWarning]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     warnings
         .iter()
@@ -1113,7 +1233,7 @@ fn top_actions(strategy: &[JointActionProb]) -> Vec<&JointActionProb> {
 }
 
 /// The highest-rate joint actions of one player, rendered against `battle`.
-fn strategy_rows(
+pub(crate) fn strategy_rows(
     battle: &BattleState,
     player: Player,
     strategy: &[JointActionProb],
@@ -1140,13 +1260,13 @@ fn strategy_rows(
 /// The engine writes its own text, and that text names a drawn species and a
 /// belief mon index. That guess is not something the tracker user recorded, so
 /// the detail goes to the server console and the client reads a fixed line.
-fn engine_error(error: impl std::fmt::Display) -> String {
+pub(crate) fn engine_error(error: impl std::fmt::Display) -> String {
     eprintln!("tracker analysis job: the search failed: {error}");
     "The search failed. The server console holds the reason.".to_string()
 }
 
 /// Converts a caught panic payload to a job error message.
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     let detail = payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_string())

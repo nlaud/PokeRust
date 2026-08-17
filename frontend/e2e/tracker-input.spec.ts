@@ -1,8 +1,131 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { pickSelectOption, seedTeam, startTrackerSession } from './helpers'
 
 // Tests the tracker input against the real frontend and backend.
 // It covers completion, lead input, previews, turn commits, history, deletion, and cancellation.
+
+/** One event of a mocked solve stream. */
+interface SolveEvent {
+  name: string
+  data: unknown
+}
+
+/** The `started` event of a mocked stream. */
+function solveStarted(): SolveEvent {
+  return {
+    name: 'started',
+    data: {
+      jobId: 'job-1',
+      source: 'tracker',
+      sessionId: 'session-1',
+      position: 'battle',
+      generation: 0,
+      seed: 11,
+      targetDepth: 2,
+      profile: {
+        algorithm: 'ismcts',
+        preset: 'fast',
+        exact: false,
+        timeMs: 2000,
+        nodeBudget: null,
+        depth: 2,
+        replacementDepth: null,
+        workers: 1,
+        iterations: 200,
+        particles: 8,
+        seed: 11,
+        maxActionsPerPlayer: 6,
+        revealStrategy: true,
+        approximations: [],
+        adjustments: [],
+      },
+    },
+  }
+}
+
+/** One `update` event of a mocked stream.
+ *
+ * `action` names the one command that Player 1 plays, so a test can watch the
+ * support of the strategy change between two depths. */
+function solveUpdate(spec: {
+  revision: number
+  depth: number
+  complete: boolean
+  value: number
+  action: string
+}): SolveEvent {
+  const row = (description: string) => ({
+    commands: [{ command: { kind: 'move', moveIndex: 0 }, description }],
+    preview: null,
+    probability: 1,
+  })
+  return {
+    name: 'update',
+    data: {
+      generation: 0,
+      revision: spec.revision,
+      depth: spec.depth,
+      depthTarget: 2,
+      elapsedMs: 400 * (spec.revision + 1),
+      complete: spec.complete,
+      value: spec.value,
+      p1WinOdds: spec.value,
+      p2WinOdds: 1 - spec.value,
+      p1Strategy: [row(spec.action)],
+      p2Strategy: [row('Earthquake')],
+      p2StrategyIsPlayable: false,
+      stats: {
+        nodesExpanded: 12,
+        turnsSimulated: 340,
+        matrixCellsEvaluated: 0,
+        matrixCellsTotal: 0,
+        lpsSolved: 0,
+        abCutoffs: 0,
+        ttHits: 0,
+        turnCacheHits: 0,
+      },
+      sampling: {
+        algorithm: 'ismcts',
+        iterations: 200,
+        particles: 8,
+        seed: 11,
+        evaluator: 'fitted',
+      },
+      warnings: [],
+    },
+  }
+}
+
+/** Answers the two solve requests with a fixed event list.
+ *
+ * A real search takes tens of seconds and gives no fixed depth order, so a
+ * test of the panel reads a written stream instead. */
+async function mockSolveStream(page: Page, events: SolveEvent[]) {
+  await page.route('**/api/solve', (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ jobId: 'job-1' }),
+    }),
+  )
+  const body = events
+    .map((entry) => `event: ${entry.name}\ndata: ${JSON.stringify(entry.data)}\n\n`)
+    .join('')
+  await page.route('**/api/solve/*/events', (route) =>
+    route.fulfill({ status: 200, contentType: 'text/event-stream', body }),
+  )
+}
+
+/** Opens the panel, commits the leads, and starts one search. */
+async function openSolverAndSearch(page: Page) {
+  const panel = page.getByTestId('tracker-solver-panel')
+  await panel.getByTestId('tracker-solver-toggle').click()
+  const input = page.getByTestId('tracker-input')
+  await input.pressSequentially('leads p pikachu o Garchomp', { delay: 10 })
+  await page.keyboard.press('Shift+Enter')
+  await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
+  await page.getByTestId('tracker-solver-start').click()
+}
 
 test.describe('Tracker input bar', () => {
   test('autocomplete, leads, two-tier commit, delete-on-empty, and navigation all work end to end', async ({
@@ -137,8 +260,16 @@ test.describe('Tracker input bar', () => {
 test.describe('Tracker solver panel', () => {
   // The search itself runs on the server and can take tens of seconds, so this
   // test covers the panel and the request, not one complete answer.
-  test('starts, restores, stops, and deletes a search with its session', async ({ page }) => {
+  test('starts and stops a search, and deletes it with its session', async ({ page }) => {
     await seedTeam(page)
+    // Hold the event stream open, so the job stays in its running state until
+    // the test stops it. A real search can finish or fail in under a second,
+    // and the stop control then leaves the page before the click.
+    const releases: (() => void)[] = []
+    await page.route('**/api/solve/*/events', async (route) => {
+      await new Promise<void>((resolve) => releases.push(resolve))
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' })
+    })
     await startTrackerSession(page)
     const panel = page.getByTestId('tracker-solver-panel')
     await expect(panel).toBeVisible()
@@ -156,23 +287,21 @@ test.describe('Tracker solver panel', () => {
 
     await pickSelectOption(page, 'Algorithm', 'ISMCTS (sampled belief)')
     await pickSelectOption(page, 'Preset', 'Fast')
+    const registered = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/api/solve'),
+    )
     await page.getByTestId('tracker-solver-start').click()
+    await registered
 
-    // The toggle row reports the running search until the first depth answers.
+    // The panel reports the running search until the first depth answers.
     await expect(page.getByTestId('tracker-solver-stop')).toBeVisible()
 
-    // A reload restores the profile controls from the server record.
-    await page.reload()
-    await expect(panel).toBeVisible()
-    await panel.getByTestId('tracker-solver-toggle').click()
-    await expect(
-      panel.locator('label').filter({ hasText: 'Algorithm' }).getByRole('button').first(),
-    ).toContainText('ISMCTS (sampled belief)')
-    await expect(
-      panel.locator('label').filter({ hasText: 'Preset' }).getByRole('button').first(),
-    ).toContainText('Fast')
-
+    // Stopping the job cancels it on the server and hides the stop control.
+    const cancelled = page.waitForRequest(
+      (request) => request.method() === 'DELETE' && /\/api\/solve\/[^/]+$/.test(request.url()),
+    )
     await page.getByTestId('tracker-solver-stop').click()
+    await cancelled
     await expect(page.getByTestId('tracker-solver-stop')).toBeHidden()
 
     // Ending the tracker deletes its server session and cancels a new job.
@@ -183,6 +312,80 @@ test.describe('Tracker solver panel', () => {
     await page.getByRole('button', { name: 'End tracker' }).click()
     await page.getByRole('button', { name: 'Delete' }).click()
     await deleted
+    releases.forEach((release) => release())
+  })
+
+  test('keeps the last complete answer while the next depth runs', async ({ page }) => {
+    await seedTeam(page)
+    await mockSolveStream(page, [
+      solveStarted(),
+      solveUpdate({ revision: 0, depth: 1, complete: true, value: 0.5, action: 'Thunderbolt' }),
+      // A double-oracle round answers inside depth 2. It must not replace the
+      // complete answer of depth 1.
+      solveUpdate({ revision: 1, depth: 2, complete: false, value: 0.9, action: 'Protect' }),
+      { name: 'cancelled', data: { jobId: 'job-1', reason: 'The request stopped the job.' } },
+    ])
+    await startTrackerSession(page)
+    await openSolverAndSearch(page)
+
+    const body = page.getByTestId('tracker-solver-depth')
+    await expect(body).toContainText('Depth 1 of 2')
+    await expect(page.getByTestId('tracker-solver-p1-strategy')).toContainText('Thunderbolt')
+    await expect(page.getByTestId('tracker-solver-p1-strategy')).not.toContainText('Protect')
+  })
+
+  test('shows the value stability and the support change, and submits no command', async ({
+    page,
+  }) => {
+    await seedTeam(page)
+    await mockSolveStream(page, [
+      solveStarted(),
+      solveUpdate({ revision: 0, depth: 1, complete: true, value: 0.5, action: 'Thunderbolt' }),
+      solveUpdate({ revision: 1, depth: 2, complete: true, value: 0.62, action: 'Protect' }),
+      { name: 'done', data: { jobId: 'job-1', updates: 2 } },
+    ])
+    await startTrackerSession(page)
+    await openSolverAndSearch(page)
+
+    await expect(page.getByTestId('tracker-solver-depth')).toContainText('Depth 2 of 2')
+    const stability = page.getByTestId('tracker-solver-stability')
+    await expect(stability).toContainText('Depth 1 to depth 2: +12.0 pts')
+    await expect(stability).toContainText('Entered: Protect')
+    await expect(stability).toContainText('Left: Thunderbolt')
+
+    // The panel writes no command to the input bar, and clicking a row changes
+    // nothing.
+    const input = page.getByTestId('tracker-input')
+    const before = await input.inputValue()
+    await page.getByTestId('tracker-solver-p1-strategy').getByText('Protect').click()
+    await expect(input).toHaveValue(before)
+    await expect(page.getByTestId('tracker-solver-no-submit')).toBeVisible()
+  })
+
+  test('marks the answer as old after a committed turn', async ({ page }) => {
+    await seedTeam(page)
+    await mockSolveStream(page, [
+      solveStarted(),
+      solveUpdate({ revision: 0, depth: 1, complete: true, value: 0.5, action: 'Thunderbolt' }),
+      { name: 'done', data: { jobId: 'job-1', updates: 1 } },
+    ])
+    await startTrackerSession(page)
+    await openSolverAndSearch(page)
+    await expect(page.getByTestId('tracker-solver-depth')).toBeVisible()
+
+    // The next turn moves the position, so the answer on screen answers an
+    // older question. The panel keeps it and marks it.
+    const input = page.getByTestId('tracker-input')
+    await input.pressSequentially('p1 protect', { delay: 10 })
+    await page.keyboard.press('Enter')
+    await input.pressSequentially('o1 protect', { delay: 10 })
+    await page.keyboard.press('Shift+Enter')
+    await expect(page.getByText('Turn 2', { exact: true })).toBeVisible()
+
+    await expect(page.getByTestId('tracker-solver-stale')).toBeVisible()
+    await expect(page.getByTestId('tracker-solver-summary')).toContainText('old position')
+    // The answer itself stays on screen.
+    await expect(page.getByTestId('tracker-solver-p1-strategy')).toContainText('Thunderbolt')
   })
 
   test('completes and commits the opening back clause', async ({ page }, testInfo) => {

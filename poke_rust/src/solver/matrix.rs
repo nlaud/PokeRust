@@ -471,11 +471,60 @@ pub struct OracleSeed<'a> {
     pub cols: Option<&'a [usize]>,
 }
 
+/// Supplies the payoff of one cell, and reads the answer of one round.
+///
+/// [`double_oracle`] needs one payoff at a time, so a plain closure is enough
+/// for most callers. [`ClosureOracle`] wraps such a closure.
+///
+/// A caller that reports progress needs more. It has to read the restricted
+/// equilibrium after both best-response checks of each round. That value and
+/// those two strategies are the answer of the round. A second closure cannot do
+/// this, because both closures would borrow the same search context. One oracle
+/// holds that context one time and serves both methods.
+pub trait CellOracle {
+    /// The payoff of one row against one column.
+    fn cell(&mut self, row: usize, col: usize) -> f64;
+
+    /// The restricted equilibrium after both best-response checks of one round.
+    ///
+    /// `stats` holds the counters of this run so far. The caller adds them to
+    /// its own counters, because the run reports them only when it returns.
+    ///
+    /// The default implementation reads nothing. Only a progress reporter needs
+    /// this method.
+    fn round(&mut self, _solution: &MatrixSolution, _stats: &OracleStats) {}
+}
+
+/// A cell closure, as an oracle that reports no round.
+pub struct ClosureOracle<F>(pub F);
+
+impl<F: FnMut(usize, usize) -> f64> CellOracle for ClosureOracle<F> {
+    fn cell(&mut self, row: usize, col: usize) -> f64 {
+        (self.0)(row, col)
+    }
+}
+
 /// Solves a matrix game without building all of it.
 ///
 /// `rows` and `cols` give the size of the full game. `cell_value` returns the
 /// payoff of one row and one column. The run calls it only for the cells that it
 /// needs, and never twice for the same cell.
+///
+/// Use [`double_oracle_with`] to also read the answer of each round.
+pub fn double_oracle<F>(
+    rows: usize,
+    cols: usize,
+    seed: OracleSeed<'_>,
+    limits: OracleLimits,
+    cell_value: F,
+) -> (MatrixSolution, OracleStats)
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    double_oracle_with(rows, cols, seed, limits, ClosureOracle(cell_value))
+}
+
+/// [`double_oracle`], with an oracle that also reads each round.
 ///
 /// Start from a small restricted game. Solve it, then ask each player for their
 /// best response over the full action set. Neither player can improve on the
@@ -489,15 +538,15 @@ pub struct OracleSeed<'a> {
 ///
 /// This implements Algorithm 3 of Bošanský et al., Artificial Intelligence 237,
 /// 2016.
-pub fn double_oracle<F>(
+pub fn double_oracle_with<O>(
     rows: usize,
     cols: usize,
     seed: OracleSeed<'_>,
     limits: OracleLimits,
-    mut cell_value: F,
+    mut oracle: O,
 ) -> (MatrixSolution, OracleStats)
 where
-    F: FnMut(usize, usize) -> f64,
+    O: CellOracle,
 {
     let mut stats = OracleStats::default();
     let mut best = MatrixSolution {
@@ -527,7 +576,7 @@ where
             for &j in &restricted_cols {
                 if cells[i][j].is_none() {
                     stats.cells_requested += 1;
-                    cells[i][j] = Some(cell_value(i, j));
+                    cells[i][j] = Some(oracle.cell(i, j));
                 }
             }
         }
@@ -560,15 +609,19 @@ where
             &col_strategy,
             limits.high,
             &mut stats,
-            &mut cell_value,
+            &mut oracle,
         );
         let (col_br_value, col_br) = best_response_col(
             &mut cells,
             &row_strategy,
             limits.low,
             &mut stats,
-            &mut cell_value,
+            &mut oracle,
         );
+
+        // Both best-response checks are complete, so this round has an answer.
+        // A reporter can publish it now. The loop reads nothing back.
+        oracle.round(&best, &stats);
 
         // P2 can hold P1 to `row_br_value` by playing `col_strategy`, and P1 can
         // guarantee `col_br_value` by playing `row_strategy`. Both are full-game
@@ -619,15 +672,15 @@ where
 /// against that cell's bound, compare the row's optimistic completion against the
 /// incumbent directly. Both skip exactly the same rows, and the bound tightens
 /// mid-row as cells become known.
-fn best_response_row<F>(
+fn best_response_row<O>(
     cells: &mut [Vec<Option<f64>>],
     col_strategy: &[f64],
     high: f64,
     stats: &mut OracleStats,
-    cell_value: &mut F,
+    oracle: &mut O,
 ) -> (f64, usize)
 where
-    F: FnMut(usize, usize) -> f64,
+    O: CellOracle,
 {
     let support: Vec<usize> = (0..col_strategy.len())
         .filter(|&j| col_strategy[j] > EPS)
@@ -656,7 +709,7 @@ where
                 Some(value) => value,
                 None => {
                     stats.cells_requested += 1;
-                    let value = cell_value(i, j);
+                    let value = oracle.cell(i, j);
                     row[j] = Some(value);
                     value
                 }
@@ -677,15 +730,15 @@ where
 ///
 /// P2 therefore looks for the *smallest* number. This is the mirror of
 /// [`best_response_row`], and it judges unevaluated cells at `low`.
-fn best_response_col<F>(
+fn best_response_col<O>(
     cells: &mut [Vec<Option<f64>>],
     row_strategy: &[f64],
     low: f64,
     stats: &mut OracleStats,
-    cell_value: &mut F,
+    oracle: &mut O,
 ) -> (f64, usize)
 where
-    F: FnMut(usize, usize) -> f64,
+    O: CellOracle,
 {
     let support: Vec<usize> = (0..row_strategy.len())
         .filter(|&i| row_strategy[i] > EPS)
@@ -717,7 +770,7 @@ where
                 Some(value) => value,
                 None => {
                     stats.cells_requested += 1;
-                    let value = cell_value(i, j);
+                    let value = oracle.cell(i, j);
                     cells[i][j] = Some(value);
                     value
                 }
@@ -992,6 +1045,91 @@ mod tests {
         assert!((solution.value - reference.value).abs() < 1e-7);
         assert!((solution.row_strategy.iter().sum::<f64>() - 1.0).abs() < EPS);
         assert!((solution.col_strategy.iter().sum::<f64>() - 1.0).abs() < EPS);
+        assert_equilibrium(&payoffs, &solution, 1e-7);
+    }
+
+    /// What one recorded run reports back to the test.
+    #[derive(Default)]
+    struct OracleRecord {
+        /// The count of cell calls before each round call.
+        cells_at_each_round: Vec<usize>,
+        cells: usize,
+        /// The restricted value of each round.
+        values: Vec<f64>,
+    }
+
+    /// Records the order of the cell calls and the round calls of one run.
+    ///
+    /// [`double_oracle`] takes the oracle by value, so the record lives behind a
+    /// shared handle. The test reads that handle after the run.
+    struct RecordingOracle<'a> {
+        payoffs: &'a [Vec<f64>],
+        record: std::rc::Rc<std::cell::RefCell<OracleRecord>>,
+    }
+
+    impl CellOracle for RecordingOracle<'_> {
+        fn cell(&mut self, row: usize, col: usize) -> f64 {
+            self.record.borrow_mut().cells += 1;
+            self.payoffs[row][col]
+        }
+
+        fn round(&mut self, solution: &MatrixSolution, stats: &OracleStats) {
+            let mut record = self.record.borrow_mut();
+            assert_eq!(
+                stats.cells_requested as usize, record.cells,
+                "the round must read the counters of this run"
+            );
+            let cells = record.cells;
+            record.cells_at_each_round.push(cells);
+            record.values.push(solution.value);
+        }
+    }
+
+    /// The progress reporter publishes one answer for each round, and it
+    /// publishes only after both best-response checks read their cells.
+    #[test]
+    fn the_round_hook_fires_after_both_best_response_checks() {
+        // Rock, paper, scissors needs every row and every column, so the run
+        // takes several rounds and each round adds one action to each side.
+        let payoffs = vec![
+            vec![0.5, 0.0, 1.0],
+            vec![1.0, 0.5, 0.0],
+            vec![0.0, 1.0, 0.5],
+        ];
+        let record = std::rc::Rc::new(std::cell::RefCell::new(OracleRecord::default()));
+        let oracle = RecordingOracle {
+            payoffs: &payoffs,
+            record: std::rc::Rc::clone(&record),
+        };
+
+        let (solution, _) = double_oracle_with(
+            payoffs.len(),
+            payoffs[0].len(),
+            OracleSeed::default(),
+            OracleLimits::default(),
+            oracle,
+        );
+
+        let record = record.borrow();
+        let rounds = &record.cells_at_each_round;
+        assert!(
+            rounds.len() > 1,
+            "this game needs more than one round, so the hook must fire more than one time"
+        );
+        // The first round solves one cell, and then both checks read the rest of
+        // the first row and the first column. A hook that fired before those
+        // checks would report only the one seeded cell.
+        assert!(
+            rounds[0] >= payoffs.len() + payoffs[0].len() - 1,
+            "the hook fired before both checks read their cells: {rounds:?}"
+        );
+        // Each round reads at least one new cell, so the counts rise.
+        for pair in rounds.windows(2) {
+            assert!(pair[1] > pair[0], "{rounds:?}");
+        }
+        assert_eq!(record.values.len(), rounds.len());
+        // The hook must not change the answer.
+        assert!((solution.value - 0.5).abs() < 1e-7);
         assert_equilibrium(&payoffs, &solution, 1e-7);
     }
 }

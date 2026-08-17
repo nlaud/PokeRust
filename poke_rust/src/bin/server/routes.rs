@@ -46,6 +46,8 @@ pub struct AppState {
     /// True while one benchmark run is active.
     /// Closing the client stream does not stop a blocking sweep.
     pub benchmark_running: Arc<AtomicBool>,
+    /// Every registered streaming solver job — see `solve.rs`.
+    pub solve_jobs: crate::solve::SolveJobs,
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -648,6 +650,10 @@ pub async fn submit_turn(
             Err(message) => return internal_error(message),
         };
 
+    // The position moved, so every streaming solver job of this battle now
+    // answers an old question. Each such job ends with a `cancelled` event.
+    crate::solve::cancel_jobs_for(&app, crate::solve::SolveSource::Battle, &id);
+
     // `resolve_turn` already raised the analysis generation, so this job carries
     // the new position. The search runs off the lock, and its result reaches the
     // session only while the generation still matches.
@@ -703,6 +709,8 @@ pub async fn finish_analysis(State(app): State<AppState>, Path(id): Path<String>
 
 pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {
     let removed = lock_sessions(&app).remove(&id).is_some();
+    // A removed battle leaves every streaming job with no target.
+    crate::solve::cancel_jobs_for(&app, crate::solve::SolveSource::Battle, &id);
     if removed {
         StatusCode::NO_CONTENT.into_response()
     } else {

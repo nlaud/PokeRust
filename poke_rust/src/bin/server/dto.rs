@@ -997,6 +997,154 @@ pub struct TrackerAnalysisDto {
     pub profile: Option<crate::bot::BotProfileView>,
 }
 
+// ── The streaming solve job ──────────────────────────────────────────────────
+// `POST /api/solve` registers one job. `GET /api/solve/{id}/events` runs it and
+// streams each answer. The stream sends `started`, then each `update`, and then
+// one of `done`, `failed`, or `cancelled`.
+
+/// The body of `POST /api/solve`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SolveRequestDto {
+    /// One of `battle` or `tracker`.
+    pub source: String,
+    /// The battle ID or the tracker ID.
+    pub session_id: String,
+    /// The solver profile. Each absent field takes its preset value.
+    #[serde(default)]
+    pub profile: crate::bot::BotProfileRequest,
+}
+
+/// The answer of `POST /api/solve`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveJobDto {
+    /// Open `/api/solve/{jobId}/events` to run this job.
+    pub job_id: String,
+}
+
+/// The first event of one stream.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveStartedDto {
+    pub job_id: String,
+    /// One of `battle` or `tracker`.
+    pub source: String,
+    pub session_id: String,
+    /// One of `battle` or `teamPreview`.
+    pub position: String,
+    /// The position counter of the position that this job reads.
+    pub generation: u64,
+    /// The seed of the draw and the search.
+    ///
+    /// A profile with no seed gets a random one. The client reads this number,
+    /// so the same answer can be searched again.
+    pub seed: u64,
+    /// The depth horizon of the ladder.
+    pub target_depth: u8,
+    pub profile: crate::bot::BotProfileView,
+}
+
+/// What one search cost.
+///
+/// A sampling search builds no matrix, so it reports zero for every matrix
+/// counter.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveStatsDto {
+    pub nodes_expanded: u64,
+    pub turns_simulated: u64,
+    pub matrix_cells_evaluated: u64,
+    pub matrix_cells_total: u64,
+    pub lps_solved: u64,
+    pub ab_cutoffs: u64,
+    pub tt_hits: u64,
+    pub turn_cache_hits: u64,
+}
+
+/// The sampling detail of one approximate result.
+///
+/// An exact search sends no such object.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveSamplingDto {
+    /// One of `mcts`, `ismcts`, or `mccfr`.
+    pub algorithm: String,
+    /// The iterations that the search finished.
+    pub iterations: u64,
+    /// The worlds that a belief search drew.
+    /// `None` for a search of one concrete position.
+    pub particles: Option<usize>,
+    /// The seed of the draw and the search.
+    pub seed: u64,
+    /// The leaf evaluator that scored the depth horizon.
+    pub evaluator: String,
+}
+
+/// One published answer of a running job.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveUpdateDto {
+    /// The position counter that this answer belongs to.
+    pub generation: u64,
+    /// The count of updates that this job sent before this one.
+    /// It starts at zero, and it never falls.
+    pub revision: u64,
+    /// The depth of this answer.
+    pub depth: u8,
+    /// The depth horizon of the ladder.
+    pub depth_target: u8,
+    /// The time from the start of the job.
+    pub elapsed_ms: u64,
+    /// True when this answer ends a depth.
+    /// A false value marks one double-oracle round inside a depth.
+    pub complete: bool,
+    /// The value of the game, as Player 1's win probability.
+    pub value: f64,
+    pub p1_win_odds: f64,
+    pub p2_win_odds: f64,
+    /// The complete mixed strategy of Player 1.
+    pub p1_strategy: Vec<StrategyRowDto>,
+    /// The complete mixed strategy of Player 2.
+    ///
+    /// A battle job sends `None` unless the profile holds `revealStrategy`. A
+    /// tracker job always sends the rows, because the tracker user typed both
+    /// rosters.
+    pub p2_strategy: Option<Vec<StrategyRowDto>>,
+    /// True when the Player 2 rows form one strategy for one private state.
+    pub p2_strategy_is_playable: bool,
+    pub stats: SolveStatsDto,
+    /// `None` for an exact search.
+    pub sampling: Option<SolveSamplingDto>,
+    /// Every reason that this answer is approximate.
+    pub warnings: Vec<String>,
+}
+
+/// The last event of a job that finished its ladder.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveDoneDto {
+    pub job_id: String,
+    /// The count of updates that this job sent.
+    pub updates: u64,
+}
+
+/// The last event of a job that produced no result.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveFailedDto {
+    pub job_id: String,
+    pub message: String,
+}
+
+/// The last event of a job that a request or a new position stopped.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveCancelledDto {
+    pub job_id: String,
+    pub reason: String,
+}
+
 /// Contains alphabetical teamsheet species names.
 /// The setup page uses this list before it creates a session.
 /// The server removes battle-only forms.

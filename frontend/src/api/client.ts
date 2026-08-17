@@ -11,6 +11,13 @@ import type {
   GetTrackerResponse,
   LegalCommands,
   PlayerId,
+  SolveCancelled,
+  SolveDone,
+  SolveFailed,
+  SolveJobResponse,
+  SolveRequest,
+  SolveStarted,
+  SolveUpdate,
   SpeciesListDto,
   TrackerAnalysisRequest,
   TrackerAnalysisResponse,
@@ -206,6 +213,63 @@ export function streamBenchmark(handlers: {
   es.onerror = () => {
     es.close()
     handlers.onAborted('Connection to server lost')
+  }
+  return () => es.close()
+}
+
+// ── The streaming solve job ─────────────────────────────────────────────────
+
+/** Registers one solver job for the current position of a session.
+ *
+ * The job runs when `streamSolve` opens its event stream, so a registered job
+ * that no client reads costs no processor time. A second call for the same
+ * session cancels the earlier job. */
+export function startSolve(req: SolveRequest): Promise<SolveJobResponse> {
+  return request('/api/solve', { method: 'POST', body: JSON.stringify(req) })
+}
+
+/** Stops one solver job. The running stream then sends `cancelled`. */
+export function cancelSolve(jobId: string): Promise<void> {
+  return request(`/api/solve/${jobId}`, { method: 'DELETE' })
+}
+
+/** Runs one registered job and reads its answers.
+ *
+ * The stream sends `started`, then each `update`, and then one of `done`,
+ * `failed`, or `cancelled`. All three of those close the stream, which also
+ * stops the automatic reconnection of `EventSource`.
+ *
+ * The returned function cancels the stream. It does not stop the search: call
+ * `cancelSolve` for that. */
+export function streamSolve(
+  jobId: string,
+  handlers: {
+    onStarted: (started: SolveStarted) => void
+    onUpdate: (update: SolveUpdate) => void
+    onDone: (done: SolveDone) => void
+    onFailed: (failed: SolveFailed) => void
+    onCancelled: (cancelled: SolveCancelled) => void
+    /** Called when a connection failure closes the stream. */
+    onAborted: (message: string) => void
+  },
+): () => void {
+  const es = new EventSource(`/api/solve/${jobId}/events`)
+  let ended = false
+  const end = (run: () => void) => {
+    ended = true
+    es.close()
+    run()
+  }
+  es.addEventListener('started', (e) => handlers.onStarted(JSON.parse(e.data)))
+  es.addEventListener('update', (e) => handlers.onUpdate(JSON.parse(e.data)))
+  es.addEventListener('done', (e) => end(() => handlers.onDone(JSON.parse(e.data))))
+  es.addEventListener('failed', (e) => end(() => handlers.onFailed(JSON.parse(e.data))))
+  es.addEventListener('cancelled', (e) => end(() => handlers.onCancelled(JSON.parse(e.data))))
+  es.onerror = () => {
+    // A terminal event closes the stream itself, and that close raises this
+    // handler. Report only a failure that arrives before the end.
+    if (ended) return
+    end(() => handlers.onAborted('Connection to server lost'))
   }
   return () => es.close()
 }

@@ -236,6 +236,40 @@ It publishes one rung of bring-and-lead choices.
 
 `frontend/README.md` explains the two panels that show these answers.
 
+### The streaming job
+
+`solve.rs` runs one job for a battle session or a tracker session, and it
+streams each answer over Server-Sent Events.
+
+`POST /api/solve` validates the session and the profile.
+It registers one job and returns the job ID.
+`GET /api/solve/{id}/events` runs that job one time and streams its answers.
+`DELETE /api/solve/{id}` stops the job.
+
+The stream sends `started`, then each `update`, and then one of `done`,
+`failed`, or `cancelled`.
+Each `update` carries the generation of the position, a revision that rises by
+one, the depth, the elapsed time, the value, both complete strategies, and the
+search statistics.
+A sampled answer also carries its iteration count, its world count, its seed,
+and the name of its leaf evaluator.
+
+The job publishes one answer at the end of each depth.
+An exact double-oracle search also publishes one answer after both
+best-response checks of each round.
+A round answer carries `complete: false`, and a rate limit holds those answers
+to one each 250 milliseconds.
+A depth answer ignores that limit.
+
+`matrix::CellOracle` carries the round hook into the matrix solver.
+`solve_seeded_progress_cancellable` supplies that hook at the root position
+alone.
+
+A tracker answer carries both strategies.
+A battle answer carries the Player 2 strategy only when the profile holds
+`revealStrategy`.
+A committed turn cancels every job of that session.
+
 ## Research
 
 - [Pokémon VGC Tournament Handbook](https://mcdn.pokemon.com/pokemon-prod/raw/upload/v1/live/static-assets/content-assets/cms2/pdf/play-pokemon/rules/play-pokemon-vgc-tournament-handbook-en.pdf)
