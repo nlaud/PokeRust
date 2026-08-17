@@ -28897,6 +28897,33 @@ mod priority_abilities {
         }
 
         #[test]
+        fn protect_blocks_all_hits_of_dual_wingbeat() {
+            let p1 = mon(
+                Species::Tyranitar,
+                Ability::SandStream,
+                PokemonMove::Protect,
+                PokemonMove::Splash,
+            );
+            let p2 = mon(
+                Species::Staraptor,
+                Ability::Intimidate,
+                PokemonMove::DualWingbeat,
+                PokemonMove::Splash,
+            );
+
+            for (outcome, _) in run(p1, p2, 0, 0) {
+                let MatchState::BattleState(after) = outcome else {
+                    panic!("the battle must continue");
+                };
+                assert_eq!(
+                    after.p1_active_mons[0].hp,
+                    after.p1_active_mons[0].stats[0],
+                    "Protect must block both hits of Dual Wingbeat"
+                );
+            }
+        }
+
+        #[test]
         fn feint_bypasses_protect() {
             let p1 = mon(
                 Species::Clefable,

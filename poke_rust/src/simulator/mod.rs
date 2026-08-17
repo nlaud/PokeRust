@@ -7484,6 +7484,15 @@ fn possible_damage_outcomes_for_move(
                     tgt,
                 );
                 eff > 0.0
+                    && simulator_helpers::protect_blocks_move(
+                        &next_state,
+                        action.user_slot,
+                        slot,
+                        tgt,
+                        move_data,
+                        false,
+                    )
+                    .is_none()
             };
             let slot0_valid = is_valid(foe_slots[0]);
             let slot1_valid = is_valid(foe_slots[1]);
@@ -7649,6 +7658,48 @@ fn possible_damage_outcomes_for_move(
         else {
             return vec![(MatchState::BattleState(next_state), 1.0)];
         };
+
+        // The multi-hit path returns before the common target loop below.
+        // Apply protection once for the complete move before the first hit.
+        let is_spread = simulator_helpers::move_is_spread_target(&move_data.target);
+        if let Some(kind) = simulator_helpers::protect_blocks_move(
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            is_spread,
+        ) {
+            if simulator_helpers::contact_effects_apply(&next_state, &attacker, move_data) {
+                simulator_helpers::apply_protect_contact_punishment(
+                    &mut next_state,
+                    action.user_slot,
+                    target_slot,
+                    kind,
+                );
+            }
+            if simulator_helpers::attacker_has_active_unseen_fist(
+                &next_state,
+                &attacker,
+                move_data,
+            ) {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::AbilityRevealed {
+                        slot: action.user_slot,
+                        ability: Ability::UnseenFist,
+                    },
+                );
+            } else {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::Blocked {
+                        target: target_slot,
+                    },
+                );
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+        }
 
         let (invulnerability_multiplier, should_continue) =
             check_invulnerability_status(&attacker, &target, &move_name);
