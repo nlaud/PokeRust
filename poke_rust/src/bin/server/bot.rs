@@ -185,7 +185,11 @@ pub struct BotProfileRequest {
     /// No preset sets this field. An absent field gives a forced decision the
     /// remaining turn budget, as a turn gets.
     pub replacement_depth: Option<u8>,
-    /// The search is serial, so the server accepts only 1.
+    /// The server chooses the worker count, so it accepts only 1.
+    ///
+    /// Double oracle takes its workers from the process pool.
+    /// The pool bounds the threads of all concurrent solves.
+    /// Thus, one client cannot set the count.
     pub workers: Option<u8>,
     /// Sampling algorithms only.
     pub iterations: Option<u32>,
@@ -218,6 +222,10 @@ pub struct BotProfileView {
     pub depth: u8,
     /// Absent when a forced decision uses the remaining turn budget.
     pub replacement_depth: Option<u8>,
+    /// The workers that this search asks the process pool for.
+    ///
+    /// A busy pool can give the search fewer workers. The count does not change
+    /// the value or either strategy.
     pub workers: u8,
     pub iterations: Option<u32>,
     pub particles: Option<usize>,
@@ -360,7 +368,7 @@ pub fn resolve(
 
     if req.workers.is_some_and(|workers| workers != 1) {
         return Err(format!(
-            "{scope}.workers: the search is serial, so only 1 worker is available"
+            "{scope}.workers: the server chooses the worker count, so only 1 is accepted"
         ));
     }
 
@@ -494,7 +502,7 @@ pub fn resolve(
             node_budget,
             depth,
             replacement_depth,
-            workers: 1,
+            workers: search_workers(&search),
             iterations,
             particles,
             seed: req.seed,
@@ -505,6 +513,19 @@ pub fn resolve(
         },
         search,
     })
+}
+
+/// The workers that one resolved search uses.
+///
+/// Only double oracle uses the worker pool. Every other search runs on one
+/// thread.
+fn search_workers(search: &BotSearchConfig) -> u8 {
+    match search {
+        BotSearchConfig::Exact(config) if config.algorithm == SolverAlgorithm::DoubleOracle => {
+            config.workers.min(u8::MAX as usize) as u8
+        }
+        _ => 1,
+    }
 }
 
 /// Builds the solver configuration of one resolved profile.
@@ -531,6 +552,9 @@ fn build_search(
             max_actions_per_player,
             node_budget,
             deadline: None,
+            // The pool bounds the extra threads across every concurrent solve,
+            // so the server can ask for the whole cap here.
+            workers: poke_rust::solver::pool::shared().capacity(),
             ..SolveConfig::default()
         });
     }
@@ -594,7 +618,11 @@ mod tests {
             assert_eq!(profile.view.depth, depth);
             assert_eq!(profile.view.node_budget, Some(budget));
             assert_eq!(profile.view.time_ms, Some(time));
-            assert_eq!(profile.view.workers, 1);
+            // Double oracle takes the pool capacity, which is one worker or more.
+            assert_eq!(
+                profile.view.workers as usize,
+                poke_rust::solver::pool::shared().capacity().min(u8::MAX as usize)
+            );
             assert!(profile.view.adjustments.is_empty());
         }
     }
@@ -712,12 +740,14 @@ mod tests {
         assert!(error.contains("particles"));
     }
 
+    /// The server takes its workers from the process pool, so a client cannot
+    /// name a count.
     #[test]
     fn a_second_worker_is_rejected() {
         let mut req = request("doubleOracle", "fast");
         req.workers = Some(2);
         let error = resolve("botP2", &req, 16, true).unwrap_err();
-        assert!(error.contains("serial"));
+        assert!(error.contains("workers"), "{error}");
     }
 
     #[test]
@@ -810,6 +840,21 @@ mod tests {
         assert_eq!(config.deadline, None);
         assert_eq!(config.damage_rolls, 16);
         assert!(config.consider_crit);
+    }
+
+    #[test]
+    fn only_double_oracle_reports_multiple_workers() {
+        let capacity = poke_rust::solver::pool::shared()
+            .capacity()
+            .min(u8::MAX as usize) as u8;
+        for (algorithm, workers) in [
+            ("backwardInduction", 1),
+            ("serializedBounds", 1),
+            ("doubleOracle", capacity),
+        ] {
+            let profile = resolve("botP2", &request(algorithm, "fast"), 16, true).unwrap();
+            assert_eq!(profile.view.workers, workers, "{algorithm}");
+        }
     }
 
     #[test]

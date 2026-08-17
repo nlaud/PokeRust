@@ -146,6 +146,20 @@
 //! whose simulation aborts takes a static score.
 //! Read the `search` module documentation for the rule.
 //!
+//! # Parallel search
+//!
+//! [`SolveConfig::workers`] asks double oracle for more than one worker.
+//! The root position evaluates its matrix cells in batches.
+//! Every other part of the search stays serial.
+//!
+//! [`pool`] holds the permits of the process. It bounds the extra threads across
+//! every concurrent solve, and it uses neither the Tokio runtime nor the
+//! benchmark threads.
+//!
+//! A parallel solve returns the value and the strategies of a serial solve. Read
+//! the `search` module documentation for the rules that give this property, and
+//! for what the pool leaves serial.
+//!
 //! # Utilities are win probabilities
 //!
 //! Each utility is P1's win probability in `[0, 1]`.
@@ -193,6 +207,7 @@ pub mod ismcts;
 pub mod matrix;
 pub mod mccfr;
 pub mod mcts;
+pub mod pool;
 pub mod preview;
 pub mod search;
 pub mod train;
@@ -337,6 +352,20 @@ pub struct SolveConfig {
     pub turn_cache_capacity: usize,
     /// Maximum decision chain that does not consume depth.
     pub max_forced_chain: u8,
+    /// The workers that double oracle asks for.
+    ///
+    /// A value of 0 or 1 keeps the serial search. A larger value lets the root
+    /// position evaluate matrix cells in batches. [`pool`] bounds the extra
+    /// threads across every solve of the process, so a solve can get fewer
+    /// workers than it asks for.
+    ///
+    /// The pool does not change the value or either strategy. It does change the
+    /// cost counters, and it does change which nodes a stopped search reached.
+    /// Read the `search` module documentation for the rules.
+    ///
+    /// One worker holds its own transposition table, so a large `tt_capacity`
+    /// multiplies the memory of a solve by this count.
+    pub workers: usize,
     /// Turns of lookahead below a replacement or a self-switch pivot.
     /// `None` gives a forced decision the remaining turn budget, as a turn gets.
     /// Read [`forced_descent`] for the rule and for its termination bound.
@@ -363,6 +392,7 @@ impl Default for SolveConfig {
             turn_cache_capacity: 0,
             max_forced_chain: 8,
             replacement_depth: None,
+            workers: 1,
         }
     }
 }

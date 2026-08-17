@@ -78,6 +78,60 @@ The server accepts `replacementDepth` from 1 through 8 in a profile request.
 It runs double oracle over the 180 choices.
 It caches or precomputes the matrix cells.
 
+### Parallel search
+
+`SolveConfig::workers` asks double oracle for more than one worker.
+A value of 0 or 1 keeps the serial search.
+
+`solver::pool` holds the permits of the process.
+The capacity comes from `std::thread::available_parallelism`.
+`WorkerPool::acquire` never blocks, and it can return no permit.
+A batch with no permit runs on the calling thread alone.
+
+The pool uses neither the Tokio runtime nor the benchmark threads.
+Every concurrent solve draws from the one permit count.
+The calling thread takes no permit, so a batch with `n` permits uses `n + 1`
+threads.
+
+Only the root position makes a batch.
+One solve therefore has one level of parallelism.
+The matrix solver and the double-oracle control loop stay serial.
+`SearchContext::serial_ab` also stays serial.
+
+The double-oracle round uses a batch in two places:
+
+1. The fill of the missing restricted cells.
+2. A prefetch before each best-response check.
+
+`CellOracle::batch_limit` bounds the prefetch.
+Without the bound the prefetch would fill the whole matrix.
+That is the work that double oracle exists to avoid.
+
+A parallel solve returns the value and the strategies of a serial solve.
+Three facts give this property:
+
+1. A cell value is exact.
+   A cache changes the speed of a cell, not its value.
+2. A job seed comes from the identity of the job, not from the worker.
+3. A prefetched cell only adds a known value.
+   The check abandons a row only when even its optimistic bound loses.
+   Such a row is never the best response.
+
+The pool runs only under an exact chance mode.
+`ChanceMode::Sample` draws from the random generator.
+A sampled cell value also depends on the caches of its worker.
+A sampling solve therefore keeps the serial path.
+
+The cost counters do depend on the thread schedule.
+A cache hit depends on the job order of one worker.
+A solve that hits the node budget or the deadline depends on the schedule for
+the same reason.
+
+One worker holds its own transposition table.
+A large `tt_capacity` therefore multiplies the memory of a solve.
+Set `VERBOSITY` to zero before a large search, because two workers interleave
+their output.
+
 ### Approximate search
 
 `solver::mcts` holds the sampling search.

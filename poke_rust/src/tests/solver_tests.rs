@@ -34,6 +34,7 @@ use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
 use crate::solver::mccfr::{self, ContinualConfig, MccfrConfig};
 use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
+use crate::solver::pool::{WorkerPool, job_seed};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
@@ -247,6 +248,7 @@ fn the_root_progress_hook_reports_each_round_without_moving_the_value() {
     let config = SolveConfig {
         depth: 2,
         algorithm: SolverAlgorithm::DoubleOracle,
+        workers: 4,
         ..base_config()
     };
 
@@ -286,6 +288,13 @@ fn the_root_progress_hook_reports_each_round_without_moving_the_value() {
         rounds.last().unwrap().depth,
         reported.depth_reached,
         "the last round must belong to the returned pass"
+    );
+    let last_stats = &rounds.last().unwrap().stats;
+    assert_eq!(last_stats.nodes_expanded, reported.stats.nodes_expanded);
+    assert_eq!(last_stats.turns_simulated, reported.stats.turns_simulated);
+    assert_eq!(
+        last_stats.matrix_cells_evaluated,
+        reported.stats.matrix_cells_evaluated
     );
     for round in &rounds {
         assert!((0.0..=1.0).contains(&round.value), "{}", round.value);
@@ -6441,3 +6450,203 @@ fn the_sampling_search_reads_the_replacement_depth() {
     let total: f64 = result.p1_strategy.iter().map(|a| a.probability).sum();
     assert!((total - 1.0).abs() < 1e-6, "P1 strategy sums to {total}");
 }
+
+// ── The bounded worker pool ─────────────────────────────────────────────────
+
+/// A position with enough structure to fill several matrix cells.
+///
+/// The pool only matters when the root matrix has more than one missing cell,
+/// so these tests use the contested position rather than a forced one.
+fn pool_config(workers: usize) -> SolveConfig {
+    SolveConfig {
+        depth: 2,
+        workers,
+        ..base_config()
+    }
+}
+
+/// Compares two answers of the same position field by field.
+fn assert_same_answer(serial: &SolveResult, parallel: &SolveResult) {
+    assert_eq!(
+        serial.value, parallel.value,
+        "the pool moved the value from {} to {}",
+        serial.value, parallel.value
+    );
+    assert_eq!(serial.depth_reached, parallel.depth_reached);
+    assert_eq!(serial.warnings, parallel.warnings);
+    for (label, one, two) in [
+        ("P1", &serial.p1_strategy, &parallel.p1_strategy),
+        ("P2", &serial.p2_strategy, &parallel.p2_strategy),
+    ] {
+        assert_eq!(
+            one.len(),
+            two.len(),
+            "{label} strategy changed size: {one:?} against {two:?}"
+        );
+        for (a, b) in one.iter().zip(two) {
+            assert_eq!(a.probability, b.probability, "{label} probability moved");
+            assert_eq!(
+                format!("{:?}", a.commands),
+                format!("{:?}", b.commands),
+                "{label} action order moved"
+            );
+        }
+    }
+}
+
+/// The invariant of the whole pool: a worker answers cells, and it never changes
+/// the answer. A cell value is exact, and a job seed comes from the identity of
+/// the job, so the thread schedule cannot reach the value or either strategy.
+#[test]
+fn parallel_search_matches_serial_value() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let serial = solve(&state, pokemon_dex, move_dex, &pool_config(1)).expect("solvable");
+    let parallel = solve(&state, pokemon_dex, move_dex, &pool_config(4)).expect("solvable");
+
+    assert_valid_strategies(&parallel);
+    assert_same_answer(&serial, &parallel);
+    // The pool must not lose work from the counters that it merges.
+    assert!(parallel.stats.turns_simulated > 0);
+    if crate::solver::pool::shared().capacity() > 1 {
+        // Prefetch reads cells that the serial best-response scan skips.
+        assert!(
+            parallel.stats.matrix_cells_evaluated > serial.stats.matrix_cells_evaluated,
+            "the parallel path did not run: {} cells against {}",
+            parallel.stats.matrix_cells_evaluated,
+            serial.stats.matrix_cells_evaluated
+        );
+    } else {
+        // A one-CPU process must use the supported serial fallback.
+        assert_eq!(
+            parallel.stats.matrix_cells_evaluated,
+            serial.stats.matrix_cells_evaluated
+        );
+    }
+}
+
+/// A sampling chance mode keeps the serial path, so a worker count cannot move
+/// its answer either. Without that rule the sampled value would depend on the
+/// caches of the worker that ran the cell.
+#[test]
+fn parallel_search_matches_serial_under_sampling() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let sampled = |workers| SolveConfig {
+        chance: ChanceMode::Sample(2),
+        damage_rolls: 4,
+        ..pool_config(workers)
+    };
+
+    let serial = solve_seeded(9, &state, pokemon_dex, move_dex, &sampled(1)).expect("solvable");
+    let parallel = solve_seeded(9, &state, pokemon_dex, move_dex, &sampled(4)).expect("solvable");
+
+    assert_valid_strategies(&parallel);
+    assert_same_answer(&serial, &parallel);
+    assert_eq!(serial.stats.turns_simulated, parallel.stats.turns_simulated);
+}
+
+/// A cancel that arrives inside a batch must reach the answer. Each worker
+/// latches its own flag, and the batch merges those flags into the control
+/// context. Every cancelled job still returns a static score, so the answer
+/// stays playable.
+#[test]
+fn parallel_search_cancels() {
+    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let flag = CancelFlag::new();
+    arm_probe(Some(&flag), Some(12));
+    let config = SolveConfig {
+        eval: probe_eval,
+        ..pool_config(4)
+    };
+    let result = solve_seeded_cancellable(3, &state, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("a cancel returns an answer, never an error");
+    arm_probe(None, None);
+
+    assert!(flag.is_cancelled());
+    assert_valid_strategies(&result);
+    assert!(
+        result.warnings.contains(&SolveWarning::Cancelled),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// The node budget applies to all workers together.
+#[test]
+fn parallel_search_does_not_expand_past_the_node_budget() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let budget = 10;
+    let result = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            node_budget: Some(budget),
+            ..pool_config(4)
+        },
+    )
+    .expect("a budgeted solve returns an answer");
+
+    assert!(
+        result.stats.nodes_expanded <= budget,
+        "the workers expanded {} nodes with a budget of {budget}",
+        result.stats.nodes_expanded
+    );
+}
+
+/// The permit count is what bounds the process. A request above the capacity
+/// takes the capacity, and a request against an empty pool takes nothing.
+#[test]
+fn pool_permits_bound_the_worker_count() {
+    // A private pool, so the count does not depend on the test schedule.
+    let pool = WorkerPool::new(3);
+    assert_eq!(pool.capacity(), 3);
+    assert_eq!(pool.free(), 3);
+
+    let held = pool.acquire(10);
+    assert_eq!(held.count(), 3, "a request must not pass the capacity");
+    assert_eq!(pool.free(), 0);
+
+    let empty = pool.acquire(1);
+    assert_eq!(empty.count(), 0, "an empty pool must not block, and must lend nothing");
+    drop(empty);
+
+    drop(held);
+    assert_eq!(pool.free(), 3, "a dropped guard returns its permits");
+
+    let part = pool.acquire(2);
+    assert_eq!(part.count(), 2);
+    let rest = pool.acquire(2);
+    assert_eq!(rest.count(), 1, "a second request takes what is left");
+}
+
+/// The seed of a job must come from the identity of the job alone. A seed that
+/// read the worker index or the completion order would make a sampled value
+/// depend on the thread schedule.
+#[test]
+fn job_seed_is_stable() {
+    assert_eq!(job_seed(7, 2, 1, 3, 4), job_seed(7, 2, 1, 3, 4));
+
+    let base = job_seed(7, 2, 1, 3, 4);
+    let others = [
+        job_seed(8, 2, 1, 3, 4),
+        job_seed(7, 3, 1, 3, 4),
+        job_seed(7, 2, 2, 3, 4),
+        job_seed(7, 2, 1, 4, 4),
+        job_seed(7, 2, 1, 3, 5),
+        // The fields must not commute. A row of 4 and a column of 3 name a
+        // different cell than a row of 3 and a column of 4.
+        job_seed(7, 2, 1, 4, 3),
+    ];
+    for (index, seed) in others.iter().enumerate() {
+        assert_ne!(*seed, base, "field {index} did not reach the seed");
+    }
+}
+
+

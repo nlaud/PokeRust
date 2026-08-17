@@ -471,6 +471,19 @@ pub struct OracleSeed<'a> {
     pub cols: Option<&'a [usize]>,
 }
 
+/// One cell that a [`double_oracle_with`] run asks for.
+///
+/// The three fields name the cell inside one run. A parallel oracle builds the
+/// random seed of the job from them, so the seed does not depend on the thread
+/// schedule. Read `solver::pool` for the seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellJob {
+    /// The round that asked for this cell, counted from 0.
+    pub round: usize,
+    pub row: usize,
+    pub col: usize,
+}
+
 /// Supplies the payoff of one cell, and reads the answer of one round.
 ///
 /// [`double_oracle`] needs one payoff at a time, so a plain closure is enough
@@ -481,9 +494,37 @@ pub struct OracleSeed<'a> {
 /// those two strategies are the answer of the round. A second closure cannot do
 /// this, because both closures would borrow the same search context. One oracle
 /// holds that context one time and serves both methods.
+///
+/// A caller with a worker pool needs more again. [`CellOracle::cells`] takes a
+/// job list rather than one cell, so the oracle can spread the list over its
+/// workers. The default implementation calls [`CellOracle::cell`] for each job
+/// in order, so a plain closure keeps the behavior of a serial run.
 pub trait CellOracle {
     /// The payoff of one row against one column.
     fn cell(&mut self, row: usize, col: usize) -> f64;
+
+    /// The payoff of each job, in job order.
+    ///
+    /// The answer must hold one value for each job. The run writes those values
+    /// into its cell table in the same order.
+    fn cells(&mut self, jobs: &[CellJob]) -> Vec<f64> {
+        jobs.iter().map(|job| self.cell(job.row, job.col)).collect()
+    }
+
+    /// The largest prefetch that this oracle wants before a best-response check.
+    ///
+    /// A best-response check reads its cells one at a time, and it abandons a
+    /// row or a column as soon as a bound rules it out. A parallel oracle has no
+    /// work under that pattern, so the run fills some of the missing cells first.
+    ///
+    /// A value of 1 or less turns the prefetch off. That is the default, and it
+    /// keeps the exact cell set of a serial run.
+    ///
+    /// The limit stops the prefetch from filling the whole matrix. Read the
+    /// module documentation of `solver::search` for the reason.
+    fn batch_limit(&self) -> usize {
+        1
+    }
 
     /// The restricted equilibrium after both best-response checks of one round.
     ///
@@ -571,15 +612,23 @@ where
 
     // Each round adds at least one action to at least one side or stops. This
     // limit is therefore only reachable if something is badly wrong.
-    for _ in 0..(rows + cols + 2) {
+    for round in 0..(rows + cols + 2) {
+        // The round needs every restricted cell, so the whole list goes to the
+        // oracle in one call. A serial oracle answers the jobs in this order,
+        // which is the order that a one-cell-at-a-time run used.
+        let mut missing = Vec::new();
         for &i in &restricted_rows {
             for &j in &restricted_cols {
                 if cells[i][j].is_none() {
-                    stats.cells_requested += 1;
-                    cells[i][j] = Some(oracle.cell(i, j));
+                    missing.push(CellJob {
+                        round,
+                        row: i,
+                        col: j,
+                    });
                 }
             }
         }
+        fill(&mut cells, &missing, &mut stats, &mut oracle);
 
         let sub: Vec<Vec<f64>> = restricted_rows
             .iter()
@@ -604,6 +653,8 @@ where
             used_lp: solution.used_lp,
         };
 
+        let limit = oracle.batch_limit();
+        prefetch_rows(&mut cells, &col_strategy, round, limit, &mut stats, &mut oracle);
         let (row_br_value, row_br) = best_response_row(
             &mut cells,
             &col_strategy,
@@ -611,6 +662,7 @@ where
             &mut stats,
             &mut oracle,
         );
+        prefetch_cols(&mut cells, &row_strategy, round, limit, &mut stats, &mut oracle);
         let (col_br_value, col_br) = best_response_col(
             &mut cells,
             &row_strategy,
@@ -662,6 +714,112 @@ where
     let (low, high) = (alpha.min(beta), alpha.max(beta));
     best.value = best.value.clamp(low, high);
     (best, stats)
+}
+
+/// Asks the oracle for each job, and writes the answers into `cells`.
+///
+/// The counter rises before the call, so a round hook reads the work of the
+/// whole batch.
+fn fill<O>(
+    cells: &mut [Vec<Option<f64>>],
+    jobs: &[CellJob],
+    stats: &mut OracleStats,
+    oracle: &mut O,
+) where
+    O: CellOracle,
+{
+    if jobs.is_empty() {
+        return;
+    }
+    stats.cells_requested += jobs.len() as u64;
+    let values = oracle.cells(jobs);
+    debug_assert_eq!(
+        values.len(),
+        jobs.len(),
+        "a cell oracle must answer every job"
+    );
+    for (job, value) in jobs.iter().zip(values) {
+        cells[job.row][job.col] = Some(value);
+    }
+}
+
+/// Fills up to `limit` of the cells that [`best_response_row`] can read.
+///
+/// The check abandons a row as soon as a bound rules it out, so it cannot say in
+/// advance which cells it needs. The prefetch takes the missing cells in index
+/// order instead, and `limit` bounds the count.
+///
+/// A prefetched cell cannot move the answer. The check judges a missing cell at
+/// its optimistic bound, and it abandons a row only when even that bound loses
+/// by more than [`EPS`]. Such a row is never the best response. A larger set of
+/// known cells therefore changes which rows the check abandons, and it leaves
+/// both the best row and its value the same.
+fn prefetch_rows<O>(
+    cells: &mut [Vec<Option<f64>>],
+    col_strategy: &[f64],
+    round: usize,
+    limit: usize,
+    stats: &mut OracleStats,
+    oracle: &mut O,
+) where
+    O: CellOracle,
+{
+    if limit <= 1 {
+        return;
+    }
+    let mut jobs = Vec::new();
+    'rows: for (i, row) in cells.iter().enumerate() {
+        for (j, value) in row.iter().enumerate() {
+            if col_strategy[j] <= EPS || value.is_some() {
+                continue;
+            }
+            jobs.push(CellJob {
+                round,
+                row: i,
+                col: j,
+            });
+            if jobs.len() >= limit {
+                break 'rows;
+            }
+        }
+    }
+    fill(cells, &jobs, stats, oracle);
+}
+
+/// Fills up to `limit` of the cells that [`best_response_col`] can read.
+///
+/// This is the mirror of [`prefetch_rows`], and the same argument holds for it.
+fn prefetch_cols<O>(
+    cells: &mut [Vec<Option<f64>>],
+    row_strategy: &[f64],
+    round: usize,
+    limit: usize,
+    stats: &mut OracleStats,
+    oracle: &mut O,
+) where
+    O: CellOracle,
+{
+    if limit <= 1 {
+        return;
+    }
+    let cols = cells.first().map_or(0, |row| row.len());
+    let mut jobs = Vec::new();
+    'cols: for j in 0..cols {
+        for (i, row) in cells.iter().enumerate() {
+            if row_strategy[i] <= EPS || row[j].is_some() {
+                continue;
+            }
+            jobs.push(CellJob {
+                round,
+                row: i,
+                col: j,
+            });
+            if jobs.len() >= limit {
+                break 'cols;
+            }
+        }
+    }
+    fill(cells, &jobs, stats, oracle);
 }
 
 /// P1's best pure response to `col_strategy`, and its value.

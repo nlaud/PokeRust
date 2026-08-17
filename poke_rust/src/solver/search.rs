@@ -72,6 +72,56 @@
 //! the result in both cases. The cell then takes a static score, and the result
 //! never enters the turn cache.
 //!
+//! # The worker pool
+//!
+//! [`SolveConfig::workers`](super::SolveConfig::workers) asks for more than one
+//! worker. The root position then evaluates matrix cells in batches, and it
+//! holds one [`SearchContext`] for each worker that a batch used.
+//! `solver::pool` holds the permits, the batch runner, and the job seed.
+//!
+//! A worker context appears only when a batch gets a permit for it. A context
+//! holds a transposition table, so a solve that never gets a permit pays for no
+//! table. Read [`WorkerSeed`] for the rule.
+//!
+//! Three rules keep the answer the same as the answer of a serial solve:
+//!
+//! 1. A cell value is exact. A cache changes the speed of a cell, not its value.
+//! 2. Only the root position makes a batch. One solve therefore has one level of
+//!    parallelism, and it cannot oversubscribe the machine.
+//! 3. The matrix solver and the double-oracle control loop stay serial. A worker
+//!    answers cells, and it makes no decision.
+//!
+//! The double-oracle round uses a batch in two places. The first is the fill of
+//! the missing restricted cells. The second is a prefetch before each
+//! best-response check, because that check reads its cells one at a time.
+//!
+//! [`matrix::CellOracle::batch_limit`] bounds the prefetch. Without the bound
+//! the prefetch would fill the whole matrix, which is the work that double
+//! oracle exists to avoid.
+//!
+//! # What the pool leaves out
+//!
+//! The pool runs only under an exact chance mode.
+//! [`ChanceMode::Sample`](super::chance::ChanceMode::Sample) draws from the
+//! random generator, and a sampled cell value also depends on the caches of the
+//! worker that ran it. A parallel sample could not repeat a serial answer, so a
+//! sampling solve keeps the serial path.
+//!
+//! Each job still installs its own seeded generator, from
+//! [`pool::job_seed`](super::pool::job_seed). An extra thread starts with no
+//! override, so a job that reaches the generator stays deterministic.
+//!
+//! [`SearchContext::serial_ab`] also stays serial. Its extra turn simulations
+//! cost more than the cells that it saves.
+//!
+//! The cost counters do depend on the thread schedule, because a cache hit
+//! depends on the job order of one worker. A solve that hits the node budget or
+//! the deadline depends on the schedule for the same reason. The value and both
+//! strategies do not.
+//!
+//! Two workers write verbose output at the same time, and the lines interleave.
+//! Set `VERBOSITY` to zero before a large search.
+//!
 //! # Midturn decisions
 //!
 //! A faint can require a replacement before the turn ends.
@@ -83,17 +133,21 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::simulator::{AbortGuard, scoped_abort_signal, simulate_turn};
+use crate::simulator::{AbortGuard, scoped_abort_signal, scoped_sample_rng, simulate_turn};
 use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
+use super::chance::ChanceMode;
 use super::eval::EvalContext;
-use super::matrix::{self, EPS, MatrixSolution};
+use super::matrix::{self, CellJob, EPS, MatrixSolution};
+use super::pool;
 use super::{
     CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveStats, SolveWarning,
     SolverAlgorithm, cancel_requested,
@@ -139,6 +193,12 @@ pub(super) fn run(
 
     let started = Instant::now();
     let mut ctx = SearchContext::new(pokemon_dex, move_dex, config, started, cancel);
+    // One slot for each extra worker. A batch fills a slot when it gets a permit
+    // for that worker. A filled slot lives for the whole solve, so a worker
+    // keeps its tables across rounds and across deepening passes. Only the root
+    // position hands the slots out.
+    let mut helpers: Vec<Option<SearchContext<'_>>> =
+        (1..worker_count(config)).map(|_| None).collect();
 
     // Depth 0 would make every cell an evaluation of the same position, so the
     // matrix would be constant and the "equilibrium" arbitrary. One ply is the
@@ -166,6 +226,9 @@ pub(super) fn run(
         let action_truncations = ctx.action_truncations;
         let (root_depth, root_chain) =
             super::root_descent(actions::phase_of(state), depth, config.replacement_depth);
+        // The first pass must return one strategy, including when the budget is
+        // zero. Later passes reach this line only when the budget has space.
+        ctx.record_node();
         // Only this call is the root, so only this call reports its rounds.
         let pass = ctx.solve_position(
             state,
@@ -175,6 +238,7 @@ pub(super) fn run(
             WIN,
             seed.as_ref(),
             progress.map(|hook| RootReport { hook, depth }),
+            &mut helpers,
         );
 
         // `budget_hit`, `deadline_hit`, and `cancel_hit` latch, and the loop
@@ -203,6 +267,13 @@ pub(super) fn run(
     }
 
     let position = solved.expect("the depth range is never empty, so one pass always runs");
+
+    // Each batch already took the stop flags and the approximation metadata of
+    // its workers, so only the counters remain. Worker index order keeps the
+    // sum independent of the thread schedule.
+    for helper in helpers.iter().flatten() {
+        ctx.add_counters(helper);
+    }
 
     let value = position.value.clamp(LOSS, WIN);
     let mut warnings = Vec::new();
@@ -254,6 +325,58 @@ pub(super) fn run(
         stats,
         warnings,
     })
+}
+
+/// Cells that one worker can prefetch before a best-response check.
+///
+/// A larger value fills more of the matrix, and it gives each worker more work.
+/// Two cells for each worker keep the pool busy through one check without a
+/// large amount of speculative work.
+const PREFETCH_JOBS_PER_WORKER: usize = 2;
+
+/// Adds one worker's counters to a statistics snapshot.
+fn add_counters(stats: &mut SolveStats, other: &SolveStats) {
+    stats.nodes_expanded += other.nodes_expanded;
+    stats.turns_simulated += other.turns_simulated;
+    stats.matrix_cells_evaluated += other.matrix_cells_evaluated;
+    stats.matrix_cells_total += other.matrix_cells_total;
+    stats.lps_solved += other.lps_solved;
+    stats.ab_cutoffs += other.ab_cutoffs;
+    stats.tt_hits += other.tt_hits;
+    stats.turn_cache_hits += other.turn_cache_hits;
+}
+
+/// Atomically takes one slot from the shared node budget.
+fn claim_node(nodes: &AtomicU64, budget: Option<u64>) -> bool {
+    match budget {
+        Some(budget) => nodes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < budget).then_some(count + 1)
+            })
+            .is_ok(),
+        None => {
+            nodes.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+/// The workers that one solve may use.
+///
+/// Four conditions hold the count at 1:
+///
+/// 1. The configuration asks for 1 worker or fewer.
+/// 2. The algorithm is not double oracle. Only that algorithm has a batch.
+/// 3. The chance mode samples. Read the module documentation for the reason.
+/// 4. The process pool has a capacity of 1.
+fn worker_count(cfg: &SolveConfig) -> usize {
+    if cfg.workers <= 1
+        || cfg.algorithm != SolverAlgorithm::DoubleOracle
+        || matches!(cfg.chance, ChanceMode::Sample(_))
+    {
+        return 1;
+    }
+    cfg.workers.min(pool::shared().capacity()).max(1)
 }
 
 /// The root actions that a completed pass played with positive probability.
@@ -340,11 +463,20 @@ struct RootReport<'a> {
 /// search context, and only one of them can.
 struct SearchOracle<'ctx, 'cfg, 'pos> {
     ctx: &'ctx mut SearchContext<'cfg>,
+    /// One slot for each extra worker. Empty below the root, and empty when the
+    /// configuration asks for a serial solve. A slot holds no context until a
+    /// batch gets a permit for that worker.
+    helpers: &'ctx mut [Option<SearchContext<'cfg>>],
+    /// Builds the context of an empty slot.
+    seed: WorkerSeed<'cfg>,
     state: &'pos MatchState,
     p1: &'pos JointActions,
     p2: &'pos JointActions,
     depth: u8,
     chain: u8,
+    /// The state hash of this position. It names the position inside a job seed.
+    /// Zero when the oracle has no worker, because no job then needs a seed.
+    root: u64,
     /// `None` below the root, and `None` when the caller wants no progress.
     report: Option<RootReport<'pos>>,
 }
@@ -360,6 +492,74 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
         )
     }
 
+    /// Evaluates one batch of cells over the workers of this oracle.
+    ///
+    /// The batch takes permits from the process pool. A batch with no permit
+    /// runs every job on the calling thread, which is the serial path.
+    ///
+    /// Each job installs a seeded generator from its own identity. Read the
+    /// module documentation for the rule that this protects.
+    fn cells(&mut self, jobs: &[CellJob]) -> Vec<f64> {
+        if self.helpers.is_empty() || jobs.len() <= 1 {
+            return jobs.iter().map(|job| self.cell(job.row, job.col)).collect();
+        }
+
+        // Copied out of `self`, because the job closure runs on another thread
+        // and `report` is not thread safe.
+        let state = self.state;
+        let p1 = self.p1;
+        let p2 = self.p2;
+        let depth = self.depth;
+        let chain = self.chain;
+        let root = self.root;
+        let seed = &self.seed;
+
+        // The calling thread runs the batch as worker 0, so it needs no permit.
+        // A worker also costs a transposition table, so the request asks for one
+        // worker for each `PREFETCH_JOBS_PER_WORKER` jobs. A small batch then
+        // starts no thread that it cannot keep busy.
+        let wanted = self
+            .helpers
+            .len()
+            .min(jobs.len() / PREFETCH_JOBS_PER_WORKER);
+        let permits = pool::shared().acquire(wanted);
+
+        let values = {
+            let mut workers: Vec<&mut SearchContext<'_>> = Vec::with_capacity(1 + permits.count());
+            workers.push(&mut *self.ctx);
+            for slot in self.helpers.iter_mut().take(permits.count()) {
+                workers.push(slot.get_or_insert_with(|| seed.build()));
+            }
+            pool::run_jobs(&mut workers, jobs.len(), |ctx, index| {
+                let job = jobs[index];
+                let _rng =
+                    scoped_sample_rng(pool::job_seed(root, depth, job.round, job.row, job.col));
+                ctx.cell_value(
+                    state,
+                    &p1.actions[job.row],
+                    &p2.actions[job.col],
+                    depth,
+                    chain,
+                )
+            })
+        };
+        drop(permits);
+
+        // Worker index order, so the warnings of the answer do not depend on the
+        // thread schedule. The counters merge one time, at the end of the solve.
+        for helper in self.helpers.iter().flatten() {
+            self.ctx.adopt(helper);
+        }
+        values
+    }
+
+    fn batch_limit(&self) -> usize {
+        if self.helpers.is_empty() {
+            return 1;
+        }
+        (self.helpers.len() + 1) * PREFETCH_JOBS_PER_WORKER
+    }
+
     fn round(&mut self, solution: &MatrixSolution, oracle: &matrix::OracleStats) {
         let Some(report) = self.report else {
             return;
@@ -368,6 +568,9 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
         // work of this matrix by hand. A complete answer of the same pass then
         // holds the same numbers.
         let mut stats = self.ctx.stats.clone();
+        for helper in self.helpers.iter().flatten() {
+            add_counters(&mut stats, &helper.stats);
+        }
         stats.lps_solved += oracle.lps_solved;
         stats.ab_cutoffs += oracle.cutoffs;
         stats.elapsed = self.ctx.started.elapsed();
@@ -378,6 +581,52 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
             p2_strategy: strategy_of(self.p2, &solution.col_strategy, EPS),
             stats,
         });
+    }
+}
+
+/// The parts that build one extra worker context.
+///
+/// A worker holds its own transposition table, and that table costs several
+/// megabytes at the default capacity. The root position therefore builds a
+/// worker only when a batch gets a permit for it. A small solve then pays for no
+/// worker at all.
+#[derive(Clone)]
+struct WorkerSeed<'a> {
+    pokemon_dex: &'a HashMap<Species, PokemonData>,
+    move_dex: &'a HashMap<PokemonMove, MoveData>,
+    cfg: &'a SolveConfig,
+    cancel: Option<&'a CancelFlag>,
+    started: Instant,
+    nodes: Arc<AtomicU64>,
+}
+
+impl<'a> WorkerSeed<'a> {
+    /// One worker context.
+    ///
+    /// The worker gets its own transposition table, turn cache, counters, and
+    /// stop flags. It shares the node counter, the cancel flag, the start time,
+    /// and the configuration.
+    ///
+    /// The worker takes no root seed. Only the control thread reads that seed,
+    /// and only at the root position.
+    fn build(&self) -> SearchContext<'a> {
+        SearchContext {
+            pokemon_dex: self.pokemon_dex,
+            move_dex: self.move_dex,
+            cfg: self.cfg,
+            stats: SolveStats::default(),
+            tt: TranspositionTable::new(self.cfg.tt_capacity),
+            turn_cache: TurnCache::new(self.cfg.turn_cache_capacity),
+            max_discarded: 0.0,
+            action_truncations: [None, None],
+            budget_hit: false,
+            deadline_hit: false,
+            cancel_hit: false,
+            cancel: self.cancel,
+            started: self.started,
+            root_seed: None,
+            nodes: Arc::clone(&self.nodes),
+        }
     }
 }
 
@@ -406,6 +655,12 @@ struct SearchContext<'a> {
     started: Instant,
     /// The previous deepening pass's root support, if there was one.
     root_seed: Option<RootSeed>,
+    /// The expanded nodes of every worker of this solve.
+    ///
+    /// The node budget bounds the whole solve, not one worker. A serial solve
+    /// has one context, so this counter equals `stats.nodes_expanded` and the
+    /// budget behaves as it did before the pool existed.
+    nodes: Arc<AtomicU64>,
 }
 
 impl<'a> SearchContext<'a> {
@@ -431,7 +686,68 @@ impl<'a> SearchContext<'a> {
             cancel,
             started,
             root_seed: None,
+            nodes: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// The parts that build one extra worker of this solve.
+    fn worker_seed(&self) -> WorkerSeed<'a> {
+        WorkerSeed {
+            pokemon_dex: self.pokemon_dex,
+            move_dex: self.move_dex,
+            cfg: self.cfg,
+            cancel: self.cancel,
+            started: self.started,
+            nodes: Arc::clone(&self.nodes),
+        }
+    }
+
+    /// Takes the stop flags and the approximation metadata of one worker.
+    ///
+    /// A batch calls this after every job ends. The operations are an OR and two
+    /// maximums, so a repeated call changes nothing.
+    fn adopt(&mut self, other: &SearchContext<'_>) {
+        self.budget_hit |= other.budget_hit;
+        self.deadline_hit |= other.deadline_hit;
+        self.cancel_hit |= other.cancel_hit;
+        if other.max_discarded > self.max_discarded {
+            self.max_discarded = other.max_discarded;
+        }
+        let dropped = |(kept, total): (usize, usize)| total - kept;
+        for slot in 0..self.action_truncations.len() {
+            let Some(candidate) = other.action_truncations[slot] else {
+                continue;
+            };
+            if self.action_truncations[slot]
+                .is_none_or(|previous| dropped(candidate) > dropped(previous))
+            {
+                self.action_truncations[slot] = Some(candidate);
+            }
+        }
+    }
+
+    /// Adds the counters of one worker to this context.
+    ///
+    /// The solve calls this one time for each worker, after the last pass. An
+    /// earlier call would count the same work twice.
+    fn add_counters(&mut self, other: &SearchContext<'_>) {
+        add_counters(&mut self.stats, &other.stats);
+    }
+
+    /// Records one node without a budget check.
+    fn record_node(&mut self) {
+        self.stats.nodes_expanded += 1;
+        self.nodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one node if the shared budget has space.
+    fn try_record_node(&mut self) -> bool {
+        if !claim_node(&self.nodes, self.cfg.node_budget) {
+            self.budget_hit = true;
+            return false;
+        }
+        self.stats.nodes_expanded += 1;
+        true
     }
 
     /// Scores one position with the configured leaf evaluator.
@@ -458,7 +774,7 @@ impl<'a> SearchContext<'a> {
     /// resume.
     fn should_stop(&mut self) -> bool {
         let budget_hit = if let Some(budget) = self.cfg.node_budget
-            && self.stats.nodes_expanded >= budget
+            && self.nodes.load(Ordering::Relaxed) >= budget
         {
             self.budget_hit = true;
             true
@@ -555,8 +871,12 @@ impl<'a> SearchContext<'a> {
         // No seed below the root: the seed indexes the root action set, and it
         // means nothing at any other position. No report below the root either:
         // a round of a child position answers a different question.
+        // No worker below the root: one solve has one level of parallelism.
+        if !self.try_record_node() {
+            return self.score(battle);
+        }
         let value = self
-            .solve_position(state, depth, chain, alpha, beta, None, None)
+            .solve_position(state, depth, chain, alpha, beta, None, None, &mut [])
             .value;
         self.tt.store(key, depth, chain, value);
         value
@@ -569,6 +889,9 @@ impl<'a> SearchContext<'a> {
     ///
     /// `report` publishes each double-oracle round. Only the root call supplies
     /// it, for the same reason.
+    ///
+    /// `helpers` holds the extra worker contexts. Only the root call supplies
+    /// them, so a child position always solves its matrix on one thread.
     #[allow(clippy::too_many_arguments)]
     fn solve_position(
         &mut self,
@@ -579,13 +902,13 @@ impl<'a> SearchContext<'a> {
         beta: f64,
         seed: Option<&RootSeed>,
         report: Option<RootReport<'_>>,
+        helpers: &mut [Option<SearchContext<'a>>],
     ) -> Position {
         let battle = as_battle(state).expect("solve_position requires a battle position");
         let phase = actions::phase_of(state);
         let p1 = self.joint_actions(battle, Player::P1, phase);
         let p2 = self.joint_actions(battle, Player::P2, phase);
 
-        self.stats.nodes_expanded += 1;
         self.stats.matrix_cells_total += (p1.actions.len() * p2.actions.len()) as u64;
 
         // Nobody has a choice: no game, no LP, just the one outcome. Common,
@@ -602,9 +925,9 @@ impl<'a> SearchContext<'a> {
         }
 
         let solution = match self.cfg.algorithm {
-            SolverAlgorithm::DoubleOracle => {
-                self.double_oracle(state, depth, chain, alpha, beta, &p1, &p2, seed, report)
-            }
+            SolverAlgorithm::DoubleOracle => self.double_oracle(
+                state, depth, chain, alpha, beta, &p1, &p2, seed, report, helpers,
+            ),
             SolverAlgorithm::BackwardInduction | SolverAlgorithm::SerializedBounds => {
                 self.full_matrix(state, depth, chain, &p1.actions, &p2.actions)
             }
@@ -694,6 +1017,7 @@ impl<'a> SearchContext<'a> {
         p2: &JointActions,
         seed: Option<&RootSeed>,
         report: Option<RootReport<'_>>,
+        helpers: &mut [Option<SearchContext<'a>>],
     ) -> MatrixSolution {
         let limits = matrix::OracleLimits {
             alpha,
@@ -708,18 +1032,28 @@ impl<'a> SearchContext<'a> {
         // The oracle owns the context for the whole run, so one type serves the
         // cell calls and the round calls. Two closures cannot, because both
         // would borrow the context.
+        // The hash names this position inside a job seed. A serial oracle needs
+        // no seed, so it also needs no hash.
+        let root = if helpers.is_empty() {
+            0
+        } else {
+            hash_state(state)
+        };
         let (solution, oracle) = matrix::double_oracle_with(
             p1.actions.len(),
             p2.actions.len(),
             seed,
             limits,
             SearchOracle {
+                seed: self.worker_seed(),
                 ctx: self,
+                helpers,
                 state,
                 p1,
                 p2,
                 depth,
                 chain,
+                root,
                 report,
             },
         );
@@ -1346,7 +1680,11 @@ impl TurnCache {
 
 #[cfg(test)]
 mod tests {
-    use super::TranspositionTable;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::{TranspositionTable, claim_node};
 
     #[test]
     fn transposition_entries_distinguish_forced_chain_depth() {
@@ -1356,5 +1694,35 @@ mod tests {
         assert_eq!(table.probe(17, 2, 1), Some(0.25));
         assert_eq!(table.probe(17, 2, 0), None);
         assert_eq!(table.probe(17, 2, 2), None);
+    }
+
+    #[test]
+    fn concurrent_node_claims_stop_at_the_shared_budget() {
+        const WORKERS: usize = 8;
+        const BUDGET: u64 = 19;
+        let nodes = Arc::new(AtomicU64::new(0));
+        let barrier = Arc::new(Barrier::new(WORKERS));
+
+        let claims: u64 = thread::scope(|scope| {
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let nodes = Arc::clone(&nodes);
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        (0..BUDGET)
+                            .filter(|_| claim_node(&nodes, Some(BUDGET)))
+                            .count() as u64
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("a budget worker panicked"))
+                .sum()
+        });
+
+        assert_eq!(claims, BUDGET);
+        assert_eq!(nodes.load(Ordering::Relaxed), BUDGET);
     }
 }

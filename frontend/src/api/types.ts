@@ -273,7 +273,10 @@ export interface BotProfileRequest {
    * No preset sets this field. An absent field gives a forced decision the
    * remaining turn budget, as a turn gets. */
   replacementDepth?: number
-  /** The search is serial, so the server accepts only 1. */
+  /** The server chooses the worker count, so it accepts only 1.
+   *
+   * Double oracle takes its workers from the process pool. The pool bounds the
+   * threads of all concurrent solves. Thus, one client cannot set the count. */
   workers?: number
   /** Sampling algorithms only. */
   iterations?: number
@@ -305,6 +308,10 @@ export interface BotProfileView {
   depth: number
   /** Null when a forced decision uses the remaining turn budget. */
   replacementDepth: number | null
+  /** The workers that this search asks the process pool for.
+   *
+   * A busy pool can give the search fewer workers. The count does not change
+   * the value or either strategy. */
   workers: number
   iterations: number | null
   particles: number | null
