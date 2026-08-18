@@ -67,7 +67,6 @@ high bit.
 The node state therefore keeps its size, and a cached value cannot cross an
 extension boundary.
 
-No bot preset sets this field.
 The server accepts `replacementDepth` from 1 through 8 in a profile request.
 
 ## Perfect-information solver
@@ -224,8 +223,9 @@ session lock.
 The server draws the P2 command and returns it as `p2Reveal`.
 The client sends no `p2` field for a bot session.
 The client waits for the current analysis job until that job stops.
-No client timeout ends the wait.
-A profile time is an expected duration. It does not stop the solver.
+One shared simulation-turn budget stops the full job.
+The budget covers all depth passes, preview worlds, and nested searches.
+Cached turns do not use the budget.
 `POST /api/battles/{id}/analysis` requests the current complete result.
 The cancel flag stops the active search, and the job keeps its last complete
 strategy for the draw.
@@ -272,12 +272,13 @@ A cell whose simulation stops takes a static score.
 
 `tracker_analysis.rs` runs the same profile for a tracker session.
 It draws one world from the belief.
-It then runs one search for each depth from one through the configured depth.
+An exact search runs one search for each depth through the configured depth.
 Each depth publishes a complete answer, so the panel moves while the search
-goes deeper.
-Each rung records its depth and expected duration.
-The panel shows an approximate progress figure between two answers.
-The figure stays below 100 percent until the server publishes an answer.
+goes deeper. A sampled search starts at the requested depth. It runs until it
+uses the shared simulation-turn budget.
+Each rung records its depth.
+The panel shows the exact number of claimed simulation turns.
+The progress bar compares that count with the shared job budget.
 
 The tracker accepts `ismcts` and `mccfr` only.
 Both algorithms search the belief instead of treating one hidden world as the
@@ -300,8 +301,8 @@ It registers one job and returns the job ID.
 `GET /api/solve/{id}/events` runs that job one time and streams its answers.
 `DELETE /api/solve/{id}` stops the job.
 
-The stream sends `started`, then each `update`, and then one of `done`,
-`failed`, or `cancelled`.
+The stream sends `started`, live `progress`, and each `update`.
+It then sends `done`, `failed`, or `cancelled`.
 Each `update` carries the generation of the position, a revision that rises by
 one, the depth, the elapsed time, the value, both complete strategies, and the
 search statistics.

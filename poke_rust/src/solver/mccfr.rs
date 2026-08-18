@@ -700,6 +700,7 @@ fn search_root_belief(
         leaf_lookups: LeafLookups::default(),
         stats: MctsStats::default(),
         action_truncations: [None, None],
+        cancel,
     };
 
     let mut values = RunningStats::default();
@@ -708,7 +709,11 @@ fn search_root_belief(
         // The traverser alternates on this index, so one complete alternation
         // pair is the unit that both average strategies read. Stop only on an
         // even index, and only after the first pair.
-        if iteration >= 2 && iteration.is_multiple_of(2) && cancel_requested(cancel) {
+        if iteration >= 2
+            && iteration.is_multiple_of(2)
+            && (cancel_requested(cancel)
+                || cancel.is_some_and(CancelFlag::simulation_budget_hit))
+        {
             cancelled = true;
             break;
         }
@@ -752,8 +757,13 @@ fn search_root_belief(
     let p2_strategy = root_strategy(&ctx.trees[1], &ctx.root_keys[1]);
 
     let mut warnings = Vec::new();
-    if cancelled {
+    if cancelled && cancel_requested(cancel) {
         warnings.push(SolveWarning::Cancelled);
+    }
+    if cancel.is_some_and(CancelFlag::simulation_budget_hit)
+        && let Some(budget) = cancel.and_then(CancelFlag::simulation_turn_budget)
+    {
+        warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
     }
     for (player, truncation) in [
         (Player::P1, ctx.action_truncations[0]),
@@ -1051,6 +1061,7 @@ struct MccfrContext<'a> {
     stats: MctsStats,
     /// Largest action-set truncation for each player anywhere in the trees.
     action_truncations: [Option<(usize, usize)>; 2],
+    cancel: Option<&'a CancelFlag>,
 }
 
 impl MccfrContext<'_> {
@@ -1095,6 +1106,14 @@ impl MccfrContext<'_> {
         if joint[0].actions.is_empty() || joint[1].actions.is_empty() {
             // No decision exists here, so there is nothing to learn. The static
             // score is the only answer that the node can give.
+            let value = self.score(battle);
+            return self.leaf(value, histories, public, walk);
+        }
+
+        if self
+            .cancel
+            .is_some_and(|control| !control.claim_simulation_turn())
+        {
             let value = self.score(battle);
             return self.leaf(value, histories, public, walk);
         }

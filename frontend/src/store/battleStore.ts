@@ -66,8 +66,8 @@ interface BattleStore {
   p2Strategy: P2Strategy | null
   /** True while the client waits for the analysis job of the P2 bot. */
   waitingForBot: boolean
-  /** How long the P2 search has run, while the client waits for it. */
-  botWaitMs: number | null
+  /** The live simulation count while the client waits for P2. */
+  botTurnProgress: { turnsSimulated: number; simulationTurnBudget: number } | null
   /** True after Player 1 asks to stop the wait and change the move. */
   botWaitCancelled: boolean
   /** True after one search ended with no answer for this position.
@@ -124,15 +124,14 @@ const BOT_NO_ANSWER =
 /**
  * Waits for the search that supplies Player 2's strategy.
  *
- * The wait ends when the job stops. No fixed limit ends it early. The profile
- * time is an estimate and does not stop the search.
+ * The wait ends when the job stops or uses its simulation-turn budget.
  *
  * `shouldStop` returns true when Player 1 cancels the wait.
  */
 async function waitForBotAnalysis(
   battleId: string,
   shouldStop: () => boolean,
-  onProgress: (elapsedMs: number | null) => void,
+  onProgress: (progress: { turnsSimulated: number; simulationTurnBudget: number } | null) => void,
 ): Promise<BotWaitResult> {
   for (;;) {
     if (shouldStop()) return 'cancelled'
@@ -155,7 +154,14 @@ async function waitForBotAnalysis(
       }
       return current ? 'answered' : 'noAnswer'
     }
-    onProgress(progress.runningMs)
+    onProgress(
+      progress.turnsSimulated === null || progress.simulationTurnBudget === null
+        ? null
+        : {
+            turnsSimulated: progress.turnsSimulated,
+            simulationTurnBudget: progress.simulationTurnBudget,
+          },
+    )
     await new Promise((resolve) => window.setTimeout(resolve, ANALYSIS_POLL_MS))
   }
 }
@@ -265,15 +271,15 @@ export const useBattle = create<BattleStore>((set, get) => {
           error: null,
           waitingForBot: true,
           botWaitCancelled: false,
-          botWaitMs: null,
+          botTurnProgress: null,
           p2Reveal: null,
         })
         const outcome = await waitForBotAnalysis(
           battleId,
           () => get().botWaitCancelled,
-          (elapsed) => set({ botWaitMs: elapsed }),
+          (progress) => set({ botTurnProgress: progress }),
         ).catch((): BotWaitResult => 'noAnswer')
-        set({ waitingForBot: false, botWaitMs: null })
+        set({ waitingForBot: false, botTurnProgress: null })
         if (outcome === 'cancelled') {
           // Player 1 asked for the move choice again. The search keeps running,
           // so the next submission can still read its answer.
@@ -362,7 +368,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     p2Reveal: null,
     p2Strategy: null,
     waitingForBot: false,
-    botWaitMs: null,
+    botTurnProgress: null,
     botWaitCancelled: false,
     botNoAnswer: false,
     probability: null,
@@ -394,7 +400,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           p2Reveal: null,
           p2Strategy: null,
           waitingForBot: false,
-          botWaitMs: null,
+          botTurnProgress: null,
           botWaitCancelled: false,
           botNoAnswer: false,
           probability: null,
@@ -429,7 +435,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           p2Reveal: null,
           p2Strategy: null,
           waitingForBot: false,
-          botWaitMs: null,
+          botTurnProgress: null,
           botWaitCancelled: false,
           botNoAnswer: false,
           currentPlayer: 'p1',
@@ -463,7 +469,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         p2Reveal: null,
         p2Strategy: null,
         waitingForBot: false,
-        botWaitMs: null,
+        botTurnProgress: null,
         botWaitCancelled: false,
         botNoAnswer: false,
         probability: null,
@@ -619,15 +625,15 @@ export const useBattle = create<BattleStore>((set, get) => {
           error: null,
           waitingForBot: true,
           botWaitCancelled: false,
-          botWaitMs: null,
+          botTurnProgress: null,
           p2Reveal: null,
         })
         const outcome = await waitForBotAnalysis(
           battleId,
           () => get().botWaitCancelled,
-          (elapsed) => set({ botWaitMs: elapsed }),
+          (progress) => set({ botTurnProgress: progress }),
         ).catch((): BotWaitResult => 'noAnswer')
-        set({ waitingForBot: false, botWaitMs: null })
+        set({ waitingForBot: false, botTurnProgress: null })
         if (outcome === 'cancelled') {
           set({ busy: false, botWaitCancelled: false })
           return

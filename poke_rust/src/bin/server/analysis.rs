@@ -18,8 +18,8 @@
 //! strategy.
 //!
 //! P1 reads `GET /api/battles/{id}/analysis` during a battle, so the progress
-//! view holds no P2 action, no P2 win odds, no count that divides out P2's
-//! action-set size, and no engine-written text.
+//! view holds no P2 action, no P2 win odds, and no engine-written text. It does
+//! expose the exact simulation count so the client can show progress.
 //!
 //! [`draw_p2_command`] draws the command that P2 plays. The turn response
 //! reveals that one command after the turn resolves, so both commands are
@@ -150,18 +150,15 @@ pub struct AnalysisReplay {
     /// The seed of the search.
     pub search_seed: u64,
     pub algorithm: String,
-    pub preset: String,
-    pub time_ms: Option<u64>,
-    pub node_budget: Option<u64>,
+    pub simulation_turn_budget: u64,
     pub depth: u8,
     /// Absent when a forced decision uses the remaining turn budget.
     pub replacement_depth: Option<u8>,
     pub workers: u8,
-    pub iterations: Option<u32>,
     pub particles: Option<usize>,
-    pub max_actions_per_player: Option<usize>,
     pub damage_rolls: u8,
     pub consider_crit: bool,
+    pub turns_simulated: u64,
 }
 
 /// The job that is running now.
@@ -224,13 +221,23 @@ impl AnalysisState {
 
     /// Records the job that is starting and returns its ticket.
     /// Cancels an earlier job of the same generation, so one job runs at a time.
+    #[cfg(test)]
     fn start(&mut self) -> JobTicket {
+        self.start_with_budget(0)
+    }
+
+    /// Starts a job with one simulation-turn budget.
+    fn start_with_budget(&mut self, budget: u64) -> JobTicket {
         if let Some(job) = self.running.take() {
             job.cancel.cancel();
         }
         let id = self.next_job_id;
         self.next_job_id = self.next_job_id.wrapping_add(1);
-        let cancel = CancelFlag::new();
+        let cancel = if budget == 0 {
+            CancelFlag::new()
+        } else {
+            CancelFlag::with_simulation_turn_budget(budget)
+        };
         let finish_requested = Arc::new(AtomicBool::new(false));
         self.running = Some(RunningJob {
             id,
@@ -329,6 +336,11 @@ impl AnalysisState {
                 .running
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
+            turns_simulated: self.running.as_ref().map(|job| job.cancel.simulation_turns()),
+            simulation_turn_budget: self
+                .running
+                .as_ref()
+                .and_then(|job| job.cancel.simulation_turn_budget()),
             checkpoint: self
                 .checkpoint
                 .as_ref()
@@ -390,9 +402,7 @@ fn complete_line(job: &JobTicket, checkpoint: &AnalysisCheckpoint) -> String {
 
 /// Builds the public progress row of one checkpoint.
 ///
-/// The row carries the wall-clock cost of the search, never the strategy and
-/// never a count that divides out an action-set size. See
-/// [`AnalysisCheckpoint::turns_simulated`].
+/// The row carries the wall-clock cost and the exact simulation count.
 ///
 /// [`progress_dto`] adds the strategy afterwards, and only for a session whose
 /// profile holds `reveal_strategy`.
@@ -403,6 +413,7 @@ fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisC
         turn_number: checkpoint.turn_number,
         depth_reached: checkpoint.depth_reached,
         elapsed_ms: checkpoint.elapsed.as_millis() as u64,
+        turns_simulated: checkpoint.turns_simulated,
         seed: checkpoint.seed,
         warnings: checkpoint.warnings.clone(),
         p2_strategy: None,
@@ -582,7 +593,6 @@ pub fn start_job(
 
     let search = profile.search;
     let seed = profile.view.seed.unwrap_or_else(random_seed);
-    let time_ms = profile.view.time_ms;
     let format = MetaFormat::from_active_per_side(session.config.active_per_side);
     let state = session.state.clone();
     let belief_p2 = session.belief_p2.clone();
@@ -602,20 +612,19 @@ pub fn start_job(
         turn_number: 0,
         search_seed: seed,
         algorithm: profile.view.algorithm.clone(),
-        preset: profile.view.preset.clone(),
-        time_ms: profile.view.time_ms,
-        node_budget: profile.view.node_budget,
+        simulation_turn_budget: profile.view.simulation_turn_budget,
         depth: profile.view.depth,
         replacement_depth: profile.view.replacement_depth,
         workers: profile.view.workers,
-        iterations: profile.view.iterations,
         particles: profile.view.particles,
-        max_actions_per_player: profile.view.max_actions_per_player,
-        damage_rolls: session.config.damage_rolls,
-        consider_crit: session.config.consider_crit,
+        damage_rolls: profile.view.damage_rolls,
+        consider_crit: profile.view.consider_crit,
+        turns_simulated: 0,
     };
 
-    let job = session.analysis.start();
+    let job = session
+        .analysis
+        .start_with_budget(profile.view.simulation_turn_budget);
     if let Some(checkpoint) = forced_checkpoint(session, &dexes, seed, replay.clone()) {
         let line = session.analysis.accept(&job, Ok(checkpoint));
         eprintln!("{line}");
@@ -623,18 +632,12 @@ pub fn start_job(
     }
     let battle_id = battle_id.to_string();
     eprintln!(
-        "analysis job {} (generation {}): start, algorithm {}, preset {}, depth {}, {}",
+        "analysis job {} (generation {}): start, algorithm {}, depth {}, simulation-turn budget {}",
         job.id,
         job.generation,
         replay.algorithm,
-        replay.preset,
         replay.depth,
-        // `resolve` fills this field for every profile, and `Debug` would print
-        // `Some(20000)` where the line names a count of milliseconds.
-        time_ms.map_or_else(
-            || "no time estimate".to_string(),
-            |estimate| format!("estimated time {estimate} ms")
-        )
+        replay.simulation_turn_budget
     );
 
     tokio::task::spawn_blocking(move || {
@@ -835,8 +838,10 @@ fn run_search(
     checkpoint.generation = generation;
     checkpoint.turn_number = turn_number;
     checkpoint.seed = seed;
+    checkpoint.turns_simulated = cancel.simulation_turns();
     checkpoint.replay = AnalysisReplay {
         turn_number,
+        turns_simulated: checkpoint.turns_simulated,
         ..replay
     };
     checkpoint.strategy_is_playable = strategy_respects_fog(search, belief_p2.is_some());
@@ -1198,6 +1203,9 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::BudgetExhausted { budget } => {
             format!("The {budget}-node budget ran out, so deeper nodes took a static score.")
         }
+        solver::SolveWarning::SimulationTurnBudgetExhausted { budget } => format!(
+            "The search exhausted the {budget}-turn simulation budget. Later positions used static scores."
+        ),
         solver::SolveWarning::DeadlineExceeded { budget } => format!(
             "The {} ms limit expired, so deeper nodes took a static score.",
             budget.as_millis()
@@ -1607,17 +1615,14 @@ fn replay_dto(replay: &AnalysisReplay) -> AnalysisReplayDto {
         turn_number: replay.turn_number,
         search_seed: replay.search_seed,
         algorithm: replay.algorithm.clone(),
-        preset: replay.preset.clone(),
-        time_ms: replay.time_ms,
-        node_budget: replay.node_budget,
+        simulation_turn_budget: replay.simulation_turn_budget,
         depth: replay.depth,
         replacement_depth: replay.replacement_depth,
         workers: replay.workers,
-        iterations: replay.iterations,
         particles: replay.particles,
-        max_actions_per_player: replay.max_actions_per_player,
         damage_rolls: replay.damage_rolls,
         consider_crit: replay.consider_crit,
+        turns_simulated: replay.turns_simulated,
     }
 }
 
@@ -1774,17 +1779,14 @@ mod tests {
                 turn_number,
                 search_seed: 7,
                 algorithm: "doubleOracle".to_string(),
-                preset: "balanced".to_string(),
-                time_ms: Some(10_000),
-                node_budget: Some(500_000),
+                simulation_turn_budget: 1_000,
                 depth: 2,
                 replacement_depth: None,
                 workers: 1,
-                iterations: None,
                 particles: None,
-                max_actions_per_player: Some(12),
                 damage_rolls: 16,
                 consider_crit: true,
+                turns_simulated: 40,
             },
             strategy_is_playable: true,
             warnings: vec!["DepthNotReached".to_string()],
@@ -1961,21 +1963,17 @@ mod tests {
         assert!(json.contains("elapsedMs"), "{json}");
     }
 
-    /// A node count and a turn-simulation count both divide by P1's own action
-    /// count to give P2's, which is the figure `warning_line` scrubs out of
-    /// `ActionsTruncated`. Neither may reach the wire.
+    /// The progress view exposes simulation turns but not solver nodes.
     #[test]
-    fn the_progress_view_holds_no_search_node_count() {
+    fn the_progress_view_exposes_turns_but_not_nodes() {
         let mut state = AnalysisState::default();
         let job = state.start();
         state.accept(&job, Ok(checkpoint(0, 4)));
 
         let json = serde_json::to_string(&state.progress()).unwrap();
 
-        assert!(!json.contains("turnsSimulated"), "{json}");
+        assert!(json.contains("\"turnsSimulated\":40"), "{json}");
         assert!(!json.contains("nodes"), "{json}");
-        // The two counts of the fixture, in case a later field renames them.
-        assert!(!json.contains("40"), "{json}");
         assert!(!json.contains("12"), "{json}");
     }
 
@@ -1983,8 +1981,8 @@ mod tests {
     ///
     /// P1 starts the server of a hotseat battle, so P1 can read that console.
     /// `p2_strategy.len()` is P2's joint-action count, which is the figure
-    /// `warning_line` scrubs and `turns_simulated` withholds. Two strategies of
-    /// different size must therefore write the same line.
+    /// `warning_line` scrubs. Two strategies of different size must therefore
+    /// write the same line.
     #[test]
     fn the_complete_line_holds_no_action_count() {
         let mut narrow = AnalysisState::default();
@@ -2377,26 +2375,22 @@ mod tests {
             turn_number: 4,
             search_seed: 12,
             algorithm: "ismcts".to_string(),
-            preset: "strong".to_string(),
-            time_ms: Some(40_000),
-            node_budget: None,
+            simulation_turn_budget: 40_000,
             depth: 3,
             replacement_depth: Some(2),
             workers: 1,
-            iterations: Some(20_000),
             particles: Some(32),
-            max_actions_per_player: None,
             damage_rolls: 16,
             consider_crit: true,
+            turns_simulated: 20_000,
         };
 
         let json = serde_json::to_string(&replay_dto(&replay)).unwrap();
 
         assert!(json.contains("\"generation\":9"), "{json}");
         assert!(json.contains("\"turnNumber\":4"), "{json}");
-        assert!(json.contains("\"iterations\":20000"), "{json}");
         assert!(json.contains("\"particles\":32"), "{json}");
-        assert!(json.contains("\"timeMs\":40000"), "{json}");
+        assert!(json.contains("\"simulationTurnBudget\":40000"), "{json}");
         assert!(!json.to_lowercase().contains("hash"), "{json}");
         assert!(!json.to_lowercase().contains("belief"), "{json}");
         assert!(!json.to_lowercase().contains("state"), "{json}");
@@ -2430,8 +2424,8 @@ mod tests {
         assert!(!json.contains("strategy\":"), "{json}");
         assert!(!json.to_lowercase().contains("odds"), "{json}");
         assert!(!json.contains("0.75"), "{json}");
-        // The cost counts stay private for the reason `warning_line` explains.
-        assert!(!json.contains("turnsSimulated"), "{json}");
+        // The replay exposes the simulation count but no solver node count.
+        assert!(json.contains("\"turnsSimulated\":40"), "{json}");
         assert!(!json.contains("nodes"), "{json}");
         assert_eq!(reveal.source, "strategy");
     }
@@ -2734,7 +2728,7 @@ mod tests {
                 reveal_strategy: Some(reveal),
                 ..BotProfileRequest::default()
             };
-            let profile: BotProfile = crate::bot::resolve("botP2", &request, 16, true).unwrap();
+            let profile: BotProfile = crate::bot::resolve("botP2", &request).unwrap();
             BattleSession {
                 state,
                 config: SessionConfig {

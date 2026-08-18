@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
-import type { SolveRequest, SolveStarted, SolveUpdate } from '../api/types'
+import type { SolveProgress, SolveRequest, SolveStarted, SolveUpdate } from '../api/types'
 
 /** Where one job stands.
  *
@@ -13,6 +13,8 @@ interface SolveStore {
   jobId: string | null
   /** The position, the profile, and the depth horizon of the running job. */
   started: SolveStarted | null
+  /** The current simulation count and its hard limit. */
+  progress: SolveProgress | null
   /** The newest complete answer.
    *
    * It stays on screen while the next depth runs, and it stays after the job
@@ -52,6 +54,7 @@ let operation = 0
 
 /** The fields that a new job clears. */
 const cleared = {
+  progress: null,
   complete: null,
   previousComplete: null,
   live: null,
@@ -98,7 +101,19 @@ export const useSolve = create<SolveStore>((set, get) => ({
 
     cancelStream = api.streamSolve(jobId, {
       onStarted: (started) => {
-        if (active()) set({ started })
+        if (active()) {
+          set({
+            started,
+            progress: {
+              turnsSimulated: 0,
+              simulationTurnBudget: started.profile.simulationTurnBudget,
+            },
+          })
+        }
+      },
+
+      onProgress: (progress) => {
+        if (active()) set({ progress })
       },
 
       onUpdate: (update) => {

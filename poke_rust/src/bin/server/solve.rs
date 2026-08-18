@@ -50,6 +50,7 @@ use std::cell::Cell;
 use std::convert::Infallible;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -174,33 +175,24 @@ pub async fn start_solve(State(app): State<AppState>, Json(req): Json<SolveReque
         Err(message) => return error(StatusCode::UNPROCESSABLE_ENTITY, message),
     };
 
-    // The physics of the session decide the physics of the search, so read the
-    // session before the profile resolves.
-    let physics = match source {
+    let session_exists = match source {
         SolveSource::Battle => {
             let sessions = app.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            sessions
-                .get(&req.session_id)
-                .map(|session| (session.config.damage_rolls, session.config.consider_crit))
+            sessions.contains_key(&req.session_id)
         }
         SolveSource::Tracker => {
             let sessions = app
                 .tracker_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            sessions.get(&req.session_id).map(|_| {
-                (
-                    crate::tracker::SOLVER_DAMAGE_ROLLS,
-                    crate::tracker::SOLVER_CONSIDER_CRIT,
-                )
-            })
+            sessions.contains_key(&req.session_id)
         }
     };
-    let Some((damage_rolls, consider_crit)) = physics else {
+    if !session_exists {
         return error(StatusCode::NOT_FOUND, "session not found");
-    };
+    }
 
-    let profile = match crate::bot::resolve("profile", &req.profile, damage_rolls, consider_crit) {
+    let profile = match crate::bot::resolve("profile", &req.profile) {
         Ok(profile) => profile,
         Err(message) => return error(StatusCode::UNPROCESSABLE_ENTITY, message),
     };
@@ -210,13 +202,14 @@ pub async fn start_solve(State(app): State<AppState>, Json(req): Json<SolveReque
     cancel_jobs_for(&app, source, &req.session_id);
 
     let job_id = Uuid::new_v4().to_string();
+    let simulation_turn_budget = profile.view.simulation_turn_budget;
     lock_jobs(&app).insert(
         job_id.clone(),
         SolveJob {
             source,
             session_id: req.session_id,
             profile,
-            cancel: CancelFlag::new(),
+            cancel: CancelFlag::with_simulation_turn_budget(simulation_turn_budget),
             taken: false,
         },
     );
@@ -300,8 +293,38 @@ pub async fn solve_events(State(app): State<AppState>, Path(id): Path<String>) -
 
     let jobs = Arc::clone(&app.solve_jobs);
     let job_id = id.clone();
+    let progress_done = Arc::new(AtomicBool::new(false));
+    let progress_done_for_task = Arc::clone(&progress_done);
+    let progress_control = cancel.clone();
+    let progress_tx = tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            if progress_done_for_task.load(Ordering::Acquire) {
+                break;
+            }
+            let _ = progress_tx.try_send(event(
+                "progress",
+                SolveProgressDto {
+                    turns_simulated: progress_control.simulation_turns(),
+                    simulation_turn_budget: progress_control
+                        .simulation_turn_budget()
+                        .unwrap_or_default(),
+                },
+            ));
+        }
+    });
     tokio::task::spawn_blocking(move || {
         let outcome = run_job(&inputs, &tx, &job_id, &cancel);
+        progress_done.store(true, Ordering::Release);
+        let _ = tx.blocking_send(event(
+            "progress",
+            SolveProgressDto {
+                turns_simulated: cancel.simulation_turns(),
+                simulation_turn_budget: cancel.simulation_turn_budget().unwrap_or_default(),
+            },
+        ));
         let ended = if cancel.is_cancelled() {
             event(
                 "cancelled",
@@ -728,7 +751,8 @@ fn run_battle_ladder(
     let notes = fixed_notes(inputs, draw_warnings);
     let p2_is_playable = crate::tracker_analysis::p2_strategy_is_playable(inputs.search);
 
-    for depth in 1..=inputs.target_depth {
+    let first_depth = inputs.search.first_depth(inputs.target_depth);
+    for depth in first_depth..=inputs.target_depth {
         if cancel.is_cancelled() {
             return Ok(());
         }
@@ -777,7 +801,7 @@ fn run_battle_ladder(
         ));
         // The search stopped short of the depth it was asked for, so a deeper
         // rung would stop in the same place.
-        if rung.depth_reached < depth {
+        if rung.depth_reached < depth || cancel.simulation_budget_hit() {
             return Ok(());
         }
     }

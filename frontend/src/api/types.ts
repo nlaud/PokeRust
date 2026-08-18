@@ -250,11 +250,8 @@ export type BotAlgorithm =
   | 'ismcts'
   | 'mccfr'
 
-/** A named group of solver limits. */
-export type BotPreset = 'fast' | 'balanced' | 'strong'
-
 /** The optional solver profile that plays P2.
- * Every field is optional, and the preset fills each absent field.
+ * Every field is optional. The server supplies each absent field.
  * The server rejects a limit that the algorithm cannot read. */
 export interface BotProfileRequest {
   /** As `botP2`, an absent value takes the search of the information mode.
@@ -262,30 +259,21 @@ export interface BotProfileRequest {
    * `doubleOracle`. The response reports the name in `botP2.algorithm`.
    * The tracker analysis endpoint takes `ismcts` or `mccfr`. */
   algorithm?: BotAlgorithm
-  /** Defaults to `balanced`. */
-  preset?: BotPreset
-  /** Expected duration. This value does not stop the solver. */
-  timeMs?: number
-  /** Exact algorithms only. */
-  nodeBudget?: number
+  /** The maximum number of uncached turns that the full search can simulate. */
+  simulationTurnBudget?: number
   depth?: number
   /** Turns of lookahead below a replacement or a self-switch pivot.
-   * No preset sets this field. An absent field gives a forced decision the
-   * remaining turn budget, as a turn gets. */
+   * An absent field gives a forced decision the remaining turn depth. */
   replacementDepth?: number
-  /** The server chooses the worker count, so it accepts only 1.
-   *
-   * Double oracle takes its workers from the process pool. The pool bounds the
-   * threads of all concurrent solves. Thus, one client cannot set the count. */
-  workers?: number
-  /** Sampling algorithms only. */
-  iterations?: number
+  /** The number of damage rolls in solver simulations. */
+  damageRolls?: number
+  /** Enables critical-hit branches in solver simulations. */
+  considerCrit?: boolean
   /** Belief searches only. */
   particles?: number
   /** Makes a sampled search reproducible.
    * The maximum value is `Number.MAX_SAFE_INTEGER`. */
   seed?: number
-  maxActionsPerPlayer?: number
   /** Shows Player 2's strategy to this client. Defaults to false.
    *
    * A battle session reads this field, and it is the fog-of-war boundary of
@@ -298,14 +286,13 @@ export interface BotProfileRequest {
 /** The resolved profile that the server returns. */
 export interface BotProfileView {
   algorithm: BotAlgorithm
-  preset: BotPreset
   /** True when the algorithm itself is exact.
    * A limit can still make the result approximate. */
   exact: boolean
-  /** Expected duration. This value does not stop the solver. */
-  timeMs: number | null
-  nodeBudget: number | null
+  simulationTurnBudget: number
   depth: number
+  damageRolls: number
+  considerCrit: boolean
   /** Null when a forced decision uses the remaining turn budget. */
   replacementDepth: number | null
   /** The workers that this search asks the process pool for.
@@ -313,16 +300,12 @@ export interface BotProfileView {
    * A busy pool can give the search fewer workers. The count does not change
    * the value or either strategy. */
   workers: number
-  iterations: number | null
   particles: number | null
   seed: number | null
-  maxActionsPerPlayer: number | null
   /** True when this client may read Player 2's strategy. */
   revealStrategy: boolean
   /** Each reason that the result can differ from the exact answer. */
   approximations: string[]
-  /** Each knob that the server changed away from the preset value. */
-  adjustments: string[]
 }
 
 export interface CreateBattleRequest {
@@ -478,29 +461,21 @@ export interface AnalysisReplay {
   /** The seed of the search. */
   searchSeed: number
   algorithm: string
-  preset: string
-  /** Expected duration. This value does not stop the solver. */
-  timeMs: number | null
-  nodeBudget: number | null
+  simulationTurnBudget: number
   depth: number
   /** Null when a forced decision uses the remaining turn budget. */
   replacementDepth: number | null
   workers: number
-  iterations: number | null
   particles: number | null
-  maxActionsPerPlayer: number | null
   damageRolls: number
   considerCrit: boolean
+  turnsSimulated: number
 }
 
 /** The phase of the P2 analysis job. */
 export type AnalysisPhase = 'idle' | 'running' | 'complete' | 'failed'
 
-/** The cost of one complete analysis job.
- *
- * The row carries wall-clock cost alone. A node count or a turn-simulation
- * count divides by P1's own action count to give P2's, so the server sends
- * neither. */
+/** The cost of one complete analysis job. */
 export interface AnalysisCheckpoint {
   /** The generation of the position that the search read. */
   generation: number
@@ -510,6 +485,8 @@ export interface AnalysisCheckpoint {
   /** The depth that the search reached. */
   depthReached: number
   elapsedMs: number
+  /** The uncached turns that the full search simulated. */
+  turnsSimulated: number
   /** The seed of this search, which makes the result reproducible.
    * The server draws it below `Number.MAX_SAFE_INTEGER`, so it round-trips. */
   seed: number
@@ -538,6 +515,10 @@ export interface AnalysisProgressResponse {
   phase: AnalysisPhase
   /** How long the running job has run, or null when no job runs. */
   runningMs: number | null
+  /** The uncached turns that the running job has claimed. */
+  turnsSimulated: number | null
+  /** The turn limit of the running job. */
+  simulationTurnBudget: number | null
   /** The last complete answer.
    * A failure and a cancellation both keep it. */
   checkpoint: AnalysisCheckpoint | null
@@ -561,16 +542,15 @@ export type TrackerAnalysisPhase = 'off' | 'idle' | 'running' | 'complete' | 'fa
 /** Which question one rung answers. */
 export type TrackerAnalysisPosition = 'battle' | 'teamPreview'
 
-/** The rung that the ladder runs now.
- * The fraction is a time estimate, not a node count. */
+/** The rung that the ladder runs now. */
 export interface TrackerAnalysisRung {
   /** The depth of the rung that runs. */
   depth: number
-  /** How long this rung has run. */
-  elapsedMs: number
-  /** The expected duration of this rung. */
-  budgetMs: number
-  /** `elapsedMs` divided by `budgetMs`, from 0 through 0.99 while running. */
+  /** The uncached turns that the full search has claimed. */
+  turnsSimulated: number
+  /** The turn limit of the full search. */
+  simulationTurnBudget: number
+  /** The claimed turns divided by the turn limit. */
   fraction: number
 }
 
@@ -794,7 +774,7 @@ export interface SolveRequest {
   source: SolveSource
   /** The battle ID or the tracker ID. */
   sessionId: string
-  /** Each absent field takes its preset value. */
+  /** Each absent field takes its server default. */
   profile?: BotProfileRequest
 }
 
@@ -821,6 +801,12 @@ export interface SolveStarted {
   /** The depth horizon of the ladder. */
   targetDepth: number
   profile: BotProfileView
+}
+
+/** The live simulation count of one search. */
+export interface SolveProgress {
+  turnsSimulated: number
+  simulationTurnBudget: number
 }
 
 /** What one search cost.

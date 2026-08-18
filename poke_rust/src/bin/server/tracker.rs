@@ -90,15 +90,6 @@ pub struct TrackerSession {
     pub analysis: crate::tracker_analysis::TrackerAnalysisState,
 }
 
-/// The damage rolls that the tracker solver searches with.
-///
-/// A create-tracker request carries no battle physics, because the tracker
-/// records a real battle rather than resolving one. The panel therefore uses
-/// the engine defaults, which are the same values that the simulator setup
-/// panel sends.
-pub(crate) const SOLVER_DAMAGE_ROLLS: u8 = 16;
-pub(crate) const SOLVER_CONSIDER_CRIT: bool = true;
-
 #[derive(Debug)]
 pub(crate) enum SubmitTrackerError {
     Parse(ParseError),
@@ -366,15 +357,14 @@ pub async fn delete_tracker(State(app): State<AppState>, Path(id): Path<String>)
 /// first ladder.
 ///
 /// The request body is the profile shape that `POST /api/battles` sends as
-/// `botP2`, so the panel offers the same algorithms, presets, and limits as the
+/// `botP2`, so the panel offers the same algorithms and limits as the
 /// simulator. A second call replaces the profile and restarts the search.
 pub async fn start_tracker_analysis(
     State(app): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<crate::bot::BotProfileRequest>,
 ) -> Response {
-    let profile =
-        match crate::bot::resolve("analysis", &req, SOLVER_DAMAGE_ROLLS, SOLVER_CONSIDER_CRIT) {
+    let profile = match crate::bot::resolve("analysis", &req) {
             Ok(profile) => profile,
             Err(message) => return unprocessable(message),
         };
@@ -1259,10 +1249,9 @@ mod tests {
         ] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
-                preset: Some("fast".to_string()),
                 ..Default::default()
             };
-            let profile = crate::bot::resolve("analysis", &request, 4, false).unwrap();
+            let profile = crate::bot::resolve("analysis", &request).unwrap();
             assert_eq!(
                 tracker_search_is_belief_aware(profile.search),
                 allowed,

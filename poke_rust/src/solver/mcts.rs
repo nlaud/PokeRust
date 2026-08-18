@@ -541,6 +541,7 @@ pub fn search_cancellable(
         stats: MctsStats::default(),
         max_discarded: 0.0,
         action_truncations: [None, None],
+        cancel,
     };
 
     // Create the root before the iteration budget starts.
@@ -559,7 +560,10 @@ pub fn search_cancellable(
     for index in 0..iterations {
         // Iteration 1 always runs. Every later iteration reads the flag first,
         // so the answer covers whole iterations and nothing else.
-        if index > 0 && cancel_requested(cancel) {
+        if index > 0
+            && (cancel_requested(cancel)
+                || cancel.is_some_and(CancelFlag::simulation_budget_hit))
+        {
             cancelled = true;
             break;
         }
@@ -606,8 +610,13 @@ pub fn search_cancellable(
 
     let value = values.mean().clamp(LOSS, WIN);
     let mut warnings = Vec::new();
-    if cancelled {
+    if cancelled && cancel_requested(cancel) {
         warnings.push(SolveWarning::Cancelled);
+    }
+    if cancel.is_some_and(CancelFlag::simulation_budget_hit)
+        && let Some(budget) = cancel.and_then(CancelFlag::simulation_turn_budget)
+    {
+        warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
     }
     if ctx.max_discarded > EPS {
         warnings.push(SolveWarning::ChanceMassDiscarded {
@@ -1164,6 +1173,7 @@ struct MctsContext<'a> {
     max_discarded: f64,
     /// Largest action-set truncation for each player anywhere in the tree.
     action_truncations: [Option<(usize, usize)>; 2],
+    cancel: Option<&'a CancelFlag>,
 }
 
 impl MctsContext<'_> {
@@ -1368,6 +1378,12 @@ impl MctsContext<'_> {
         p1_commands: &[BattleCommand],
         p2_commands: &[BattleCommand],
     ) -> Vec<(MatchState, f64)> {
+        if self
+            .cancel
+            .is_some_and(|control| !control.claim_simulation_turn())
+        {
+            return Vec::new();
+        }
         self.stats.turns_simulated += 1;
         let chance = match self.cfg.transition {
             TransitionMode::Enumerated(chance) => chance,

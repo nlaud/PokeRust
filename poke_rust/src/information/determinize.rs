@@ -2754,9 +2754,11 @@ fn assemble_battle(
             .collect(),
         p1_slot_conditions: belief.p1_slot_conditions.clone(),
         p2_slot_conditions: belief.p2_slot_conditions.clone(),
-        // Correct as-is at a turn boundary, which is the only point a belief is
-        // ever determinized from.
-        self_switch_pending: None,
+        // A belief can hold a mid-turn pause: `apply_information` sets this field
+        // when a self-switch move resolves, and clears it when the replacement
+        // arrives. Copy it, because a `None` here would offer the pending side a
+        // complete command set instead of the one forced replacement.
+        self_switch_pending: belief.self_switch_pending,
         items_consumed_this_turn: Vec::new(),
         last_move_on_field: belief.last_move_on_field.clone(),
         sub_damage_dealt: belief.sub_damage_dealt,

@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import Select from '../../components/common/Select'
-import type { BotAlgorithm, BotPreset, SolveUpdate, StrategyRow } from '../../api/types'
+import SolverControls from '../../components/solver/SolverControls'
+import {
+  DEFAULT_SOLVER_SETTINGS,
+  solverProfile,
+} from '../../components/solver/solverSettings'
+import type { BotAlgorithm, SolveUpdate, StrategyRow } from '../../api/types'
 import { useSolve } from '../../store/solveStore'
 import { useTracker } from '../../store/trackerStore'
 
-// The knobs mirror the simulator's `botP2` profile: one algorithm and one
-// preset. The preset supplies every limit. The hints describe the tracker,
-// where the search reads a belief rather than a resolved battle.
+// These hints describe how each search reads the tracker belief.
 
 const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
   {
@@ -24,12 +27,6 @@ const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] 
     label: 'Double oracle (exact, one world)',
     hint: 'Exact for its depth, but it reads one drawn opponent. It reports each round while it runs.',
   },
-]
-
-const PRESET_OPTIONS: { value: BotPreset; label: string; hint: string }[] = [
-  { value: 'fast', label: 'Fast', hint: 'One turn deep, about a second.' },
-  { value: 'balanced', label: 'Balanced', hint: 'Two turns deep, about ten seconds.' },
-  { value: 'strong', label: 'Strong', hint: 'Three turns deep, about eighty seconds.' },
 ]
 
 /** Renders one probability as a whole-percent label. */
@@ -253,11 +250,12 @@ function AnswerBody({
  */
 export default function TrackerSolverPanel() {
   const trackerId = useTracker((state) => state.trackerId)
-  const { phase, started, complete, previousComplete, live, stale, error, start, stop } = useSolve()
+  const { phase, started, progress, complete, previousComplete, live, stale, error, start, stop } =
+    useSolve()
   const [open, setOpen] = useState(false)
   // A sampling belief search is the default. It respects the fog of war.
   const [algorithm, setAlgorithm] = useState<BotAlgorithm>('ismcts')
-  const [preset, setPreset] = useState<BotPreset>('fast')
+  const [settings, setSettings] = useState(DEFAULT_SOLVER_SETTINGS)
 
   const running = phase === 'starting' || phase === 'running'
   const on = phase !== 'off'
@@ -306,22 +304,13 @@ export default function TrackerSolverPanel() {
                 disabled={running}
               />
             </label>
-            <label className="min-w-[9rem] flex-1">
-              <span className="mb-0.5 block text-ink-muted">Preset</span>
-              <Select
-                value={preset}
-                options={PRESET_OPTIONS}
-                onChange={(v) => setPreset(v as BotPreset)}
-                disabled={running}
-              />
-            </label>
             <button
               onClick={() => {
                 if (trackerId === null) return
                 void start({
                   source: 'tracker',
                   sessionId: trackerId,
-                  profile: { algorithm, preset },
+                  profile: solverProfile(algorithm, settings),
                 })
               }}
               data-testid="tracker-solver-start"
@@ -339,6 +328,13 @@ export default function TrackerSolverPanel() {
               </button>
             )}
           </div>
+
+          <SolverControls
+            algorithm={algorithm}
+            settings={settings}
+            disabled={running}
+            onChange={setSettings}
+          />
 
           <p className="mt-1 text-ink-muted">
             {ALGORITHM_OPTIONS.find((o) => o.value === algorithm)?.hint}
@@ -362,6 +358,23 @@ export default function TrackerSolverPanel() {
               Searching depth {live.depth} of {live.depthTarget} · {live.revision + 1} answer(s) so
               far · {live.complete ? 'depth complete' : 'round in progress'}
             </p>
+          )}
+
+          {running && progress && (
+            <div className="mt-2" data-testid="tracker-solver-turn-progress">
+              <div className="mb-1 flex justify-between text-ink-muted">
+                <span>Simulation turns</span>
+                <span className="font-mono">
+                  {progress.turnsSimulated.toLocaleString()} /{' '}
+                  {progress.simulationTurnBudget.toLocaleString()}
+                </span>
+              </div>
+              <progress
+                className="h-2 w-full"
+                value={progress.turnsSimulated}
+                max={progress.simulationTurnBudget}
+              />
+            </div>
           )}
 
           {complete && stale && (

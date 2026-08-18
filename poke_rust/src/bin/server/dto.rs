@@ -736,18 +736,15 @@ pub struct AnalysisReplayDto {
     /// The seed of the search.
     pub search_seed: u64,
     pub algorithm: String,
-    pub preset: String,
-    pub time_ms: Option<u64>,
-    pub node_budget: Option<u64>,
+    pub simulation_turn_budget: u64,
     pub depth: u8,
     /// Absent when a forced decision uses the remaining turn budget.
     pub replacement_depth: Option<u8>,
     pub workers: u8,
-    pub iterations: Option<u32>,
     pub particles: Option<usize>,
-    pub max_actions_per_player: Option<usize>,
     pub damage_rolls: u8,
     pub consider_crit: bool,
+    pub turns_simulated: u64,
 }
 
 #[derive(Serialize)]
@@ -772,6 +769,10 @@ pub struct AnalysisProgressDto {
     /// How long the running job has run.
     /// `None` when no job runs.
     pub running_ms: Option<u64>,
+    /// The turn simulations that the running job claimed.
+    pub turns_simulated: Option<u64>,
+    /// The maximum turn simulations of the running job.
+    pub simulation_turn_budget: Option<u64>,
     /// The last complete answer.
     /// A failure and a cancellation both keep it.
     pub checkpoint: Option<AnalysisCheckpointDto>,
@@ -781,9 +782,8 @@ pub struct AnalysisProgressDto {
 
 /// The cost of one complete analysis job.
 ///
-/// The row carries wall-clock cost alone. A node count or a turn-simulation
-/// count divides by P1's own action count to give P2's, so neither appears
-/// here — the same rule that scrubs the action cap out of each warning.
+/// The row exposes the exact simulation count for progress. It does not expose
+/// a solver node count.
 ///
 /// A session with `revealStrategy` also carries `p2Strategy`. That setting is
 /// the one way a strategy row reaches this response.
@@ -798,6 +798,7 @@ pub struct AnalysisCheckpointDto {
     /// The depth that the search reached.
     pub depth_reached: u8,
     pub elapsed_ms: u64,
+    pub turns_simulated: u64,
     /// The seed of this search, which makes the result reproducible.
     pub seed: u64,
     /// Every reason that the answer is approximate.
@@ -951,18 +952,13 @@ pub struct TrackerAnalysisCheckpointDto {
 
 /// The rung that the ladder runs now.
 ///
-/// The solver reports no live node count, so the fraction is a time estimate.
-/// The panel labels it as an approximate value.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackerAnalysisRungDto {
     /// The depth of the rung that runs.
     pub depth: u8,
-    /// How long this rung has run.
-    pub elapsed_ms: u64,
-    /// The time that this rung can spend.
-    pub budget_ms: u64,
-    /// `elapsed_ms` divided by `budget_ms`, from 0 through 1.
+    pub turns_simulated: u64,
+    pub simulation_turn_budget: u64,
     pub fraction: f64,
 }
 
@@ -999,8 +995,8 @@ pub struct TrackerAnalysisDto {
 
 // ── The streaming solve job ──────────────────────────────────────────────────
 // `POST /api/solve` registers one job. `GET /api/solve/{id}/events` runs it and
-// streams each answer. The stream sends `started`, then each `update`, and then
-// one of `done`, `failed`, or `cancelled`.
+// streams each answer. The stream sends `started`, `progress`, and each
+// `update`. It then sends `done`, `failed`, or `cancelled`.
 
 /// The body of `POST /api/solve`.
 #[derive(Deserialize)]
@@ -1010,7 +1006,7 @@ pub struct SolveRequestDto {
     pub source: String,
     /// The battle ID or the tracker ID.
     pub session_id: String,
-    /// The solver profile. Each absent field takes its preset value.
+    /// The solver profile. The server supplies each absent field.
     #[serde(default)]
     pub profile: crate::bot::BotProfileRequest,
 }
@@ -1043,6 +1039,14 @@ pub struct SolveStartedDto {
     /// The depth horizon of the ladder.
     pub target_depth: u8,
     pub profile: crate::bot::BotProfileView,
+}
+
+/// The live simulation-turn progress of one solver job.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveProgressDto {
+    pub turns_simulated: u64,
+    pub simulation_turn_budget: u64,
 }
 
 /// What one search cost.

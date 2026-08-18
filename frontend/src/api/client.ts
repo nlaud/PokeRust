@@ -15,6 +15,7 @@ import type {
   SolveDone,
   SolveFailed,
   SolveJobResponse,
+  SolveProgress,
   SolveRequest,
   SolveStarted,
   SolveUpdate,
@@ -235,9 +236,8 @@ export function cancelSolve(jobId: string): Promise<void> {
 
 /** Runs one registered job and reads its answers.
  *
- * The stream sends `started`, then each `update`, and then one of `done`,
- * `failed`, or `cancelled`. All three of those close the stream, which also
- * stops the automatic reconnection of `EventSource`.
+ * The stream sends `started`, live `progress`, and each `update`. It then sends
+ * `done`, `failed`, or `cancelled`. Each final event closes the stream.
  *
  * The returned function cancels the stream. It does not stop the search: call
  * `cancelSolve` for that. */
@@ -245,6 +245,7 @@ export function streamSolve(
   jobId: string,
   handlers: {
     onStarted: (started: SolveStarted) => void
+    onProgress: (progress: SolveProgress) => void
     onUpdate: (update: SolveUpdate) => void
     onDone: (done: SolveDone) => void
     onFailed: (failed: SolveFailed) => void
@@ -261,6 +262,7 @@ export function streamSolve(
     run()
   }
   es.addEventListener('started', (e) => handlers.onStarted(JSON.parse(e.data)))
+  es.addEventListener('progress', (e) => handlers.onProgress(JSON.parse(e.data)))
   es.addEventListener('update', (e) => handlers.onUpdate(JSON.parse(e.data)))
   es.addEventListener('done', (e) => end(() => handlers.onDone(JSON.parse(e.data))))
   es.addEventListener('failed', (e) => end(() => handlers.onFailed(JSON.parse(e.data))))

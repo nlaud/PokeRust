@@ -11,12 +11,6 @@ const ALGORITHM_LABELS: Record<BotProfileView['algorithm'], string> = {
   mccfr: 'MCCFR',
 }
 
-const PRESET_LABELS: Record<BotProfileView['preset'], string> = {
-  fast: 'Fast',
-  balanced: 'Balanced',
-  strong: 'Strong',
-}
-
 const SOURCE_LABELS: Record<P2Reveal['source'], string> = {
   strategy: 'from the solver strategy',
   uniform: 'from a uniform draw',
@@ -29,26 +23,24 @@ const UNIFORM_NOTE =
 const POLL_MS = 1000
 
 function limitLine(profile: BotProfileView): string {
-  const parts = [`depth ${profile.depth}`]
+  const parts = [
+    `${profile.simulationTurnBudget.toLocaleString()} simulation turns`,
+    `depth ${profile.depth}`,
+  ]
   if (profile.replacementDepth !== null) parts.push(`replacement depth ${profile.replacementDepth}`)
-  if (profile.timeMs !== null) {
-    parts.push(`about ${profile.timeMs < 1000 ? `${profile.timeMs} ms` : `${profile.timeMs / 1000} s`}`)
-  }
-  if (profile.nodeBudget !== null) parts.push(`${profile.nodeBudget.toLocaleString()} nodes`)
-  if (profile.iterations !== null) parts.push(`${profile.iterations.toLocaleString()} iterations`)
   if (profile.particles !== null) parts.push(`${profile.particles} worlds`)
-  if (profile.maxActionsPerPlayer !== null) parts.push(`${profile.maxActionsPerPlayer} actions`)
+  parts.push(`${profile.damageRolls} damage rolls`)
+  if (profile.considerCrit) parts.push('crit branches')
   return parts.join(' · ')
 }
 
 function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
-  const parts = [`depth ${replay.depth}`]
+  const parts = [
+    `${replay.turnsSimulated.toLocaleString()} of ${replay.simulationTurnBudget.toLocaleString()} simulation turns`,
+    `depth ${replay.depth}`,
+  ]
   if (replay.replacementDepth !== null) parts.push(`replacement depth ${replay.replacementDepth}`)
-  if (replay.timeMs !== null) parts.push(`about ${replay.timeMs / 1000} s`)
-  if (replay.nodeBudget !== null) parts.push(`${replay.nodeBudget.toLocaleString()} nodes`)
-  if (replay.iterations !== null) parts.push(`${replay.iterations.toLocaleString()} iterations`)
   if (replay.particles !== null) parts.push(`${replay.particles} worlds`)
-  if (replay.maxActionsPerPlayer !== null) parts.push(`${replay.maxActionsPerPlayer} actions`)
   parts.push(`${replay.damageRolls} damage rolls`)
   if (replay.considerCrit) parts.push('crit branches')
   return parts.join(' · ')
@@ -120,7 +112,7 @@ export default function P2RevealPanel() {
     p2Strategy,
     refreshP2Strategy,
     waitingForBot,
-    botWaitMs,
+    botTurnProgress,
     cancelBotWait,
     finishBotSearch,
   } = useBattle()
@@ -143,9 +135,7 @@ export default function P2RevealPanel() {
 
   const drawnStrategy = p2Reveal?.strategy ?? null
   const played = p2Reveal !== null && p2Reveal.commands.length > 0
-  const elapsed = botWaitMs ?? 0
-  const estimate = botP2.timeMs
-  const progress = estimate === null ? null : Math.min(99, Math.round((100 * elapsed) / estimate))
+  const progress = botTurnProgress
   const summary = waitingForBot
     ? 'Player 2 is thinking…'
     : played && p2Reveal
@@ -168,7 +158,6 @@ export default function P2RevealPanel() {
         >
           <span className="rounded-card bg-primary px-2 py-0.5 font-semibold text-white">P2 solver</span>
           <span className="font-semibold">{ALGORITHM_LABELS[botP2.algorithm]}</span>
-          <span className="text-ink-muted">{PRESET_LABELS[botP2.preset]}</span>
           <span className="truncate text-ink-muted">{summary}</span>
           {botP2.revealStrategy && (
             <span data-testid="bot-badge-reveal" className="rounded-card bg-warning/15 px-2 py-0.5 font-semibold text-warning">
@@ -185,7 +174,9 @@ export default function P2RevealPanel() {
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-ink-muted">The turn resolves when the solver returns a strategy.</span>
             <span className="ml-auto shrink-0 font-mono text-ink-muted">
-              {(elapsed / 1000).toFixed(1)} s{progress === null ? '' : ` · about ${progress}%`}
+              {progress === null
+                ? 'Starting'
+                : `${progress.turnsSimulated.toLocaleString()} / ${progress.simulationTurnBudget.toLocaleString()} turns`}
             </span>
             <button
               type="button"
@@ -209,17 +200,12 @@ export default function P2RevealPanel() {
             </button>
           </div>
           {progress !== null && (
-            <div className="mt-1 h-1 w-full overflow-hidden rounded-card bg-subtle">
-              <div
-                className="h-full bg-primary"
-                style={{ width: `${progress}%` }}
-                role="progressbar"
-                aria-valuenow={progress}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label="Player 2 search progress estimate"
-              />
-            </div>
+            <progress
+              className="mt-1 h-2 w-full"
+              value={progress.turnsSimulated}
+              max={progress.simulationTurnBudget}
+              aria-label="Player 2 simulation-turn progress"
+            />
           )}
         </div>
       )}
@@ -227,9 +213,6 @@ export default function P2RevealPanel() {
       {open && (
         <div className="mt-2 border-t border-subtle pt-2" data-testid="bot-badge-detail">
           <p className="text-ink-muted">{limitLine(botP2)}</p>
-          {botP2.adjustments.length > 0 && (
-            <p className="mt-1 text-ink-muted">{botP2.adjustments.join(' · ')}</p>
-          )}
           {(played || p2Strategy || drawnStrategy) && (
             <div data-testid="p2-reveal" className="mt-2 border-t border-subtle pt-2">
               {played && p2Reveal && (
@@ -252,7 +235,7 @@ export default function P2RevealPanel() {
               {p2Reveal && <p className="mt-2 text-ink-muted">Draw seed {p2Reveal.drawSeed}</p>}
               {p2Reveal?.replay && (
                 <p className="mt-1 break-words text-ink-muted">
-                  {p2Reveal.replay.algorithm} · {p2Reveal.replay.preset} · turn {p2Reveal.replay.turnNumber} · seed{' '}
+                  {p2Reveal.replay.algorithm} · turn {p2Reveal.replay.turnNumber} · seed{' '}
                   {p2Reveal.replay.searchSeed} · {replayLine(p2Reveal.replay)}
                 </p>
               )}

@@ -5430,6 +5430,43 @@ fn a_flag_set_before_the_solve_stops_the_first_pass() {
     );
 }
 
+/// A sampled search uses the simulation-turn budget as its work limit.
+#[test]
+fn an_unbounded_sampled_search_stops_at_the_simulation_turn_budget() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::with_simulation_turn_budget(5);
+    let config = MctsConfig {
+        iterations: u32::MAX,
+        depth: 2,
+        ..mcts_config()
+    };
+
+    let result = mcts::search_cancellable(
+        1,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&flag),
+    )
+    .expect("the budget returns an answer");
+
+    for strategy in [&result.p1_strategy, &result.p2_strategy] {
+        assert!(!strategy.is_empty());
+        let total: f64 = strategy.iter().map(|action| action.probability).sum();
+        assert!((total - 1.0).abs() < 1e-6, "strategy sums to {total}");
+    }
+    assert_eq!(flag.simulation_turns(), 5);
+    assert_eq!(result.stats.turns_simulated, 5);
+    assert!(
+        result
+            .warnings
+            .contains(&SolveWarning::SimulationTurnBudgetExhausted { budget: 5 }),
+        "{:?}",
+        result.warnings
+    );
+}
+
 /// Each active stop reason must appear in the warnings.
 #[test]
 fn an_expired_deadline_does_not_hide_a_cancel() {

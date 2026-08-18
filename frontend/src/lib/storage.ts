@@ -1,7 +1,7 @@
 // Stores versioned teams and formats in local storage.
 // After a schema change, increase the key version and add a migration.
 
-import type { BotAlgorithm, BotPreset } from '../api/types'
+import type { BotAlgorithm } from '../api/types'
 
 export interface StoredTeam {
   id: string
@@ -141,13 +141,19 @@ export interface BattleSetup {
    * An absent value selects the saved team. */
   team1Source?: 'saved' | 'meta'
   team2Source?: 'saved' | 'meta'
-  /** The profile preset for the planned P2 bot.
-   * `off` and an absent value store no profile. */
-  botPreset?: 'off' | BotPreset
+  /** True when the planned battle uses a P2 solver. */
+  botEnabled?: boolean
   /** The search that controls P2.
    * The setup panel replaces a value that cannot play under
    * `informationMode`, because a stored setup can hold an old pair. */
   botAlgorithm?: BotAlgorithm
+  /** `null` leaves the budget to the server, which scales it with the depth. */
+  botSimulationTurnBudget?: number | null
+  botDepth?: number
+  botReplacementDepth?: number | null
+  botDamageRolls?: number
+  botConsiderCrit?: boolean
+  botParticles?: number
   /** Shows Player 2's strategy during the battle.
    * An absent value hides it, which is the server default. */
   botRevealStrategy?: boolean
@@ -155,8 +161,23 @@ export interface BattleSetup {
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'
 
+/** The budget that the panel stored before the field could scale itself. */
+const LEGACY_FLAT_BUDGET = 1000
+
 export function loadBattleSetup(): BattleSetup | null {
-  return readJson<BattleSetup>(SETUP_KEY)
+  const stored = readJson<BattleSetup & { botPreset?: 'off' | 'fast' | 'balanced' | 'strong' }>(
+    SETUP_KEY,
+  )
+  if (stored === null) return null
+  if (stored.botEnabled === undefined) stored.botEnabled = stored.botPreset !== undefined && stored.botPreset !== 'off'
+  // The panel always sent the budget, so every setup from an older build holds
+  // the flat default. That number is not a choice the user made, and it would
+  // hide the scaled budget from every stored setup. Read it as "scale
+  // automatically" instead. A user who wants the flat number types it again.
+  if (stored.botSimulationTurnBudget === LEGACY_FLAT_BUDGET) {
+    stored.botSimulationTurnBudget = null
+  }
+  return stored
 }
 
 export function saveBattleSetup(setup: BattleSetup) {

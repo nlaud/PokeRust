@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
-import type { BotAlgorithm, BotPreset, InformationMode } from '../../api/types'
+import SolverControls from '../../components/solver/SolverControls'
+import {
+  DEFAULT_SOLVER_SETTINGS,
+  solverProfile,
+  type SolverSettings,
+} from '../../components/solver/solverSettings'
+import type { BotAlgorithm, InformationMode } from '../../api/types'
 import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
@@ -18,22 +24,9 @@ const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
   { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
 ]
 
-/** `off` creates a hotseat battle. */
-type BotChoice = 'off' | BotPreset
-
-const BOT_OPTIONS: { value: BotChoice; label: string; hint: string }[] = [
+const BOT_OPTIONS = [
   { value: 'off', label: 'None', hint: 'Both players use hotseat input.' },
-  { value: 'fast', label: 'Fast', hint: 'The shortest search. P2 answers in about a second.' },
-  {
-    value: 'balanced',
-    label: 'Balanced',
-    hint: 'A longer search than Fast. P2 takes a few seconds each turn.',
-  },
-  {
-    value: 'strong',
-    label: 'Strong',
-    hint: 'The longest search. P2 can take tens of seconds each turn.',
-  },
+  { value: 'on', label: 'Solver', hint: 'The solver controls Player 2.' },
 ]
 
 // The first three algorithms solve the game exactly to the depth horizon.
@@ -146,7 +139,16 @@ export default function SetupPanel() {
   const [team2Source, setTeam2Source] = useState<TeamSource>(saved?.team2Source ?? 'saved')
   const defaultInformationMode = saved?.informationMode ?? 'closedSheet'
   const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
-  const [botPreset, setBotPreset] = useState<BotChoice>(saved?.botPreset ?? 'off')
+  const [botEnabled, setBotEnabled] = useState(saved?.botEnabled ?? false)
+  const [solverSettings, setSolverSettings] = useState<SolverSettings>({
+    simulationTurnBudget:
+      saved?.botSimulationTurnBudget ?? DEFAULT_SOLVER_SETTINGS.simulationTurnBudget,
+    depth: saved?.botDepth ?? DEFAULT_SOLVER_SETTINGS.depth,
+    replacementDepth: saved?.botReplacementDepth ?? DEFAULT_SOLVER_SETTINGS.replacementDepth,
+    damageRolls: saved?.botDamageRolls ?? DEFAULT_SOLVER_SETTINGS.damageRolls,
+    considerCrit: saved?.botConsiderCrit ?? DEFAULT_SOLVER_SETTINGS.considerCrit,
+    particles: saved?.botParticles ?? DEFAULT_SOLVER_SETTINGS.particles,
+  })
   const [revealStrategy, setRevealStrategy] = useState(saved?.botRevealStrategy ?? false)
   const savedAlgorithm = saved?.botAlgorithm
   // A stored algorithm that cannot play under the stored mode creates a bot
@@ -172,8 +174,14 @@ export default function SetupPanel() {
       team1Source,
       team2Source,
       informationMode,
-      botPreset,
+      botEnabled,
       botAlgorithm,
+      botSimulationTurnBudget: solverSettings.simulationTurnBudget,
+      botDepth: solverSettings.depth,
+      botReplacementDepth: solverSettings.replacementDepth,
+      botDamageRolls: solverSettings.damageRolls,
+      botConsiderCrit: solverSettings.considerCrit,
+      botParticles: solverSettings.particles,
       botRevealStrategy: revealStrategy,
     })
   }, [
@@ -183,8 +191,9 @@ export default function SetupPanel() {
     team1Source,
     team2Source,
     informationMode,
-    botPreset,
+    botEnabled,
     botAlgorithm,
+    solverSettings,
     revealStrategy,
   ])
 
@@ -214,13 +223,13 @@ export default function SetupPanel() {
       teraEnabled: format.teraEnabled,
       megaEnabled: format.megaEnabled,
       damageRolls: 16,
+      considerCrit: true,
       informationMode,
       legalItems: legalItemsFor(format),
-      // The server resolves the preset and returns every limit it applied.
       botP2:
-        botPreset === 'off'
+        !botEnabled
           ? undefined
-          : { algorithm: botAlgorithm, preset: botPreset, revealStrategy },
+          : { ...solverProfile(botAlgorithm, solverSettings), revealStrategy },
     })
   }
 
@@ -288,12 +297,12 @@ export default function SetupPanel() {
           <span className="mb-1 block text-sm font-medium">P2 solver profile</span>
           <div className="mb-2">
             <Select
-              value={botPreset}
+              value={botEnabled ? 'on' : 'off'}
               options={BOT_OPTIONS}
-              onChange={(v) => setBotPreset(v as BotChoice)}
+              onChange={(value) => setBotEnabled(value === 'on')}
             />
           </div>
-          {botPreset !== 'off' && (
+          {botEnabled && (
             <>
               <Select
                 value={botAlgorithm}
@@ -309,6 +318,11 @@ export default function SetupPanel() {
               <p className="mt-1 text-xs text-ink-muted">
                 P2 uses this solver profile after Player 1 locks a command.
               </p>
+              <SolverControls
+                algorithm={botAlgorithm}
+                settings={solverSettings}
+                onChange={setSolverSettings}
+              />
               <label className="mt-2 flex items-start gap-2 text-xs">
                 <input
                   type="checkbox"

@@ -24,20 +24,17 @@ function solveStarted(): SolveEvent {
       targetDepth: 2,
       profile: {
         algorithm: 'ismcts',
-        preset: 'fast',
         exact: false,
-        timeMs: 2000,
-        nodeBudget: null,
+        simulationTurnBudget: 1000,
         depth: 2,
+        damageRolls: 1,
+        considerCrit: false,
         replacementDepth: null,
         workers: 1,
-        iterations: 200,
         particles: 8,
         seed: 11,
-        maxActionsPerPlayer: 6,
         revealStrategy: true,
         approximations: [],
-        adjustments: [],
       },
     },
   }
@@ -286,7 +283,6 @@ test.describe('Tracker solver panel', () => {
     await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
 
     await pickSelectOption(page, 'Algorithm', 'ISMCTS (sampled belief)')
-    await pickSelectOption(page, 'Preset', 'Fast')
     const registered = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/solve'),
     )

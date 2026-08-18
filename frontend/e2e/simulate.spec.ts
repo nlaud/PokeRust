@@ -95,13 +95,12 @@ test.describe('Simulate mode', () => {
       }
     })
 
-    // Add a supported API override that the setup panel does not expose.
-    // This checks both the resolved adjustment and a subsecond time label.
+    // Keep this search small while the test checks the resolved raw limits.
     await page.route('**/api/battles', async (route) => {
       const request = route.request().postDataJSON()
-      request.botP2.timeMs = 1
+      request.botP2.simulationTurnBudget = 1000
+      request.botP2.depth = 1
       request.botP2.replacementDepth = 2
-      request.botP2.iterations = 50
       request.botP2.particles = 2
       await route.continue({ postData: JSON.stringify(request) })
     })
@@ -121,7 +120,7 @@ test.describe('Simulate mode', () => {
     // The algorithm list box appears only after the user selects a profile.
     await expect(picker.getByRole('button', { name: 'None' })).toBeVisible()
     await picker.getByRole('button', { name: 'None' }).click()
-    await openOption('Fast').click()
+    await openOption('Solver').click()
     // The default information mode hides data, so the default algorithm is the
     // belief search that plays under that mode.
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
@@ -158,6 +157,31 @@ test.describe('Simulate mode', () => {
     await expect(
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
     ).toHaveAttribute('aria-expanded', 'false')
+
+    // The simulation-turn budget scales itself until the user takes it over.
+    // A locked budget makes a deeper search a noisier one, so the derived value
+    // must follow the depth and the particle count.
+    const budgetField = picker.locator('label').filter({ hasText: 'Simulation turns' })
+    const budget = budgetField.locator('input[type=number]')
+    const budgetAuto = budgetField.locator('input[type=checkbox]')
+    const depth = picker
+      .locator('label')
+      .filter({ has: page.getByText('Depth', { exact: true }) })
+      .locator('input[type=number]')
+    await expect(budgetAuto).toBeChecked()
+    await expect(budget).toBeDisabled()
+    await expect(budget).toHaveValue('8000')
+    await depth.fill('4')
+    await expect(budget).toHaveValue('16000')
+
+    // A cleared box seeds the field with the derived value and hands it over.
+    await budgetAuto.uncheck()
+    await expect(budget).toBeEnabled()
+    await budget.fill('2500')
+    await depth.fill('2')
+    await expect(budget).toHaveValue('2500')
+    await budgetAuto.check()
+    await expect(budget).toHaveValue('8000')
     await page.screenshot({
       path: testInfo.outputPath('bot-picker.png'),
       fullPage: true,
@@ -166,11 +190,10 @@ test.describe('Simulate mode', () => {
 
     await page.getByRole('button', { name: 'Start Battle' }).click()
 
-    // The card names the resolved algorithm, preset, and limits.
+    // The card names the resolved algorithm and raw limits.
     const badge = page.getByTestId('bot-badge')
     await expect(badge).toBeVisible({ timeout: 10_000 })
     await expect(badge).toContainText('ISMCTS')
-    await expect(badge).toContainText('Fast')
 
     // The new badge must not make a narrow viewport overflow horizontally.
     await page.setViewportSize({ width: 390, height: 844 })
@@ -198,13 +221,13 @@ test.describe('Simulate mode', () => {
     await expect(approximations).toContainText('samples trajectories')
     await expect(approximations).toContainText('world(s) from the belief')
 
-    // The expanded part keeps profile adjustments and the result in this card.
+    // The expanded part keeps the profile and the result in this card.
     await badge.getByRole('button').first().click()
     const detail = page.getByTestId('bot-badge-detail')
     await expect(detail).toContainText('depth 1')
     await expect(detail).toContainText('replacement depth 2')
-    await expect(detail).toContainText('1 ms')
-    await expect(detail).toContainText('timeMs overrides the fast preset: 1')
+    await expect(detail).toContainText('1,000 simulation turns')
+    await expect(detail).toContainText('1 damage rolls')
     const detailOwnsOverlap = await page.evaluate(() => {
       const detail = document.querySelector<HTMLElement>('[data-testid="bot-badge-detail"]')
       const controls = document.querySelector<HTMLElement>('[data-testid="preview-confirm"]')
@@ -320,6 +343,7 @@ test.describe('Simulate mode', () => {
           informationMode: 'closedSheet',
           botPreset: 'fast',
           botAlgorithm: 'doubleOracle',
+          botSimulationTurnBudget: 1000,
         }),
       )
     })
@@ -330,6 +354,20 @@ test.describe('Simulate mode', () => {
     // A stored exact algorithm cannot play under a fog-of-war mode, so the load
     // path replaces it with the belief search.
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
+
+    // An older build always stored the flat budget, so the load path reads that
+    // number as "scale automatically". Otherwise every stored setup keeps the
+    // budget that makes a deeper search a noisier one.
+    const budgetField = picker.locator('label').filter({ hasText: 'Simulation turns' })
+    await expect(budgetField.locator('input[type=checkbox]')).toBeChecked()
+    await expect(budgetField.locator('input[type=number]')).toHaveValue('8000')
+
+    // A budget that the user chose is not the old default, so it survives.
+    await budgetField.locator('input[type=checkbox]').uncheck()
+    await budgetField.locator('input[type=number]').fill('2500')
+    await page.reload()
+    await expect(budgetField.locator('input[type=number]')).toHaveValue('2500')
+    await expect(budgetField.locator('input[type=checkbox]')).not.toBeChecked()
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -360,7 +398,7 @@ test.describe('Simulate mode', () => {
     // have Rust tests.
     await page.route('**/api/battles', async (route) => {
       const request = route.request().postDataJSON()
-      request.botP2.nodeBudget = 20
+      request.botP2.simulationTurnBudget = 20
       await route.continue({ postData: JSON.stringify(request) })
     })
 
@@ -370,7 +408,7 @@ test.describe('Simulate mode', () => {
         .locator('div.relative:has(> button[aria-expanded="true"])')
         .getByRole('option', { name })
     await picker.getByRole('button', { name: 'None' }).click()
-    await openOption('Fast').click()
+    await openOption('Solver').click()
     // Perfect Information holds no belief, so the mode change repairs the
     // algorithm. The picker selects the exact search and disables both belief
     // searches.

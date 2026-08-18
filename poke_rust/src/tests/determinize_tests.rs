@@ -1718,6 +1718,47 @@ fn switching_is_legal_when_the_roster_has_a_bench() {
     );
 }
 
+/// A belief can pause part way through a turn, because `apply_information` sets
+/// `self_switch_pending` when a self-switch move resolves. A world that drops
+/// that pause offers the pending side its complete command set, so the solver
+/// searches a decision that the real battle never asks for.
+#[test]
+fn a_pending_self_switch_survives_the_draw() {
+    use crate::state::battle::BattleCommand;
+    use crate::state::dex_data::SelfSwitchType;
+
+    with_meta!(meta);
+    let mut belief = belief_1v1(Species::Charizard, Species::Garchomp, 2);
+    belief.p2_possible_back_mons.push(opponent(Species::Incineroar));
+    belief.p2_possible_back_mons.push(opponent(Species::Whimsicott));
+    let pending = FieldSlot {
+        player: Player::P2,
+        slot_index: 0,
+    };
+    belief.self_switch_pending = Some((pending, SelfSwitchType::Normal));
+
+    let world = determinize_seeded(1, &belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
+    assert_eq!(
+        world.state.self_switch_pending,
+        Some((pending, SelfSwitchType::Normal)),
+        "the draw dropped the mid-turn pause"
+    );
+
+    // The pending slot sends in a replacement and does nothing else.
+    let p2 = legal_commands(&world.state, Player::P2);
+    assert!(!p2.is_empty(), "the pending slot has no legal command");
+    assert!(
+        p2.iter().all(|c| matches!(c, BattleCommand::Switch(_))),
+        "the pending slot may only switch, but got {p2:?}"
+    );
+
+    // The other side waits for that replacement.
+    assert_eq!(
+        legal_commands(&world.state, Player::P1),
+        vec![BattleCommand::Pass]
+    );
+}
+
 // ── 10. Ambient-RNG entry point ──────────────────────────────────────────────
 
 #[test]

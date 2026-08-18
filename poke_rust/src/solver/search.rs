@@ -285,6 +285,13 @@ pub(super) fn run(
             warnings.push(SolveWarning::DeadlineExceeded { budget });
         }
     }
+    if ctx
+        .cancel
+        .is_some_and(CancelFlag::simulation_budget_hit)
+        && let Some(budget) = ctx.cancel.and_then(CancelFlag::simulation_turn_budget)
+    {
+        warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
+    }
     // The other two warnings say that the returned answer is part static, so
     // they apply to the returned pass alone. A cancel describes the whole
     // search, so it applies whether or not the returned pass is complete.
@@ -783,7 +790,10 @@ impl<'a> SearchContext<'a> {
         };
         let deadline_hit = self.deadline_expired();
         let cancel_hit = self.cancel_requested();
-        budget_hit || deadline_hit || cancel_hit
+        let simulation_budget_hit = self
+            .cancel
+            .is_some_and(CancelFlag::simulation_budget_hit);
+        budget_hit || simulation_budget_hit || deadline_hit || cancel_hit
     }
 
     /// Check the deadline and save the result for the solve warning.
@@ -815,7 +825,12 @@ impl<'a> SearchContext<'a> {
 
     /// Whether a stop reason has latched.
     fn stopped(&self) -> bool {
-        self.budget_hit || self.deadline_hit || self.cancel_hit
+        self.budget_hit
+            || self
+                .cancel
+                .is_some_and(CancelFlag::simulation_budget_hit)
+            || self.deadline_hit
+            || self.cancel_hit
     }
 
     // ── The simultaneous-move search ────────────────────────────────────────
@@ -1314,6 +1329,12 @@ impl<'a> SearchContext<'a> {
             return Some(hit);
         }
 
+        if self
+            .cancel
+            .is_some_and(|control| !control.claim_simulation_turn())
+        {
+            return None;
+        }
         self.stats.turns_simulated += 1;
         // The simulator stops the expansion of one turn at the same two limits
         // the search itself obeys. Without this the search can only stop between
@@ -1485,6 +1506,17 @@ impl<'a> RootCells<'a> {
             && let Some(budget) = self.ctx.cfg.node_budget
         {
             warnings.push(SolveWarning::BudgetExhausted { budget });
+        }
+        if self
+            .ctx
+            .cancel
+            .is_some_and(CancelFlag::simulation_budget_hit)
+            && let Some(budget) = self
+                .ctx
+                .cancel
+                .and_then(CancelFlag::simulation_turn_budget)
+        {
+            warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
         }
         if self.ctx.deadline_hit
             && let Some(budget) = self.ctx.cfg.deadline

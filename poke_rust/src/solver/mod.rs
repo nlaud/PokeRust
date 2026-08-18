@@ -215,7 +215,7 @@ pub mod train;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::data::pokemon_move::PokemonMove;
@@ -254,18 +254,33 @@ pub enum SolverAlgorithm {
 ///
 /// The flag travels as an argument of a `_cancellable` entry point.
 /// [`SolveConfig`] is `Copy`, so it cannot hold this type.
+#[derive(Debug, Default)]
+struct SearchControl {
+    cancelled: Arc<AtomicBool>,
+    simulation_turn_budget: AtomicU64,
+    simulation_turns: AtomicU64,
+    simulation_budget_hit: AtomicBool,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(Arc<SearchControl>);
 
 impl CancelFlag {
     /// A new flag, clear.
     pub fn new() -> Self {
-        CancelFlag(Arc::new(AtomicBool::new(false)))
+        CancelFlag(Arc::new(SearchControl::default()))
+    }
+
+    /// Makes a flag with one shared simulation-turn budget.
+    pub fn with_simulation_turn_budget(budget: u64) -> Self {
+        let flag = Self::new();
+        flag.0.simulation_turn_budget.store(budget, Ordering::Relaxed);
+        flag
     }
 
     /// Asks every search that holds this flag to stop.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.cancelled.store(true, Ordering::Relaxed);
     }
 
     /// Whether some caller asked the search to stop.
@@ -273,7 +288,45 @@ impl CancelFlag {
     /// `Relaxed` is enough. The flag carries no other data, and a search that
     /// reads a stale `false` reads the flag again at the next check point.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// Claims one turn simulation from the shared budget.
+    ///
+    /// A flag with a zero budget has no simulation limit.
+    pub(crate) fn claim_simulation_turn(&self) -> bool {
+        let budget = self.0.simulation_turn_budget.load(Ordering::Relaxed);
+        if budget == 0 {
+            return true;
+        }
+        let claimed = self.0.simulation_turns.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |value| (value < budget).then_some(value + 1),
+        );
+        if claimed.is_err() {
+            self.0.simulation_budget_hit.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// Returns true after a search tries to pass the simulation-turn budget.
+    pub fn simulation_budget_hit(&self) -> bool {
+        self.0.simulation_budget_hit.load(Ordering::Relaxed)
+    }
+
+    /// Returns the simulation turns that this flag claimed.
+    pub fn simulation_turns(&self) -> u64 {
+        self.0.simulation_turns.load(Ordering::Relaxed)
+    }
+
+    /// Returns the configured simulation-turn budget.
+    pub fn simulation_turn_budget(&self) -> Option<u64> {
+        match self.0.simulation_turn_budget.load(Ordering::Relaxed) {
+            0 => None,
+            budget => Some(budget),
+        }
     }
 
     /// The shared cell of this flag.
@@ -282,7 +335,7 @@ impl CancelFlag {
     /// simulation on a raised flag. The simulator takes the cell rather than this
     /// type, so it needs no name from the solver.
     pub(crate) fn shared(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.0)
+        Arc::clone(&self.0.cancelled)
     }
 }
 
@@ -531,6 +584,9 @@ pub enum SolveWarning {
     /// pass finished, because a complete shallower pass is returned in
     /// preference to a partial deep one.
     BudgetExhausted { budget: u64 },
+    /// The search exhausted the simulation-turn budget.
+    /// The search used static scores after this point.
+    SimulationTurnBudgetExhausted { budget: u64 },
     /// The wall-clock deadline expired; nodes past that point were scored
     /// statically rather than searched. Under iterative deepening this appears
     /// only when no pass finished, for the same reason as `BudgetExhausted`.
@@ -563,6 +619,10 @@ impl fmt::Display for SolveWarning {
             SolveWarning::BudgetExhausted { budget } => {
                 write!(f, "node budget of {budget} exhausted; deeper nodes were evaluated statically")
             }
+            SolveWarning::SimulationTurnBudgetExhausted { budget } => write!(
+                f,
+                "the search exhausted the simulation-turn budget of {budget}. Later positions used static scores"
+            ),
             SolveWarning::DeadlineExceeded { budget } => {
                 write!(
                     f,
@@ -749,4 +809,44 @@ pub fn solve_seeded_progress_cancellable(
 ) -> Result<SolveResult, SolveError> {
     let _guard = scoped_sample_rng(seed);
     search::run(state, pokemon_dex, move_dex, config, progress, cancel)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::CancelFlag;
+
+    #[test]
+    fn cloned_flags_share_one_simulation_budget() {
+        let control = CancelFlag::with_simulation_turn_budget(2);
+        let clone = control.clone();
+
+        assert!(control.claim_simulation_turn());
+        assert!(clone.claim_simulation_turn());
+        assert!(!control.claim_simulation_turn());
+        assert_eq!(clone.simulation_turns(), 2);
+        assert!(clone.simulation_budget_hit());
+    }
+
+    #[test]
+    fn concurrent_claims_do_not_pass_the_budget() {
+        let control = CancelFlag::with_simulation_turn_budget(37);
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let worker = control.clone();
+                std::thread::spawn(move || {
+                    (0..20)
+                        .filter(|_| worker.claim_simulation_turn())
+                        .count()
+                })
+            })
+            .collect();
+        let claimed: usize = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .sum();
+
+        assert_eq!(claimed, 37);
+        assert_eq!(control.simulation_turns(), 37);
+        assert!(control.simulation_budget_hit());
+    }
 }

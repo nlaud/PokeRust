@@ -1018,6 +1018,21 @@ impl<'a> PreviewContext<'a> {
             merge_warning(&mut self.warnings, SolveWarning::Cancelled);
             return EVEN;
         }
+        if self
+            .cancel
+            .is_some_and(super::CancelFlag::simulation_budget_hit)
+        {
+            if let Some(budget) = self
+                .cancel
+                .and_then(super::CancelFlag::simulation_turn_budget)
+            {
+                merge_warning(
+                    &mut self.warnings,
+                    SolveWarning::SimulationTurnBudgetExhausted { budget },
+                );
+            }
+            return EVEN;
+        }
         let key = (self.preview_key, self.config_key, self.dex_key, row, col);
         if self.cacheable
             && let Some(cell) = self.cache.values.get(&key).cloned()
@@ -1059,6 +1074,19 @@ impl<'a> PreviewContext<'a> {
 
     /// Applies both preview choices and averages the branch values.
     fn evaluate(&mut self, row: usize, col: usize, expired: bool) -> (f64, Vec<SolveWarning>) {
+        if self
+            .cancel
+            .is_some_and(|control| !control.claim_simulation_turn())
+        {
+            let budget = self
+                .cancel
+                .and_then(super::CancelFlag::simulation_turn_budget)
+                .unwrap_or_default();
+            return (
+                EVEN,
+                vec![SolveWarning::SimulationTurnBudgetExhausted { budget }],
+            );
+        }
         let p1_command = PlayerCommand::TeamPreview(self.p1[row].clone());
         let p2_command = PlayerCommand::TeamPreview(self.p2[col].clone());
         let branches = simulate_turn(

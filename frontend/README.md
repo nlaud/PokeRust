@@ -150,9 +150,8 @@ The load path replaces a stored pair the same way.
 
 `P2RevealPanel.tsx` shows both states of that draw:
 
-- During the search it shows a wait line, the elapsed time, an approximate
-  progress figure, a "Choose current move" button, and a "Change my move"
-  button.
+- During the search it shows the exact simulation count and a progress bar.
+  It also shows a "Choose current move" button and a "Change my move" button.
 - After the turn resolves it shows the drawn command and the draw source.
 
 The profile, progress, strategy, and reveal use one expandable card.
@@ -160,10 +159,8 @@ Approximation notes appear only while the user points to or focuses the
 `Approx.` control.
 
 The client waits for the current analysis job until that job stops.
-No client timeout ends the wait.
-The profile duration is an estimate. It does not stop the search.
-The progress figure stays at or below 99 percent until the server returns a
-strategy.
+The shared simulation-turn budget stops the full job.
+The progress bar compares the exact count with that budget.
 `POST /api/battles/{id}/analysis` stops the search and keeps its current
 complete strategy.
 A job that ends with no answer blocks one submission and reports the reason.
@@ -252,8 +249,26 @@ An open panel grows upward, and it scrolls only when it passes the window.
 Approximation notes appear only while the user points to or focuses the
 `Approx.` control.
 
-Open the panel, select an algorithm and a preset, then start the search.
+Open the panel, select an algorithm, set the raw limits, and start the search.
 The controls hold the same knobs as the simulator setup panel.
+
+Both panels expose these limits:
+
+- Simulation-turn budget.
+- Main depth and replacement depth.
+- Damage rolls and critical-hit branches.
+- Particles for a belief search.
+
+The simulation-turn budget holds a "Scale automatically" box.
+A checked box sends no budget, and the server derives one.
+A sampled search spends about one turn simulation for each turn of depth, and
+one rollout reads one particle.
+The derived budget multiplies both numbers, so a deeper search keeps its
+rollout count instead of losing accuracy.
+Clear the box to set the budget directly.
+
+These damage settings apply only to solver searches.
+A played simulator turn still uses 16 damage rolls and critical-hit branches.
 
 These endpoints control the search:
 
@@ -274,14 +289,17 @@ against the drawn world.
 A `doubleOracle` profile is exact for its depth, and it reads the drawn world
 alone.
 
-The server runs one search for each depth from one through the configured depth.
-Each depth sends a complete answer, and a `doubleOracle` search also sends one
-answer after each of its rounds.
-The numbers therefore move while the search goes deeper.
+An exact search runs one search for each depth through the configured depth.
+Each depth sends a complete answer. A `doubleOracle` search also sends one
+answer after each round. The numbers move while the search goes deeper.
+
+A sampled search starts at the requested depth.
+It runs until it uses the shared simulation-turn budget.
 
 The store keeps the last complete answer while the next depth runs.
 The panel shows that answer, the depth in progress, and the count of answers so
 far.
+It also shows the exact simulation count for the full job.
 
 The panel compares the last two complete answers.
 It shows the change in win odds between the two depths.

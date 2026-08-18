@@ -380,6 +380,7 @@ pub fn search_cancellable(
         root_keys: [Vec::new(), Vec::new()],
         stats: MctsStats::default(),
         action_truncations: [None, None],
+        cancel,
     };
 
     let mut values = RunningStats::default();
@@ -387,7 +388,10 @@ pub fn search_cancellable(
     for index in 0..iterations {
         // Iteration 1 always runs. Every later iteration reads the flag first,
         // so the answer covers whole iterations and nothing else.
-        if index > 0 && cancel_requested(cancel) {
+        if index > 0
+            && (cancel_requested(cancel)
+                || cancel.is_some_and(CancelFlag::simulation_budget_hit))
+        {
             cancelled = true;
             break;
         }
@@ -417,8 +421,13 @@ pub fn search_cancellable(
     let p2_strategy = root_strategy(&ctx.trees[1], &ctx.root_keys[1]);
 
     let mut warnings = Vec::new();
-    if cancelled {
+    if cancelled && cancel_requested(cancel) {
         warnings.push(SolveWarning::Cancelled);
+    }
+    if cancel.is_some_and(CancelFlag::simulation_budget_hit)
+        && let Some(budget) = cancel.and_then(CancelFlag::simulation_turn_budget)
+    {
+        warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
     }
     for (player, truncation) in [
         (Player::P1, ctx.action_truncations[0]),
@@ -474,6 +483,7 @@ struct IsmctsContext<'a> {
     stats: MctsStats,
     /// Largest action-set truncation for each player anywhere in the trees.
     action_truncations: [Option<(usize, usize)>; 2],
+    cancel: Option<&'a CancelFlag>,
 }
 
 /// What one node selection produced.
@@ -534,6 +544,15 @@ impl IsmctsContext<'_> {
             joint[1].actions[picks[1].played].clone(),
         ];
 
+        if self
+            .cancel
+            .is_some_and(|control| !control.claim_simulation_turn())
+        {
+            let value = self.score(battle);
+            self.learn(0, keys[0], &picks[0], value);
+            self.learn(1, keys[1], &picks[1], WIN - value);
+            return value;
+        }
         self.stats.turns_simulated += 1;
         let sample = sample_transition(
             state,

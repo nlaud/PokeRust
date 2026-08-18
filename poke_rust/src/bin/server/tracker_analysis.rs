@@ -32,11 +32,11 @@
 //! names a species and a belief mon index, which is a guess about the live
 //! opponent rather than a fact the user recorded.
 //!
-//! # The time estimate
+//! # Simulation progress
 //!
-//! The profile time is an expected duration. It does not set a solver deadline.
-//! The response uses that duration to estimate rung progress. Progress stays
-//! below 100 percent until the rung publishes a complete answer.
+//! One shared simulation-turn budget covers the full depth ladder. The response
+//! reports the claimed count and the hard limit. All rungs and preview worlds
+//! use the same count.
 //!
 //! The tracker accepts only `ismcts` and `mccfr`. These algorithms search the
 //! belief instead of treating one sampled hidden world as the true state.
@@ -140,14 +140,9 @@ pub struct TrackerAnalysisCheckpoint {
 
 /// The rung that a running job started.
 ///
-/// The solver reports no live node count while it searches, so the panel needs
-/// a time estimate. The record holds the depth of the rung, the moment it
-/// started, and the time that it can spend.
 #[derive(Debug, Clone, Copy)]
 struct RungProgress {
     depth: u8,
-    started: Instant,
-    budget: Duration,
 }
 
 /// The job that is running now.
@@ -242,13 +237,22 @@ impl TrackerAnalysisState {
 
     /// Records the job that is starting and returns its ticket.
     /// Cancels an earlier job, so one ladder runs at a time.
+    #[cfg(test)]
     fn start(&mut self) -> JobTicket {
+        self.start_with_budget(0)
+    }
+
+    fn start_with_budget(&mut self, budget: u64) -> JobTicket {
         if let Some(job) = self.running.take() {
             job.cancel.cancel();
         }
         let id = self.next_job_id;
         self.next_job_id = self.next_job_id.wrapping_add(1);
-        let cancel = CancelFlag::new();
+        let cancel = if budget == 0 {
+            CancelFlag::new()
+        } else {
+            CancelFlag::with_simulation_turn_budget(budget)
+        };
         self.running = Some(RunningJob {
             id,
             generation: self.generation,
@@ -278,16 +282,12 @@ impl TrackerAnalysisState {
     ///
     /// The panel reads this record between two complete rungs, so it can show
     /// the depth in progress and the spent part of the budget.
-    fn note_rung(&mut self, job: &JobTicket, depth: u8, budget: Duration) {
+    fn note_rung(&mut self, job: &JobTicket, depth: u8) {
         if !self.is_current(job) {
             return;
         }
         if let Some(running) = self.running.as_mut() {
-            running.rung = Some(RungProgress {
-                depth,
-                started: Instant::now(),
-                budget,
-            });
+            running.rung = Some(RungProgress { depth });
         }
     }
 
@@ -345,7 +345,9 @@ impl TrackerAnalysisState {
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
             target_depth: profile.map(|p| p.view.depth),
-            rung: self.running.as_ref().and_then(|job| job.rung).map(rung_dto),
+            rung: self.running.as_ref().and_then(|job| {
+                job.rung.map(|rung| rung_dto(rung, &job.cancel))
+            }),
             checkpoint: self
                 .checkpoint
                 .as_ref()
@@ -365,17 +367,19 @@ impl TrackerAnalysisState {
 
 /// Builds the progress row of the rung that runs.
 ///
-/// The fraction compares elapsed time with the estimate. A running job stays
-/// below 100 percent until it finishes.
-fn rung_dto(rung: RungProgress) -> TrackerAnalysisRungDto {
-    let elapsed = rung.started.elapsed();
-    let budget_ms = rung.budget.as_millis().max(1) as u64;
-    let elapsed_ms = elapsed.as_millis() as u64;
+/// The fraction compares the claimed simulation turns with the hard limit.
+fn rung_dto(rung: RungProgress, control: &CancelFlag) -> TrackerAnalysisRungDto {
+    let turns_simulated = control.simulation_turns();
+    let simulation_turn_budget = control.simulation_turn_budget().unwrap_or_default();
     TrackerAnalysisRungDto {
         depth: rung.depth,
-        elapsed_ms,
-        budget_ms,
-        fraction: (elapsed_ms as f64 / budget_ms as f64).clamp(0.0, 0.99),
+        turns_simulated,
+        simulation_turn_budget,
+        fraction: if simulation_turn_budget == 0 {
+            0.0
+        } else {
+            turns_simulated as f64 / simulation_turn_budget as f64
+        },
     }
 }
 
@@ -424,8 +428,6 @@ pub(crate) fn strategy_row_dto(row: &TrackerStrategyRow) -> StrategyRowDto {
 struct LadderInputs {
     search: BotSearchConfig,
     seed: u64,
-    /// The expected duration of one rung.
-    time_ms: u64,
     /// The depth horizon. The ladder runs one rung for each depth up to it.
     target_depth: u8,
     generation: u64,
@@ -447,8 +449,8 @@ struct LadderInputs {
 struct LadderHooks<'a> {
     /// Stores one complete rung.
     publish: &'a dyn Fn(TrackerAnalysisCheckpoint),
-    /// Records the depth and the time budget of the rung that is starting.
-    note_rung: &'a dyn Fn(u8, Duration),
+    /// Records the depth of the rung that is starting.
+    note_rung: &'a dyn Fn(u8),
 }
 
 /// Starts one ladder for the current position of a tracker session.
@@ -470,7 +472,6 @@ pub fn start_job(
     let inputs = LadderInputs {
         search: profile.search,
         seed: profile.view.seed.unwrap_or_else(random_seed),
-        time_ms: profile.view.time_ms.unwrap_or(DEFAULT_TIME_MS),
         target_depth: profile.view.depth,
         generation: session.analysis.generation,
         turn_number: session.belief.turn_number,
@@ -482,7 +483,9 @@ pub fn start_job(
         format: MetaFormat::from_active_per_side(session.active_per_side),
     };
 
-    let job = session.analysis.start();
+    let job = session
+        .analysis
+        .start_with_budget(profile.view.simulation_turn_budget);
     let tracker_id = tracker_id.to_string();
 
     tokio::task::spawn_blocking(move || {
@@ -497,10 +500,10 @@ pub fn start_job(
                     session.analysis.publish(&job, checkpoint);
                 }
             };
-            let note_rung = |depth: u8, budget: Duration| {
+            let note_rung = |depth: u8| {
                 let mut guard = sessions.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(session) = guard.get_mut(&tracker_id) {
-                    session.analysis.note_rung(&job, depth, budget);
+                    session.analysis.note_rung(&job, depth);
                 }
             };
             let hooks = LadderHooks {
@@ -520,12 +523,6 @@ pub fn start_job(
         }
     });
 }
-
-/// The expected duration of a profile that carries none.
-///
-/// `bot::resolve` always sets one, so this value covers only a hand-built
-/// profile.
-const DEFAULT_TIME_MS: u64 = 10_000;
 
 /// Draws the seed of one job.
 ///
@@ -582,13 +579,13 @@ fn run_ladder(
         determinize: belief_draw_config(&inputs.inference),
     };
 
-    for depth in 1..=inputs.target_depth {
+    let first_depth = inputs.search.first_depth(inputs.target_depth);
+    for depth in first_depth..=inputs.target_depth {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        let estimate = Duration::from_millis(inputs.time_ms);
         let search = inputs.search.with_depth(depth);
-        (hooks.note_rung)(depth, estimate);
+        (hooks.note_rung)(depth);
 
         // A solver panic must not poison the session mutex, so catch it here
         // and report it as an ordinary job failure.
@@ -632,7 +629,7 @@ fn run_ladder(
             seed: inputs.seed,
             warnings,
         });
-        if rung.depth_reached < depth {
+        if rung.depth_reached < depth || cancel.simulation_budget_hit() {
             return Ok(());
         }
     }
@@ -937,7 +934,7 @@ pub(crate) fn preview_battle_config(search: BotSearchConfig) -> SolveConfig {
         depth: mcts.depth,
         damage_rolls: mcts.damage_rolls,
         consider_crit: mcts.consider_crit,
-        max_actions_per_player: mcts.max_actions_per_player,
+        max_actions_per_player: None,
         deadline: None,
         ..SolveConfig::default()
     };
@@ -979,10 +976,9 @@ fn run_preview_rung(
     cancel: &CancelFlag,
     hooks: &LadderHooks,
 ) -> Result<(), String> {
-    let estimate = Duration::from_millis(inputs.time_ms);
     let battle = preview_battle_config(inputs.search);
     let depth = battle.depth;
-    (hooks.note_rung)(depth, estimate);
+    (hooks.note_rung)(depth);
 
     let config = OpenListConfig {
         preview: PreviewConfig {
@@ -1185,6 +1181,9 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::BudgetExhausted { budget } => {
             format!("The {budget}-node budget ran out, so deeper nodes took a static score.")
         }
+        solver::SolveWarning::SimulationTurnBudgetExhausted { budget } => format!(
+            "The search exhausted the {budget}-turn simulation budget. Later positions used static scores."
+        ),
         solver::SolveWarning::DeadlineExceeded { budget } => format!(
             "The {} ms limit expired, so deeper nodes took a static score.",
             budget.as_millis()
@@ -1332,13 +1331,7 @@ mod tests {
     }
 
     fn profile() -> BotProfile {
-        crate::bot::resolve(
-            "analysis",
-            &crate::bot::BotProfileRequest::default(),
-            16,
-            true,
-        )
-        .unwrap()
+        crate::bot::resolve("analysis", &crate::bot::BotProfileRequest::default()).unwrap()
     }
 
     /// Each rung must reach the client with its own depth, so the panel can
@@ -1612,41 +1605,38 @@ mod tests {
         assert_eq!(rows[0].probability, 0.19);
     }
 
-    /// The panel needs a progress figure between two complete rungs, so the view
-    /// must report the depth and the budget of the rung that runs.
+    /// The view must report the current depth and simulation count.
     #[test]
     fn the_view_reports_the_rung_that_runs() {
         let mut state = TrackerAnalysisState::default();
         assert!(state.view(Some(&profile())).rung.is_none());
 
-        let job = state.start();
+        let job = state.start_with_budget(1_000);
         assert!(
             state.view(Some(&profile())).rung.is_none(),
             "no rung has started yet"
         );
 
-        state.note_rung(&job, 2, Duration::from_millis(4_000));
+        state.note_rung(&job, 2);
         let rung = state.view(Some(&profile())).rung.expect("a running rung");
         assert_eq!(rung.depth, 2);
-        assert_eq!(rung.budget_ms, 4_000);
-        assert!((0.0..=0.99).contains(&rung.fraction), "{}", rung.fraction);
+        assert_eq!(rung.turns_simulated, 0);
+        assert_eq!(rung.simulation_turn_budget, 1_000);
+        assert_eq!(rung.fraction, 0.0);
 
         // A finished job reports no rung, so the panel drops the bar.
         state.finish(&job, Ok(()));
         assert!(state.view(Some(&profile())).rung.is_none());
     }
 
-    /// Elapsed time can exceed the estimate. The panel must not report a
-    /// complete rung before the server publishes its answer.
+    /// The progress row reports the shared budget before work starts.
     #[test]
     fn a_running_rung_stays_below_one_hundred_percent() {
-        let rung = rung_dto(RungProgress {
-            depth: 2,
-            started: Instant::now() - Duration::from_secs(2),
-            budget: Duration::from_secs(1),
-        });
+        let control = CancelFlag::with_simulation_turn_budget(1);
+        let rung = rung_dto(RungProgress { depth: 2 }, &control);
 
-        assert_eq!(rung.fraction, 0.99);
+        assert_eq!(rung.simulation_turn_budget, 1);
+        assert_eq!(rung.fraction, 0.0);
     }
 
     /// A replaced job must not move the progress record of the job that owns it.
@@ -1656,10 +1646,10 @@ mod tests {
         let first = state.start();
         let second = state.start();
 
-        state.note_rung(&first, 7, Duration::from_millis(1_000));
+        state.note_rung(&first, 7);
         assert!(state.view(Some(&profile())).rung.is_none());
 
-        state.note_rung(&second, 1, Duration::from_millis(1_000));
+        state.note_rung(&second, 1);
         assert_eq!(state.view(Some(&profile())).rung.unwrap().depth, 1);
     }
 
@@ -1694,10 +1684,12 @@ mod tests {
         for name in ["doubleOracle", "mcts", "ismcts", "mccfr"] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
-                preset: Some("fast".to_string()),
+                depth: Some(1),
+                damage_rolls: Some(16),
+                consider_crit: Some(true),
                 ..Default::default()
             };
-            let resolved = crate::bot::resolve("analysis", &request, 16, true).unwrap();
+            let resolved = crate::bot::resolve("analysis", &request).unwrap();
 
             let config = preview_battle_config(resolved.search);
 
@@ -1712,18 +1704,18 @@ mod tests {
     /// under the cap. Every other profile reads one world.
     #[test]
     fn the_world_count_stays_under_the_cap() {
-        for (name, preset, want) in [
-            ("doubleOracle", "strong", 1),
-            ("mcts", "strong", 1),
-            ("ismcts", "fast", 8),
-            ("mccfr", "strong", MAX_PREVIEW_WORLDS),
+        for (name, particles, want) in [
+            ("doubleOracle", None, 1),
+            ("mcts", None, 1),
+            ("ismcts", Some(8), 8),
+            ("mccfr", Some(MAX_PREVIEW_WORLDS + 4), MAX_PREVIEW_WORLDS),
         ] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
-                preset: Some(preset.to_string()),
+                particles,
                 ..Default::default()
             };
-            let resolved = crate::bot::resolve("analysis", &request, 16, true).unwrap();
+            let resolved = crate::bot::resolve("analysis", &request).unwrap();
             assert_eq!(preview_worlds(resolved.search), want, "{name}");
         }
     }
@@ -1831,21 +1823,22 @@ Level: 50
     }
 
     /// The ladder inputs of a fresh tracker session, or `None` with no cache.
-    fn preview_inputs(algorithm: &str, time_ms: u64) -> Option<LadderInputs> {
+    fn preview_inputs(algorithm: &str, simulation_turn_budget: u64) -> Option<LadderInputs> {
         let meta = server_meta()?;
         let dexes = server_dexes();
         let request = crate::bot::BotProfileRequest {
             algorithm: Some(algorithm.to_string()),
-            preset: Some("fast".to_string()),
-            time_ms: Some(time_ms),
+            simulation_turn_budget: Some(simulation_turn_budget),
+            depth: Some(1),
+            damage_rolls: Some(4),
+            consider_crit: Some(false),
             ..Default::default()
         };
-        let resolved = crate::bot::resolve("analysis", &request, 4, false).unwrap();
+        let resolved = crate::bot::resolve("analysis", &request).unwrap();
         let (battle, preview) = preview_beliefs();
         Some(LadderInputs {
             search: resolved.search,
             seed: 7,
-            time_ms,
             target_depth: resolved.view.depth,
             generation: 0,
             turn_number: battle.turn_number,
@@ -1872,7 +1865,7 @@ Level: 50
             let publish = |checkpoint: TrackerAnalysisCheckpoint| {
                 published.lock().unwrap().push(checkpoint);
             };
-            let note_rung = |depth: u8, _budget: Duration| noted.lock().unwrap().push(depth);
+            let note_rung = |depth: u8| noted.lock().unwrap().push(depth);
             let hooks = LadderHooks {
                 publish: &publish,
                 note_rung: &note_rung,
