@@ -492,6 +492,14 @@ fn build_search(
         // and its variance falls. This is the one control here that `ismcts`
         // reads. `mccfr` ignores it.
         control_variate: true,
+        // Weight the `k`-th strategy of a node by `k * k` in its average. A node
+        // plays close to the uniform strategy on its first visits, and the plain
+        // mean keeps those visits at full weight forever. This exponent lets the
+        // later visits outvote them.
+        //
+        // All three algorithms read this field. The module documentation of
+        // `mcts` holds the measurement that chose this exponent.
+        average_discount: 2.0,
         ..MctsConfig::default()
     };
     match algorithm {
@@ -603,6 +611,26 @@ mod current_tests {
         match profile.search {
             BotSearchConfig::Ismcts(config) => assert!(config.search.control_variate),
             _ => panic!("the resolved search must use ISMCTS"),
+        }
+    }
+
+    /// Every algorithm reads the average discount, and `mccfr` replaces the
+    /// search block of the profile. Each one must still carry the exponent.
+    #[test]
+    fn every_algorithm_keeps_the_average_discount() {
+        for algorithm in ["mcts", "ismcts", "mccfr"] {
+            let request = BotProfileRequest {
+                algorithm: Some(algorithm.to_string()),
+                ..BotProfileRequest::default()
+            };
+            let profile = resolve("analysis", &request).unwrap();
+            let discount = match profile.search {
+                BotSearchConfig::Mcts(config) => config.average_discount,
+                BotSearchConfig::Ismcts(config) => config.search.average_discount,
+                BotSearchConfig::Mccfr(config) => config.search.average_discount,
+                _ => panic!("{algorithm} must resolve to a sampled search"),
+            };
+            assert_eq!(discount, 2.0, "{algorithm} dropped the average discount");
         }
     }
 

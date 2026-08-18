@@ -2099,7 +2099,7 @@ fn mcts_matrix_game_finds_the_equilibrium() {
     let exact = solve_matrix_game(&payoffs).value;
 
     for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
-        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, false);
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, false, 0.0);
         assert!(
             (learned.value - exact).abs() < 0.05,
             "{policy:?} learned {}, the exact value is {exact}",
@@ -3365,7 +3365,15 @@ fn matrix_rmse(
         .iter()
         .map(|&seed| {
             let learned =
-                mcts::learn_matrix_game(seed, &payoffs, iterations, policy, 0.1, control_variate);
+                mcts::learn_matrix_game(
+                    seed,
+                    &payoffs,
+                    iterations,
+                    policy,
+                    0.1,
+                    control_variate,
+                    0.0,
+                );
             (learned.value - exact).powi(2)
         })
         .sum();
@@ -3402,7 +3410,7 @@ fn control_variates_keep_the_matrix_value() {
     let exact = solve_matrix_game(&payoffs).value;
 
     for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
-        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, true);
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, true, 0.0);
         assert!(
             (learned.value - exact).abs() < 0.05,
             "{policy:?} learned {}, the exact value is {exact}",
@@ -3586,6 +3594,122 @@ fn control_variates_lower_the_exploitability_gap() {
     assert!(
         corrected < plain,
         "the baseline scored {corrected}, the plain estimate scored {plain}"
+    );
+}
+
+// ── Discounted averages ─────────────────────────────────────────────────────
+
+/// The root-mean-square error of the strategy pair of
+/// [`mcts::learn_matrix_game`], against the exact equilibrium of the matrix.
+///
+/// The discount changes the average strategy alone. This helper therefore reads
+/// the strategy, and [`matrix_rmse`] reads the value.
+fn matrix_strategy_rmse(
+    seeds: &[u64],
+    iterations: u32,
+    policy: SelectionPolicy,
+    average_discount: f64,
+) -> f64 {
+    let payoffs = learner_payoffs();
+    let exact = solve_matrix_game(&payoffs);
+    let mut squares = 0.0;
+    let mut terms = 0.0;
+    for &seed in seeds {
+        let learned = mcts::learn_matrix_game(
+            seed,
+            &payoffs,
+            iterations,
+            policy,
+            0.1,
+            false,
+            average_discount,
+        );
+        let sides = [
+            (&learned.row_strategy, &exact.row_strategy),
+            (&learned.col_strategy, &exact.col_strategy),
+        ];
+        for (learned_side, exact_side) in sides {
+            for (probability, target) in learned_side.iter().zip(exact_side) {
+                squares += (probability - target).powi(2);
+                terms += 1.0;
+            }
+        }
+    }
+    (squares / terms).sqrt()
+}
+
+/// The cost of the discount, and the reason that the default keeps it off.
+///
+/// One payoff matrix holds no tree. Its two learners see the same game on every
+/// iteration, so an early strategy is as good a sample as a late one. The
+/// discount then only lowers the effective sample count of the average, and the
+/// strategy error grows.
+///
+/// The search pays that cost and wins more, because a tree changes under its own
+/// root. `discounted_averages_lower_the_exploitability_gap` holds that
+/// measurement.
+#[test]
+fn discounted_averages_cost_accuracy_on_a_matrix_game() {
+    let seeds: Vec<u64> = (1..=8).collect();
+
+    let plain = matrix_strategy_rmse(&seeds, 400, SelectionPolicy::RegretMatching, 0.0);
+    let discounted = matrix_strategy_rmse(&seeds, 400, SelectionPolicy::RegretMatching, 2.0);
+
+    assert!(plain > 0.0, "the plain average hit the equilibrium");
+    assert!(
+        discounted > plain,
+        "the discounted average scored {discounted}, the plain average scored {plain}"
+    );
+}
+
+/// The discount reweights the average strategy. It must not move the value that
+/// the learners report, which the iteration mean holds.
+#[test]
+fn discounted_averages_keep_the_matrix_value() {
+    let payoffs = learner_payoffs();
+    let exact = solve_matrix_game(&payoffs).value;
+
+    for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
+        let learned = mcts::learn_matrix_game(9, &payoffs, 20_000, policy, 0.1, false, 1.0);
+        assert!(
+            (learned.value - exact).abs() < 0.05,
+            "{policy:?} learned {}, the exact value is {exact}",
+            learned.value
+        );
+        for (label, strategy) in [
+            ("row", &learned.row_strategy),
+            ("column", &learned.col_strategy),
+        ] {
+            let total: f64 = strategy.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "{policy:?} {label} strategy sums to {total}"
+            );
+        }
+    }
+}
+
+/// The point of the discount: it must beat the plain mean inside the search, on
+/// the same iteration budget.
+///
+/// This test measures the same quantity as
+/// [`common_random_numbers_lower_the_exploitability_gap`], for the same reason.
+#[test]
+fn discounted_averages_lower_the_exploitability_gap() {
+    let seeds: Vec<u64> = (1..=16).collect();
+    let plain_config = mcts_config();
+    let discounted_config = MctsConfig {
+        average_discount: 2.0,
+        ..plain_config
+    };
+
+    let plain = contested_mean_gap(&seeds, &plain_config);
+    let discounted = contested_mean_gap(&seeds, &discounted_config);
+
+    assert!(plain > 0.0, "the plain average learned an exact answer");
+    assert!(
+        discounted < plain,
+        "the discounted average scored {discounted}, the plain average scored {plain}"
     );
 }
 
@@ -4944,6 +5068,64 @@ fn mccfr_is_reproducible() {
             .collect()
     };
     assert_eq!(probabilities(&first), probabilities(&second));
+}
+
+/// The mean exploitability gap of one fog-of-war search on `small_contest`, at
+/// one discount exponent.
+///
+/// The belief holds one world, so the gap of the returned pair is the gap on the
+/// concrete position that the exact solver reads.
+fn fog_mean_gap(seeds: &[u64], discount: f64, mccfr_search: bool) -> f64 {
+    let (pokemon_dex, move_dex) = dexes();
+    let battle = small_contest();
+    let state = MatchState::BattleState(battle.clone());
+    let config = base_config();
+    let belief = belief_of_worlds(vec![battle]);
+
+    let total: f64 = seeds
+        .iter()
+        .map(|&seed| {
+            let (p1, p2) = if mccfr_search {
+                let mut search = mccfr_config(600, 1);
+                search.search.average_discount = discount;
+                let result = mccfr::search(seed, &belief, pokemon_dex, move_dex, &search)
+                    .expect("the position is playable");
+                (result.p1_strategy, result.p2_strategy)
+            } else {
+                let mut search = ismcts_config(600, 1);
+                search.search.average_discount = discount;
+                let result = ismcts::search(seed, &belief, pokemon_dex, move_dex, &search)
+                    .expect("the position is playable");
+                (result.p1_strategy, result.p2_strategy)
+            };
+            exploitability(&state, pokemon_dex, move_dex, &config, &p1, &p2)
+                .expect("the position is playable")
+                .gap
+        })
+        .sum();
+    total / seeds.len() as f64
+}
+
+/// Both fog-of-war searches must gain what the perfect-information search gains.
+///
+/// They hold one tree of information sets for each player, and that tree changes
+/// under its own root as the search runs. This is the same effect that
+/// `discounted_averages_lower_the_exploitability_gap` measures.
+#[test]
+fn discounted_averages_lower_the_fog_of_war_gap() {
+    let seeds: Vec<u64> = (1..=8).collect();
+
+    for mccfr_search in [false, true] {
+        let name = if mccfr_search { "MCCFR" } else { "ISMCTS" };
+        let plain = fog_mean_gap(&seeds, 0.0, mccfr_search);
+        let discounted = fog_mean_gap(&seeds, 2.0, mccfr_search);
+
+        assert!(plain > 0.0, "{name} learned an exact answer");
+        assert!(
+            discounted < plain,
+            "{name} scored {discounted} discounted, and {plain} plain"
+        );
+    }
 }
 
 /// The point of an equilibrium baseline: the returned pair must give away less

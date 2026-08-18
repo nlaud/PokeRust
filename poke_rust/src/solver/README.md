@@ -162,6 +162,24 @@ The learner then divides by the selection probability.
 Both controls lower the exploitability gap of the learned strategy.
 Neither control lowers the error of the reported value.
 
+### Discounted averages
+
+`MctsConfig::average_discount` weights the `k`-th strategy of a node by
+`k ^ average_discount` in the average of that node.
+A node plays close to the uniform strategy on its first visits.
+The plain mean keeps those visits at full weight for the whole search.
+The exponent lets the later visits outvote them.
+
+The exponent counts the visits of one node, not the iterations of the search.
+All three sampling algorithms read the field.
+The exponent lowers the exploitability gap, and the gain grows with the budget.
+It does not change the regrets, the reported value, or the sampling error.
+
+The gain comes from the tree.
+A caller that solves one payoff matrix has no tree, and the exponent costs that
+caller accuracy.
+The default is therefore zero, and `bot.rs` sets two.
+
 ## Fog-of-war solver
 
 Do not average strategies from independent determinized worlds as the main

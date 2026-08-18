@@ -594,7 +594,10 @@ impl IsmctsContext<'_> {
         // The entry API does not report whether it built the node, so the count
         // comes from the size of the tree.
         let before = self.trees[slot].len();
-        let node = self.trees[slot].entry(key).or_insert_with(InfoNode::new);
+        let discount = self.cfg.search.average_discount;
+        let node = self.trees[slot]
+            .entry(key)
+            .or_insert_with(|| InfoNode::new(discount));
         let allowed = node.register(&joint.actions);
         let strategy = node.learner.strategy_subset(policy, exploration, &allowed);
         if self.trees[slot].len() > before {

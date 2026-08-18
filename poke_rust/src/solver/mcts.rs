@@ -177,6 +177,60 @@
 //! action part of the time.
 //! A smaller exploration rate lowers the bias and raises the variance.
 //!
+//! # Discounted averages
+//!
+//! A node plays close to the uniform strategy on its first visits, because it
+//! has almost no regret yet. The plain mean gives those visits the same weight
+//! as the visits of a node that already learned its regrets. A short run
+//! therefore reports an average that still holds a large uniform part.
+//!
+//! [`MctsConfig::average_discount`] weights the `k`-th contribution of a node by
+//! `k ^ average_discount`:
+//!
+//! ```text
+//! average(a) = sum over k of k ^ discount * strategy_k(a)
+//! ```
+//!
+//! An exponent of one is linear counterfactual regret minimization, and an
+//! exponent of two is the common discounted form. The later visits then outvote
+//! the early ones, and the average approaches the equilibrium of the node on the
+//! same iteration budget.
+//!
+//! The exponent counts the visits of one node, not the iterations of the search.
+//! A node that a late iteration creates plays uniformly on its own first visit,
+//! and a count of the search iterations would give that uniform visit a large
+//! weight.
+//!
+//! [`Learner::age_average`] holds the incremental form and the reason that it
+//! keeps the scale of [`Learner::average_weight`].
+//!
+//! The discount changes the average strategy alone. It does not change the
+//! regrets, the reported value, or the sampling error.
+//!
+//! The exponent buys a lower exploitability gap at every budget, and the gain
+//! grows with the budget. The mean gap of the sampling search on the contested
+//! position, over 32 seeds:
+//!
+//! ```text
+//! exponent      0     0.5       1     1.5       2
+//!  150 iter  .1666   .1620   .1591   .1571   .1557
+//!  600 iter  .1194   .1088   .1026   .0986   .0958
+//! 2400 iter  .0657   .0542   .0486   .0457   .0439
+//! ```
+//!
+//! Both fog-of-war searches gain the same way. The gain flattens above an
+//! exponent of two, so `bot.rs` uses two.
+//!
+//! The gain comes from the tree, not from the learner. One payoff matrix holds
+//! no tree, and there the discount only lowers the effective sample count of the
+//! average. Its strategy error then grows by about half at every budget.
+//!
+//! `discounted_averages_lower_the_exploitability_gap`,
+//! `discounted_averages_lower_the_fog_of_war_gap`, and
+//! `discounted_averages_cost_accuracy_on_a_matrix_game` hold these measurements.
+//! [`MctsConfig::default`] keeps the discount off, because a caller that solves
+//! a matrix alone must not pay for a tree that it does not have.
+//!
 //! # Reproducibility
 //!
 //! One seed drives action selection, successor draws, and the engine.
@@ -306,6 +360,15 @@ pub struct MctsConfig {
     /// The estimate stays unbiased, and its variance falls as the mean
     /// approaches the value of the action.
     pub control_variate: bool,
+    /// Weights the `k`-th contribution to the average strategy of a node by
+    /// `k ^ average_discount`.
+    ///
+    /// A value of zero keeps the plain mean, which gives every contribution the
+    /// same weight. A value of one gives linear counterfactual regret
+    /// minimization. Read the module documentation for the reason.
+    ///
+    /// The search rejects a negative value and uses zero instead.
+    pub average_discount: f64,
 }
 
 /// How the search produces the successor of one joint action.
@@ -407,6 +470,7 @@ impl Default for MctsConfig {
             widening: None,
             common_random_numbers: None,
             control_variate: false,
+            average_discount: 0.0,
         }
     }
 }
@@ -685,6 +749,7 @@ pub struct LearnedMatrix {
 ///
 /// `control_variate` is [`MctsConfig::control_variate`] for these two learners,
 /// so a caller can measure the baseline without the engine.
+/// `average_discount` is [`MctsConfig::average_discount`] for the same reason.
 pub fn learn_matrix_game(
     seed: u64,
     payoffs: &[Vec<f64>],
@@ -692,6 +757,7 @@ pub fn learn_matrix_game(
     policy: SelectionPolicy,
     exploration: f64,
     control_variate: bool,
+    average_discount: f64,
 ) -> LearnedMatrix {
     let rows = payoffs.len();
     let cols = payoffs.first().map_or(0, |row| row.len());
@@ -705,8 +771,8 @@ pub fn learn_matrix_game(
 
     let _guard = scoped_sample_rng(seed);
     let exploration = exploration.clamp(MIN_EXPLORATION, 1.0);
-    let mut row_learner = Learner::new(rows);
-    let mut col_learner = Learner::new(cols);
+    let mut row_learner = Learner::discounted(rows, average_discount);
+    let mut col_learner = Learner::discounted(cols, average_discount);
     let mut values = RunningStats::default();
 
     // This entry point plays the complete matrix, so both learners always see
@@ -752,15 +818,27 @@ pub(super) struct Learner {
     /// never writes them, so it keeps its current result.
     baselines: Vec<f64>,
     baseline_counts: Vec<u64>,
+    /// The exponent that weights each contribution to the average strategy.
+    /// A value of zero gives every contribution the same weight.
+    /// Read [`MctsConfig::average_discount`] for the rule.
+    discount: f64,
+    /// The contributions that the average strategy already holds.
+    average_samples: u64,
 }
 
 impl Learner {
-    pub(super) fn new(actions: usize) -> Self {
+    /// A learner that discounts the early contributions to its average strategy.
+    ///
+    /// `discount` is the exponent of [`MctsConfig::average_discount`]. A value of
+    /// zero gives the plain mean, which weights every contribution the same.
+    pub(super) fn discounted(actions: usize, discount: f64) -> Self {
         Learner {
             scores: vec![0.0; actions],
             strategy_sum: vec![0.0; actions],
             baselines: vec![0.0; actions],
             baseline_counts: vec![0; actions],
+            discount: discount.max(0.0),
+            average_samples: 0,
         }
     }
 
@@ -818,8 +896,36 @@ impl Learner {
 
     /// Add one played strategy to the average.
     fn accumulate(&mut self, strategy: &[f64]) {
+        self.age_average();
         for (sum, probability) in self.strategy_sum.iter_mut().zip(strategy) {
             *sum += probability;
+        }
+    }
+
+    /// Count one contribution, and discount every contribution before it.
+    ///
+    /// Contribution `k` must carry the weight `k ^ discount`. This method instead
+    /// scales the stored sum by `((k - 1) / k) ^ discount`, and the caller then
+    /// adds contribution `k` at its own weight. The stored sum is therefore the
+    /// weighted sum divided by `k ^ discount`.
+    ///
+    /// [`Learner::average_strategy`] normalizes the sum, so that constant factor
+    /// cancels and the report holds the weighted average.
+    /// [`Learner::average_weight`] keeps the scale of the contribution count.
+    /// [`root_strategy`](super::infoset::root_strategy) mixes root sets by that
+    /// weight, and the discount therefore does not change the scale of the mix.
+    ///
+    /// The scaled form also bounds the stored sum. The direct form grows the sum
+    /// as `k ^ (discount + 1)`, which a long run drives to a large number.
+    fn age_average(&mut self) {
+        self.average_samples += 1;
+        let count = self.average_samples;
+        if self.discount <= 0.0 || count <= 1 {
+            return;
+        }
+        let decay = ((count - 1) as f64 / count as f64).powf(self.discount);
+        for sum in &mut self.strategy_sum {
+            *sum *= decay;
         }
     }
 
@@ -844,6 +950,7 @@ impl Learner {
         strategy: &[f64],
         weight: f64,
     ) {
+        self.age_average();
         for (slot, &action) in allowed.iter().enumerate() {
             if let (Some(sum), Some(probability)) =
                 (self.strategy_sum.get_mut(action), strategy.get(slot))
@@ -1317,9 +1424,10 @@ impl MctsContext<'_> {
         }
         // The pool uses the search stream. Thus, one search seed gives one result.
         let universes = UniversePool::new(self.universes);
+        let discount = self.cfg.average_discount;
         Node {
-            p1: Learner::new(p1_actions.actions.len()),
-            p2: Learner::new(p2_actions.actions.len()),
+            p1: Learner::discounted(p1_actions.actions.len(), discount),
+            p2: Learner::discounted(p2_actions.actions.len(), discount),
             p1_actions,
             p2_actions,
             visits: 0,
@@ -1659,7 +1767,7 @@ mod tests {
 
     #[test]
     fn regret_matching_plays_uniformly_before_it_learns() {
-        let learner = Learner::new(4);
+        let learner = Learner::discounted(4, 0.0);
         let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1, 4);
         assert_eq!(strategy.len(), 4);
         for probability in &strategy {
@@ -1669,7 +1777,7 @@ mod tests {
 
     #[test]
     fn exploration_bounds_every_selection_probability() {
-        let mut learner = Learner::new(3);
+        let mut learner = Learner::discounted(3, 0.0);
         learner.scores = vec![100.0, -5.0, -5.0];
         for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
             let strategy = learner.strategy(policy, 0.3, 3);
@@ -1685,7 +1793,7 @@ mod tests {
     /// score, so they start level with the played entries later.
     #[test]
     fn a_widened_update_leaves_the_hidden_scores_alone() {
-        let mut learner = Learner::new(4);
+        let mut learner = Learner::discounted(4, 0.0);
         let strategy = learner.strategy(SelectionPolicy::RegretMatching, 0.1, 2);
         assert_eq!(strategy.len(), 2);
 
@@ -1701,7 +1809,7 @@ mod tests {
     /// so they start level when a later world offers them.
     #[test]
     fn a_subset_update_leaves_the_unavailable_scores_alone() {
-        let mut learner = Learner::new(2);
+        let mut learner = Learner::discounted(2, 0.0);
         learner.grow_to(4);
         // This world offers actions 1 and 3 only.
         let allowed = vec![1, 3];
@@ -1727,7 +1835,7 @@ mod tests {
     /// each new entry level with the others.
     #[test]
     fn growing_a_learner_keeps_the_earlier_scores() {
-        let mut learner = Learner::new(2);
+        let mut learner = Learner::discounted(2, 0.0);
         learner.scores = vec![3.0, -1.0];
         learner.strategy_sum = vec![5.0, 2.0];
         learner.grow_to(4);
@@ -1747,8 +1855,8 @@ mod tests {
         let strategy = vec![0.25, 0.75];
         for policy in [SelectionPolicy::RegretMatching, SelectionPolicy::Exp3] {
             for control_variate in [false, true] {
-                let mut plain = Learner::new(2);
-                let mut subset = Learner::new(2);
+                let mut plain = Learner::discounted(2, 0.0);
+                let mut subset = Learner::discounted(2, 0.0);
                 plain.update(policy, 1, &strategy, 0.5, control_variate);
                 subset.update_subset(policy, 1, &[0, 1], &strategy, 0.5, control_variate);
                 assert_eq!(plain.scores, subset.scores, "{policy:?} {control_variate}");
@@ -1757,11 +1865,58 @@ mod tests {
         }
     }
 
+    /// The plain average must weight every contribution the same, whatever
+    /// order the learner saw them in.
+    #[test]
+    fn a_plain_average_weights_every_contribution_the_same() {
+        let mut learner = Learner::discounted(2, 0.0);
+        learner.accumulate_subset(&[0, 1], &[1.0, 0.0]);
+        learner.accumulate_subset(&[0, 1], &[0.0, 1.0]);
+
+        let average = learner.average_strategy();
+        assert!((average[0] - 0.5).abs() < 1e-12, "{average:?}");
+        assert!((average[1] - 0.5).abs() < 1e-12, "{average:?}");
+    }
+
+    /// The discounted average must weight contribution `k` by `k ^ discount`.
+    /// Two contributions at an exponent of one therefore land at one third and
+    /// two thirds.
+    #[test]
+    fn a_discounted_average_weights_the_later_contribution() {
+        let mut learner = Learner::discounted(2, 1.0);
+        learner.accumulate_subset(&[0, 1], &[1.0, 0.0]);
+        learner.accumulate_subset(&[0, 1], &[0.0, 1.0]);
+
+        let average = learner.average_strategy();
+        assert!((average[0] - 1.0 / 3.0).abs() < 1e-12, "{average:?}");
+        assert!((average[1] - 2.0 / 3.0).abs() < 1e-12, "{average:?}");
+    }
+
+    /// The stored sum must stay on the scale of the contribution count.
+    /// `root_strategy` mixes root information sets by that weight, so a discount
+    /// that grew the weight as a power of the count would change the mix.
+    #[test]
+    fn a_discount_keeps_the_scale_of_the_average_weight() {
+        for discount in [0.0, 1.0, 2.0] {
+            let mut learner = Learner::discounted(2, discount);
+            for _ in 0..1_000 {
+                learner.accumulate_subset(&[0, 1], &[0.5, 0.5]);
+            }
+            // The sum is `1000` without a discount, and `1000 / (discount + 1)`
+            // with one. Every value stays on the scale of the count.
+            let weight = learner.average_weight();
+            assert!(
+                weight > 100.0 && weight <= 1_000.0,
+                "a discount of {discount} gave the weight {weight}"
+            );
+        }
+    }
+
     /// The baseline must hold no part of the sample that it corrects. A learner
     /// that read the updated mean would subtract the current draw from itself.
     #[test]
     fn a_baseline_holds_only_the_earlier_samples() {
-        let mut learner = Learner::new(2);
+        let mut learner = Learner::discounted(2, 0.0);
         let strategy = vec![0.5, 0.5];
 
         learner.update(SelectionPolicy::RegretMatching, 0, &strategy, 1.0, true);
@@ -1796,7 +1951,7 @@ mod tests {
             (SelectionPolicy::Exp3, [2.0, 0.0]),
         ];
         for (policy, scores) in expected {
-            let mut learner = Learner::new(2);
+            let mut learner = Learner::discounted(2, 0.0);
             learner.update(policy, 0, &strategy, 0.5, false);
             assert_eq!(learner.scores, scores, "{policy:?}");
             assert_eq!(learner.baselines, vec![0.0, 0.0], "{policy:?}");
@@ -1846,7 +2001,7 @@ mod tests {
     /// A large cumulative reward must not overflow the exponential.
     #[test]
     fn exp3_survives_a_large_score() {
-        let mut learner = Learner::new(2);
+        let mut learner = Learner::discounted(2, 0.0);
         learner.scores = vec![1e6, 0.0];
         let strategy = learner.strategy(SelectionPolicy::Exp3, 0.1, 2);
         let total: f64 = strategy.iter().sum();

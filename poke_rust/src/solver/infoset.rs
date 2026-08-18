@@ -46,9 +46,13 @@ pub(super) struct InfoNode {
 }
 
 impl InfoNode {
-    pub(super) fn new() -> Self {
+    /// A node whose learner discounts its early contributions by `discount`.
+    ///
+    /// Read [`MctsConfig::average_discount`](super::mcts::MctsConfig::average_discount)
+    /// for the rule. A value of zero gives the plain mean.
+    pub(super) fn new(discount: f64) -> Self {
         InfoNode {
-            learner: Learner::new(0),
+            learner: Learner::discounted(0, discount),
             index_of: HashMap::new(),
             commands: Vec::new(),
         }
@@ -141,7 +145,7 @@ mod tests {
     /// entry.
     #[test]
     fn a_registry_reuses_the_index_of_a_known_action() {
-        let mut node = InfoNode::new();
+        let mut node = InfoNode::new(0.0);
         let pass = vec![vec![BattleCommand::Pass]];
         let both = vec![
             vec![BattleCommand::Pass],
@@ -158,7 +162,7 @@ mod tests {
     /// A world that offers one of two registered actions must play that one.
     #[test]
     fn a_subset_strategy_covers_only_the_world_actions() {
-        let mut node = InfoNode::new();
+        let mut node = InfoNode::new(0.0);
         node.register(&[
             vec![BattleCommand::Pass],
             vec![BattleCommand::Struggle { target: None }],
@@ -183,13 +187,13 @@ mod tests {
             vec![BattleCommand::Struggle { target: None }],
         ];
 
-        let mut first_node = InfoNode::new();
+        let mut first_node = InfoNode::new(0.0);
         let first_allowed = first_node.register(&actions);
         first_node
             .learner
             .accumulate_subset_scaled(&first_allowed, &[1.0, 0.0], 1.0);
 
-        let mut second_node = InfoNode::new();
+        let mut second_node = InfoNode::new(0.0);
         let second_allowed = second_node.register(&actions);
         second_node
             .learner
