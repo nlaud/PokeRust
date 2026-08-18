@@ -653,6 +653,16 @@ pub struct PreviewChoiceDto {
     pub back: Vec<String>,
 }
 
+/// How many joint actions of one player a response shows.
+///
+/// A doubles position can hold hundreds of joint actions. Every panel shows a
+/// short list. The rows keep the highest rates, so the cut removes only actions
+/// that the strategy rarely plays.
+///
+/// `P2StrategyDto::total` still counts every positive row, so a reader can see
+/// how many actions the cut removed.
+pub const MAX_STRATEGY_ROWS: usize = 10;
+
 /// One joint action of a strategy, with its rate.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -678,8 +688,12 @@ pub struct P2StrategyDto {
     /// One of `battle` or `teamPreview`.
     /// A `teamPreview` block answers the bring-and-lead choice.
     pub position: String,
-    /// All positive-rate rows, highest first.
+    /// The shown rows, highest rate first.
     /// A row with a rate of zero does not appear.
+    ///
+    /// The list holds at most [`MAX_STRATEGY_ROWS`] rows. It holds one more row
+    /// when the drawn row falls outside that cut, because `drawn_index` must
+    /// name the action that Player 2 played.
     pub rows: Vec<StrategyRowDto>,
     /// How many positive-rate rows the strategy holds.
     pub total: usize,

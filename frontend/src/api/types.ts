@@ -413,10 +413,15 @@ export interface P2Strategy {
   /** Which question this block answers.
    * A `teamPreview` block answers the bring-and-lead choice. */
   position: 'battle' | 'teamPreview'
-  /** All positive-rate rows, highest first.
-   * A row with a rate of zero does not appear. */
+  /** The shown rows, highest rate first.
+   * A row with a rate of zero does not appear.
+   *
+   * The server cuts this list to its top rows. The list holds one more row when
+   * the drawn row falls outside that cut, because `drawnIndex` must name the
+   * action that Player 2 played. Compare the length against `total` to see
+   * whether the cut removed a row. */
   rows: StrategyRow[]
-  /** How many positive-rate rows the strategy holds. */
+  /** How many positive-rate rows the strategy holds, before the cut. */
   total: number
   /** The index in `rows` of the row that supplied the drawn command.
    *

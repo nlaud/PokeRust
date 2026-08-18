@@ -60,19 +60,12 @@ use poke_rust::state::battle::{BattleState, MatchState, Player};
 
 use crate::bot::{BotProfile, BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
-    PreviewChoiceDto, StrategyRowDto, TrackerAnalysisCheckpointDto, TrackerAnalysisDto,
-    TrackerAnalysisRungDto,
+    MAX_STRATEGY_ROWS, PreviewChoiceDto, StrategyRowDto, TrackerAnalysisCheckpointDto,
+    TrackerAnalysisDto, TrackerAnalysisRungDto,
 };
 use crate::mapping;
 use crate::session::{Dexes, MetaDexes};
 use crate::tracker::TrackerSession;
-
-/// How many joint actions of one player the checkpoint carries.
-///
-/// A doubles position can hold hundreds of joint actions, and the panel shows a
-/// short list. The rows keep the highest rates, so the cut removes only actions
-/// that the strategy rarely plays.
-const MAX_STRATEGY_ROWS: usize = 8;
 
 /// The largest number of worlds that one team-preview rung draws.
 ///

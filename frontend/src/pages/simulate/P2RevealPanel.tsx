@@ -83,6 +83,9 @@ function actionLabel(row: StrategyRow): string {
 }
 
 function StrategyList({ title, strategy, testId }: { title: string; strategy: P2Strategy; testId: string }) {
+  // The server sends only the highest-rate rows, so the shown rates do not
+  // reach 100%. Name the removed rows rather than leave a short list unexplained.
+  const hidden = Math.max(0, strategy.total - strategy.rows.length)
   return (
     <div className="min-w-0 flex-1" data-testid={testId}>
       <p className="mb-1 font-semibold">{title}</p>
@@ -99,6 +102,11 @@ function StrategyList({ title, strategy, testId }: { title: string; strategy: P2
           </div>
         )
       })}
+      {hidden > 0 && (
+        <p className="mt-1 text-ink-muted" data-testid={`${testId}-hidden`}>
+          {`+${hidden} lower-rate action${hidden === 1 ? '' : 's'} not shown`}
+        </p>
+      )}
     </div>
   )
 }

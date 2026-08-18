@@ -57,8 +57,8 @@ use poke_rust::state::battle::{
 
 use crate::bot::{BotSearchConfig, MAX_SAFE_INTEGER};
 use crate::dto::{
-    AnalysisCheckpointDto, AnalysisProgressDto, AnalysisReplayDto, P2RevealDto, P2StrategyDto,
-    PlayerCommandDto, PreviewChoiceDto, StrategyRowDto,
+    AnalysisCheckpointDto, AnalysisProgressDto, AnalysisReplayDto, MAX_STRATEGY_ROWS, P2RevealDto,
+    P2StrategyDto, PlayerCommandDto, PreviewChoiceDto, StrategyRowDto,
 };
 use crate::mapping;
 use crate::session::{self, BattleSession, Dexes, MetaDexes};
@@ -472,6 +472,7 @@ fn strategy_dto(
     match (state, strategy) {
         (MatchState::BattleState(battle), P2Strategy::Battle(rows)) => {
             let (kept, total) = ranked(rows, |row| row.probability);
+            let kept = capped(kept, drawn);
             Some(P2StrategyDto {
                 position: "battle".to_string(),
                 drawn_index: drawn_index(&kept, drawn),
@@ -495,6 +496,7 @@ fn strategy_dto(
         }
         (MatchState::TeamPreviewState(preview), P2Strategy::Preview(rows)) => {
             let (kept, total) = ranked(rows, |row| row.probability);
+            let kept = capped(kept, drawn);
             Some(P2StrategyDto {
                 position: "teamPreview".to_string(),
                 drawn_index: drawn_index(&kept, drawn),
@@ -536,6 +538,30 @@ fn ranked<T>(rows: &[T], weight: impl Fn(&T) -> f64) -> (Vec<(usize, &T)>, usize
     ordered.sort_by(|a, b| weight(b.1).total_cmp(&weight(a.1)));
     let total = ordered.len();
     (ordered, total)
+}
+
+/// The rows that one response shows, cut to [`MAX_STRATEGY_ROWS`].
+///
+/// `ranked` sorts the rows by rate, so the cut keeps the actions that the
+/// strategy plays most. `P2StrategyDto::total` still counts every positive row.
+///
+/// A drawn row outside the cut stays in the list, and the list then holds one
+/// more row. The reveal panel must name the action that Player 2 played, and a
+/// low-rate draw is a normal result of a mixed strategy.
+fn capped<T>(kept: Vec<(usize, &T)>, drawn: Option<usize>) -> Vec<(usize, &T)> {
+    if kept.len() <= MAX_STRATEGY_ROWS {
+        return kept;
+    }
+    // Read the drawn row before the truncation, because the cut can drop it.
+    let drawn_row = drawn.and_then(|index| {
+        kept.iter()
+            .skip(MAX_STRATEGY_ROWS)
+            .find(|(source, _)| *source == index)
+            .copied()
+    });
+    let mut shown: Vec<(usize, &T)> = kept.into_iter().take(MAX_STRATEGY_ROWS).collect();
+    shown.extend(drawn_row);
+    shown
 }
 
 /// Where the drawn row landed in the rendered list.
@@ -2838,9 +2864,13 @@ mod tests {
             assert_eq!(rates, vec![0.7, 0.3]);
         }
 
-        /// The response includes every positive row and identifies a low-rate draw.
+        /// The response shows a short list, counts every positive row, and still
+        /// identifies a low-rate draw.
+        ///
+        /// The drawn row sits outside the cut here, so the list holds one row
+        /// more than the cut allows.
         #[test]
-        fn the_response_keeps_the_full_strategy_and_the_drawn_row() {
+        fn the_response_cuts_the_strategy_and_keeps_the_drawn_row() {
             let state = MatchState::BattleState(battle_state());
             let row_count = 57;
             let rows = vec![
@@ -2854,9 +2884,46 @@ mod tests {
             let strategy =
                 strategy_dto(&state, &P2Strategy::Battle(rows), Some(row_count - 1)).unwrap();
 
-            assert_eq!(strategy.rows.len(), row_count);
+            assert_eq!(strategy.rows.len(), MAX_STRATEGY_ROWS + 1);
             assert_eq!(strategy.total, row_count);
-            assert_eq!(strategy.drawn_index, Some(row_count - 1));
+            assert_eq!(strategy.drawn_index, Some(MAX_STRATEGY_ROWS));
+        }
+
+        /// A drawn row inside the cut adds no extra row.
+        #[test]
+        fn a_drawn_row_inside_the_cut_leaves_the_list_at_the_limit() {
+            let state = MatchState::BattleState(battle_state());
+            let rows = vec![
+                JointActionProb {
+                    commands: vec![BattleCommand::Switch(SwitchCommand { party_index: 1 })],
+                    probability: 0.01,
+                };
+                57
+            ];
+
+            let strategy = strategy_dto(&state, &P2Strategy::Battle(rows), Some(3)).unwrap();
+
+            assert_eq!(strategy.rows.len(), MAX_STRATEGY_ROWS);
+            assert_eq!(strategy.drawn_index, Some(3));
+        }
+
+        /// A response that names no draw keeps the plain cut.
+        #[test]
+        fn a_response_without_a_draw_keeps_the_plain_cut() {
+            let state = MatchState::BattleState(battle_state());
+            let rows = vec![
+                JointActionProb {
+                    commands: vec![BattleCommand::Switch(SwitchCommand { party_index: 1 })],
+                    probability: 0.01,
+                };
+                57
+            ];
+
+            let strategy = strategy_dto(&state, &P2Strategy::Battle(rows), None).unwrap();
+
+            assert_eq!(strategy.rows.len(), MAX_STRATEGY_ROWS);
+            assert_eq!(strategy.total, 57);
+            assert_eq!(strategy.drawn_index, None);
         }
 
         /// The reveal must name the row that supplied the drawn command, after
