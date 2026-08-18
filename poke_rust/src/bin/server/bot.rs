@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use poke_rust::solver::ismcts::IsmctsConfig;
 use poke_rust::solver::mccfr::MccfrConfig;
-use poke_rust::solver::mcts::MctsConfig;
+use poke_rust::solver::mcts::{MctsConfig, TransitionMode, Widening};
 use poke_rust::solver::{SolveConfig, SolverAlgorithm};
 
 /// The search that a P2 bot profile configures.
@@ -380,6 +380,14 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
     if !consider_crit {
         approximations.push("The search does not include critical-hit branches.".to_string());
     }
+    // Only plain Monte Carlo tree search reads the widening rule. The two
+    // belief searches ignore it, so their view must not claim it.
+    if algorithm == BotAlgorithm::Mcts {
+        approximations.push(
+            "A node plays a few actions on its first visits. The set grows with the visit count."
+                .to_string(),
+        );
+    }
     let search = build_search(
         algorithm,
         depth,
@@ -456,6 +464,34 @@ fn build_search(
         damage_rolls,
         consider_crit,
         max_actions_per_player: None,
+        // A sampled search reads one successor for each visit. The enumerated
+        // mode builds the complete outcome distribution to make that one draw,
+        // so it pays for branches that the visit never reads. The generative
+        // mode resolves the turn one time. The same budget then buys more
+        // visits, which is what a shallow search needs most.
+        //
+        // A batch above one stratifies the draws of one chance node. That makes
+        // the visits of the node dependent, and the search then reports no
+        // standard error. `tracker_analysis.rs::sampling_error_line` prints that
+        // error, so keep the independent draw.
+        //
+        // `ismcts` and `mccfr` ignore this field. Both always sample
+        // generatively.
+        transition: TransitionMode::Generative { batch: 1 },
+        // Give a node a small action prefix on its first visits, and grow the
+        // prefix with the visit count. The search then spends its early visits
+        // on a few actions instead of the complete joint action set.
+        //
+        // The search puts each action list in `actions::coverage_order` first,
+        // so a narrow prefix still holds different kinds of action.
+        //
+        // `ismcts` and `mccfr` ignore this field.
+        widening: Some(Widening::default()),
+        // Subtract the running mean reward of an action before the learner
+        // divides by the selection probability. The estimate stays unbiased,
+        // and its variance falls. This is the one control here that `ismcts`
+        // reads. `mccfr` ignores it.
+        control_variate: true,
         ..MctsConfig::default()
     };
     match algorithm {
@@ -529,6 +565,45 @@ mod current_tests {
             _ => panic!("the resolved search must use ISMCTS"),
         }
         assert_eq!(profile.search.first_depth(3), 3);
+    }
+
+    /// The sampling controls sit next to a `..MctsConfig::default()` spread.
+    /// A later edit can drop them and leave a search that still compiles, so
+    /// pin the three values here.
+    ///
+    /// The batch must stay at one. A larger batch makes the visits of a chance
+    /// node dependent, and the search then reports no standard error. The
+    /// tracker panel prints that error.
+    #[test]
+    fn a_sampled_search_keeps_the_sampling_controls() {
+        let request = BotProfileRequest {
+            algorithm: Some("mcts".to_string()),
+            ..BotProfileRequest::default()
+        };
+        let profile = resolve("botP2", &request).unwrap();
+        match profile.search {
+            BotSearchConfig::Mcts(config) => {
+                assert_eq!(config.transition, TransitionMode::Generative { batch: 1 });
+                assert_eq!(config.widening, Some(Widening::default()));
+                assert!(config.control_variate);
+            }
+            _ => panic!("the resolved search must use MCTS"),
+        }
+    }
+
+    /// `ismcts` ignores the transition mode and the widening rule, and it reads
+    /// the control variate. The profile must still set the control variate.
+    #[test]
+    fn a_belief_search_keeps_the_control_variate() {
+        let request = BotProfileRequest {
+            algorithm: Some("ismcts".to_string()),
+            ..BotProfileRequest::default()
+        };
+        let profile = resolve("analysis", &request).unwrap();
+        match profile.search {
+            BotSearchConfig::Ismcts(config) => assert!(config.search.control_variate),
+            _ => panic!("the resolved search must use ISMCTS"),
+        }
     }
 
     /// A sampled search that names no budget keeps its rollout count as the
