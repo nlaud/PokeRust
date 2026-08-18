@@ -276,6 +276,42 @@ pub(super) fn run(
     }
 
     let value = position.value.clamp(LOSS, WIN);
+    let warnings = stop_warnings(&ctx, config, returned_pass_is_partial, reached, target);
+
+    let mut stats = ctx.stats;
+    stats.elapsed = started.elapsed();
+
+    Ok(SolveResult {
+        value,
+        p1_win_odds: value,
+        p2_win_odds: WIN - value,
+        p1_strategy: strategy_of(&position.p1, &position.row_strategy, EPS),
+        p2_strategy: strategy_of(&position.p2, &position.col_strategy, EPS),
+        depth_reached: reached,
+        stats,
+        warnings,
+    })
+}
+
+/// The warnings that describe why a solve's answer is approximate.
+///
+/// Shared between [`run`], whose depth ladder can also report
+/// [`SolveWarning::DepthNotReached`] between two passes, and
+/// [`super::preview`]'s preview-root solve, which shares one
+/// [`SearchContext`] across its whole matrix and reads this once at the end
+/// instead of running a ladder of its own.
+///
+/// `returned_pass_is_partial` is whether the answer this call describes was
+/// cut short — `run` sets it from its own deepening loop; a preview solve, at
+/// a single fixed depth, sets it to whatever [`SearchContext::stopped`]
+/// reports at the end.
+pub(super) fn stop_warnings(
+    ctx: &SearchContext<'_>,
+    config: &SolveConfig,
+    returned_pass_is_partial: bool,
+    reached: u8,
+    target: u8,
+) -> Vec<SolveWarning> {
     let mut warnings = Vec::new();
     if returned_pass_is_partial {
         if let (true, Some(budget)) = (ctx.budget_hit, config.node_budget) {
@@ -285,9 +321,7 @@ pub(super) fn run(
             warnings.push(SolveWarning::DeadlineExceeded { budget });
         }
     }
-    if ctx
-        .cancel
-        .is_some_and(CancelFlag::simulation_budget_hit)
+    if ctx.cancel.is_some_and(CancelFlag::simulation_budget_hit)
         && let Some(budget) = ctx.cancel.and_then(CancelFlag::simulation_turn_budget)
     {
         warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
@@ -318,20 +352,7 @@ pub(super) fn run(
             });
         }
     }
-
-    let mut stats = ctx.stats;
-    stats.elapsed = started.elapsed();
-
-    Ok(SolveResult {
-        value,
-        p1_win_odds: value,
-        p2_win_odds: WIN - value,
-        p1_strategy: strategy_of(&position.p1, &position.row_strategy, EPS),
-        p2_strategy: strategy_of(&position.p2, &position.col_strategy, EPS),
-        depth_reached: reached,
-        stats,
-        warnings,
-    })
+    warnings
 }
 
 /// Cells that one worker can prefetch before a best-response check.
@@ -492,8 +513,8 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
     fn cell(&mut self, row: usize, col: usize) -> f64 {
         self.ctx.cell_value(
             self.state,
-            &self.p1.actions[row],
-            &self.p2.actions[col],
+            &PlayerCommand::Battle(self.p1.actions[row].clone()),
+            &PlayerCommand::Battle(self.p2.actions[col].clone()),
             self.depth,
             self.chain,
         )
@@ -543,8 +564,8 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
                     scoped_sample_rng(pool::job_seed(root, depth, job.round, job.row, job.col));
                 ctx.cell_value(
                     state,
-                    &p1.actions[job.row],
-                    &p2.actions[job.col],
+                    &PlayerCommand::Battle(p1.actions[job.row].clone()),
+                    &PlayerCommand::Battle(p2.actions[job.col].clone()),
                     depth,
                     chain,
                 )
@@ -637,29 +658,38 @@ impl<'a> WorkerSeed<'a> {
     }
 }
 
-struct SearchContext<'a> {
+/// Everything one search needs while it runs.
+///
+/// `pub(super)` (and likewise for the fields and methods a caller outside this
+/// module needs): [`super::preview`] shares one context across a whole
+/// team-preview solve, the same way [`run`] shares one across a whole battle
+/// solve — a preview cell's post-send-out lookahead is searched by exactly the
+/// same [`SearchContext::cell_value`] a battle turn's matrix cell is, so the
+/// transposition table and turn cache carry over between preview cells
+/// instead of restarting for each one.
+pub(super) struct SearchContext<'a> {
     pokemon_dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
-    cfg: &'a SolveConfig,
-    stats: SolveStats,
+    pub(super) cfg: &'a SolveConfig,
+    pub(super) stats: SolveStats,
     tt: TranspositionTable,
     turn_cache: TurnCache,
     /// Largest fraction of outcome probability dropped at any one chance node.
-    max_discarded: f64,
+    pub(super) max_discarded: f64,
     /// Largest action-set truncation encountered for each player anywhere in
     /// the search. Child nodes matter just as much as the root: once any node is
     /// capped, the returned equilibrium is approximate.
-    action_truncations: [Option<(usize, usize)>; 2],
-    budget_hit: bool,
-    deadline_hit: bool,
+    pub(super) action_truncations: [Option<(usize, usize)>; 2],
+    pub(super) budget_hit: bool,
+    pub(super) deadline_hit: bool,
     /// Set when the search read a raised [`CancelFlag`].
     /// It latches for the same reason the other two do.
-    cancel_hit: bool,
+    pub(super) cancel_hit: bool,
     /// The stop signal of the caller, if the caller supplied one.
-    cancel: Option<&'a CancelFlag>,
+    pub(super) cancel: Option<&'a CancelFlag>,
     /// When the solve began. Every deepening pass shares it, so the deadline
     /// bounds the whole solve rather than one pass.
-    started: Instant,
+    pub(super) started: Instant,
     /// The previous deepening pass's root support, if there was one.
     root_seed: Option<RootSeed>,
     /// The expanded nodes of every worker of this solve.
@@ -671,7 +701,7 @@ struct SearchContext<'a> {
 }
 
 impl<'a> SearchContext<'a> {
-    fn new(
+    pub(super) fn new(
         pokemon_dex: &'a HashMap<Species, PokemonData>,
         move_dex: &'a HashMap<PokemonMove, MoveData>,
         cfg: &'a SolveConfig,
@@ -765,6 +795,22 @@ impl<'a> SearchContext<'a> {
         (self.cfg.eval)(battle, &EvalContext::new(self.pokemon_dex, self.move_dex))
     }
 
+    /// Scores whatever `state` holds: the leaf evaluator for a battle, or the
+    /// neutral value for a team-preview root that a stop reason reached before
+    /// its send-out matrix resolved even one cell.
+    ///
+    /// A stop this early cannot happen below the root — a preview send-out
+    /// always produces a `BattleState` or a `GameOverState` child, never
+    /// another preview state — so only [`cell_value`](Self::cell_value)'s two
+    /// early-return sites need this; every deeper node already holds a battle.
+    fn score_position(&self, state: &MatchState) -> f64 {
+        match state {
+            MatchState::BattleState(battle) => self.score(battle),
+            MatchState::GameOverState { winner, .. } => terminal_value(*winner),
+            MatchState::TeamPreviewState(_) => 0.5,
+        }
+    }
+
     /// Whether serialized alpha-beta bounds should be computed at each node.
     fn serial_bounds_enabled(&self) -> bool {
         self.cfg.algorithm == SolverAlgorithm::SerializedBounds || self.cfg.use_serialized_bounds
@@ -812,7 +858,7 @@ impl<'a> SearchContext<'a> {
     /// The latch makes every later check cheap, and it also keeps one search
     /// consistent: a flag that another thread raises mid-pass cannot make one
     /// half of that pass stop and the other half continue.
-    fn cancel_requested(&mut self) -> bool {
+    pub(super) fn cancel_requested(&mut self) -> bool {
         if self.cancel_hit {
             return true;
         }
@@ -824,7 +870,7 @@ impl<'a> SearchContext<'a> {
     }
 
     /// Whether a stop reason has latched.
-    fn stopped(&self) -> bool {
+    pub(super) fn stopped(&self) -> bool {
         self.budget_hit
             || self
                 .cancel
@@ -929,7 +975,13 @@ impl<'a> SearchContext<'a> {
         // Nobody has a choice: no game, no LP, just the one outcome. Common,
         // because a replacement or self-switch usually forces one side entirely.
         if p1.actions.len() == 1 && p2.actions.len() == 1 {
-            let value = self.cell_value(state, &p1.actions[0], &p2.actions[0], depth, chain);
+            let value = self.cell_value(
+                state,
+                &PlayerCommand::Battle(p1.actions[0].clone()),
+                &PlayerCommand::Battle(p2.actions[0].clone()),
+                depth,
+                chain,
+            );
             return Position {
                 value,
                 p1,
@@ -1000,8 +1052,12 @@ impl<'a> SearchContext<'a> {
         let payoffs: Vec<Vec<f64>> = rows
             .iter()
             .map(|row| {
+                let row = PlayerCommand::Battle(row.clone());
                 cols.iter()
-                    .map(|col| self.cell_value(state, row, col, depth, chain))
+                    .map(|col| {
+                        let col = PlayerCommand::Battle(col.clone());
+                        self.cell_value(state, &row, &col, depth, chain)
+                    })
                     .collect::<Vec<f64>>()
             })
             .collect();
@@ -1084,11 +1140,11 @@ impl<'a> SearchContext<'a> {
     ///
     /// Always evaluated over the full window. See the module documentation for
     /// why a cell may never be a bound.
-    fn cell_value(
+    pub(super) fn cell_value(
         &mut self,
         state: &MatchState,
-        p1_commands: &[BattleCommand],
-        p2_commands: &[BattleCommand],
+        p1_command: &PlayerCommand,
+        p2_command: &PlayerCommand,
         depth: u8,
         chain: u8,
     ) -> f64 {
@@ -1099,15 +1155,13 @@ impl<'a> SearchContext<'a> {
         let deadline_hit = self.deadline_expired();
         let cancel_hit = self.cancel_requested();
         if deadline_hit || cancel_hit {
-            let battle = as_battle(state).expect("cell_value requires a battle position");
-            return self.score(battle);
+            return self.score_position(state);
         }
-        let Some(branches) = self.resolve(state, p1_commands, p2_commands) else {
+        let Some(branches) = self.resolve(state, p1_command, p2_command) else {
             // The turn simulation stopped part way, so its branch set is not a
             // distribution. Score the position as a stop between two cells does.
             self.latch_abort_reason();
-            let battle = as_battle(state).expect("cell_value requires a battle position");
-            return self.score(battle);
+            return self.score_position(state);
         };
 
         let mut expected = 0.0;
@@ -1241,7 +1295,9 @@ impl<'a> SearchContext<'a> {
             let battle = as_battle(state).expect("serial_cell requires a battle position");
             return self.score(battle);
         }
-        let Some(branches) = self.resolve(state, p1_commands, p2_commands) else {
+        let p1_command = PlayerCommand::Battle(p1_commands.to_vec());
+        let p2_command = PlayerCommand::Battle(p2_commands.to_vec());
+        let Some(branches) = self.resolve(state, &p1_command, &p2_command) else {
             // The turn simulation stopped part way, so its branch set is not a
             // distribution. Score the position as a stop between two cells does.
             self.latch_abort_reason();
@@ -1313,14 +1369,14 @@ impl<'a> SearchContext<'a> {
     fn resolve(
         &mut self,
         state: &MatchState,
-        p1_commands: &[BattleCommand],
-        p2_commands: &[BattleCommand],
+        p1_command: &PlayerCommand,
+        p2_command: &PlayerCommand,
     ) -> Option<Vec<(MatchState, f64)>> {
         let cache_key = self.turn_cache.enabled().then(|| {
             (
                 hash_state(state),
-                command_key(p1_commands),
-                command_key(p2_commands),
+                command_key(p1_command),
+                command_key(p2_command),
             )
         });
 
@@ -1350,8 +1406,8 @@ impl<'a> SearchContext<'a> {
 
         let simulated = simulate_turn(
             state,
-            &PlayerCommand::Battle(p1_commands.to_vec()),
-            &PlayerCommand::Battle(p2_commands.to_vec()),
+            p1_command,
+            p2_command,
             self.move_dex,
             self.pokemon_dex,
             self.cfg.consider_crit,
@@ -1488,8 +1544,13 @@ impl<'a> RootCells<'a> {
             self.depth,
             self.ctx.cfg.replacement_depth,
         );
-        self.ctx
-            .cell_value(state, p1_commands, p2_commands, depth, chain)
+        self.ctx.cell_value(
+            state,
+            &PlayerCommand::Battle(p1_commands.to_vec()),
+            &PlayerCommand::Battle(p2_commands.to_vec()),
+            depth,
+            chain,
+        )
     }
 
     /// What the evaluated cells cost so far.
@@ -1567,35 +1628,53 @@ fn hash_state(state: &MatchState) -> u64 {
     hasher.finish()
 }
 
-/// A hash of a joint action's content.
+/// A hash of a player command's content.
 ///
-/// Written by hand because `BattleCommand` implements neither `Hash` nor `Eq`.
-/// Only the turn cache uses this, and only to distinguish actions taken from the
-/// same position.
-fn command_key(commands: &[BattleCommand]) -> u64 {
+/// Written by hand because neither `BattleCommand` nor `TeamPreviewCommand`
+/// implements `Hash` or `Eq`. Only the turn cache uses this, and only to
+/// distinguish actions taken from the same position.
+fn command_key(command: &PlayerCommand) -> u64 {
     let mut hasher = DefaultHasher::new();
-    commands.len().hash(&mut hasher);
-    for command in commands {
-        match command {
-            BattleCommand::Pass => 0u8.hash(&mut hasher),
-            BattleCommand::Struggle { target } => {
-                1u8.hash(&mut hasher);
-                target.hash(&mut hasher);
-            }
-            BattleCommand::Switch(switch) => {
-                2u8.hash(&mut hasher);
-                switch.party_index.hash(&mut hasher);
-            }
-            BattleCommand::Attack(attack) => {
-                3u8.hash(&mut hasher);
-                attack.move_slot.hash(&mut hasher);
-                attack.target.hash(&mut hasher);
-                attack.terastallize.hash(&mut hasher);
-                attack.mega_evolve.hash(&mut hasher);
-            }
+    match command {
+        PlayerCommand::Pass => 0u8.hash(&mut hasher),
+        PlayerCommand::TeamPreview(preview) => {
+            1u8.hash(&mut hasher);
+            preview.active_indices.hash(&mut hasher);
+            preview.back_indices.hash(&mut hasher);
+        }
+        PlayerCommand::Battle(commands) => {
+            2u8.hash(&mut hasher);
+            battle_commands_key(commands, &mut hasher);
         }
     }
     hasher.finish()
+}
+
+/// Hashes a joint battle command onto an existing hasher. Split out of
+/// [`command_key`] only because a `for` loop reads better without an extra
+/// level of match nesting.
+fn battle_commands_key(commands: &[BattleCommand], hasher: &mut DefaultHasher) {
+    commands.len().hash(hasher);
+    for command in commands {
+        match command {
+            BattleCommand::Pass => 0u8.hash(hasher),
+            BattleCommand::Struggle { target } => {
+                1u8.hash(hasher);
+                target.hash(hasher);
+            }
+            BattleCommand::Switch(switch) => {
+                2u8.hash(hasher);
+                switch.party_index.hash(hasher);
+            }
+            BattleCommand::Attack(attack) => {
+                3u8.hash(hasher);
+                attack.move_slot.hash(hasher);
+                attack.target.hash(hasher);
+                attack.terastallize.hash(hasher);
+                attack.mega_evolve.hash(hasher);
+            }
+        }
+    }
 }
 
 /// Direct-mapped, always-replace memo of position values.

@@ -73,15 +73,14 @@ use crate::information::determinize::{
 };
 use crate::information::unknowns::UnknownTeamPreviewState;
 use crate::meta::MetaDex;
-use crate::simulator::simulate_turn;
 use crate::state::battle::{
-    BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
+    MatchState, Player, PlayerCommand, TeamPreviewCommand, TeamPreviewState,
 };
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::chance::ChanceMode;
-use super::eval::EvalContext;
 use super::matrix::{self, EPS, OracleLimits, OracleSeed};
+use super::search;
 use super::{CancelFlag, SolveConfig, SolveWarning};
 
 /// P1's utility when P1 loses, and when P1 wins.
@@ -393,6 +392,23 @@ fn cells_are_cacheable(config: &PreviewConfig) -> bool {
     !matches!(config.battle.chance, ChanceMode::Sample(_)) && config.battle.deadline.is_none()
 }
 
+/// The battle configuration that the shared [`search::SearchContext`] of one
+/// preview solve searches with.
+///
+/// Its deadline is `config.battle.deadline` when the caller set one, and
+/// `config.deadline` otherwise: `PreviewContext` shares one context across
+/// the whole send-out matrix and everything below it, so ordinarily one
+/// deadline — the preview's own wall clock — has to bound the lot. A caller
+/// that sets `config.battle.deadline` directly (a battle solve's own field,
+/// unused by every real preview caller, which all leave it `None`) wants a
+/// tighter, explicit bound instead, and keeps it.
+fn battle_config_of(config: &PreviewConfig) -> SolveConfig {
+    SolveConfig {
+        deadline: config.battle.deadline.or(config.deadline),
+        ..config.battle
+    }
+}
+
 /// A hashable form of [`ChanceMode`], which holds a float.
 fn chance_key(chance: &ChanceMode) -> (u8, u64) {
     match *chance {
@@ -460,8 +476,16 @@ fn solve_preview_with_cancel(
     cache: &mut PreviewCellCache,
     cancel: Option<&CancelFlag>,
 ) -> Result<PreviewResult, PreviewError> {
-    let mut ctx = PreviewContext::new(state, pokemon_dex, move_dex, config, cache)?;
-    ctx.cancel = cancel;
+    let battle_config = battle_config_of(config);
+    let mut ctx = PreviewContext::new(
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        &battle_config,
+        cache,
+        cancel,
+    )?;
     let rows = ctx.p1.len();
     let cols = ctx.p2.len();
 
@@ -477,6 +501,10 @@ fn solve_preview_with_cancel(
         },
         |row, col| ctx.cell_value(row, col),
     );
+    // `cell_value` already folded each cell's own turns/lps/nodes into
+    // `ctx.stats` as it went; `oracle.lps_solved` adds this solve's own
+    // restricted-game rounds over the preview matrix, which is the one count
+    // no single cell can see.
     ctx.stats.lps_solved += oracle.lps_solved;
     ctx.stats.cells_total = (rows * cols) as u64;
     ctx.stats.elapsed = ctx.started.elapsed();
@@ -484,7 +512,10 @@ fn solve_preview_with_cancel(
     let value = solution.value.clamp(LOSS, WIN);
     let mut warnings = ctx.warnings;
     if let (true, Some(budget)) = (ctx.deadline_hit, config.deadline) {
-        warnings.insert(0, SolveWarning::DeadlineExceeded { budget });
+        merge_warning(&mut warnings, SolveWarning::DeadlineExceeded { budget });
+    }
+    if ctx.cancel_hit {
+        merge_warning(&mut warnings, SolveWarning::Cancelled);
     }
 
     Ok(PreviewResult {
@@ -514,7 +545,16 @@ pub fn precompute_preview_cells(
     cells: &[(usize, usize)],
     cache: &mut PreviewCellCache,
 ) -> Result<PreviewStats, PreviewError> {
-    let mut ctx = PreviewContext::new(state, pokemon_dex, move_dex, config, cache)?;
+    let battle_config = battle_config_of(config);
+    let mut ctx = PreviewContext::new(
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        &battle_config,
+        cache,
+        None,
+    )?;
     let rows = ctx.p1.len();
     let cols = ctx.p2.len();
 
@@ -543,24 +583,26 @@ pub fn preview_cell_value(
     p2_choice: &TeamPreviewCommand,
 ) -> f64 {
     let mut cache = PreviewCellCache::new();
-    let mut ctx = PreviewContext {
+    let battle_config = battle_config_of(config);
+    // The two-choice lists below stand in for a full `preview_choices` draw:
+    // `PreviewContext::new` would reject an empty side, so this bypasses it
+    // and builds the context by hand with exactly the one row and column this
+    // function scores.
+    let mut ctx = PreviewContext::new(
+        state,
         pokemon_dex,
         move_dex,
         config,
-        match_state: MatchState::TeamPreviewState(state.clone()),
-        p1: vec![p1_choice.clone()],
-        p2: vec![p2_choice.clone()],
-        preview_key: preview_key(state),
-        config_key: config_key(config),
-        dex_key: dex_key(pokemon_dex, move_dex),
-        cacheable: cells_are_cacheable(config),
-        cache: &mut cache,
-        stats: PreviewStats::default(),
-        started: Instant::now(),
-        deadline_hit: false,
-        cancel: None,
-        warnings: Vec::new(),
-    };
+        &battle_config,
+        &mut cache,
+        None,
+    )
+    .map(|mut ctx| {
+        ctx.p1 = vec![p1_choice.clone()];
+        ctx.p2 = vec![p2_choice.clone()];
+        ctx
+    })
+    .expect("the caller supplies a well-formed preview state");
     ctx.cell_value(0, 0)
 }
 
@@ -809,13 +851,22 @@ pub fn solve_open_list_preview_cancellable(
     // cache by mutable reference and only one context can hold it.
     let mut caches: Vec<PreviewCellCache> =
         (0..drawn.len()).map(|_| PreviewCellCache::new()).collect();
+    // Every world shares `started`, so `config.preview.deadline` bounds the
+    // whole multi-world run rather than resetting the clock for each world.
+    let battle_config = battle_config_of(&config.preview);
     let mut contexts: Vec<PreviewContext> = Vec::with_capacity(drawn.len());
     for (world, (sample, cache)) in drawn.iter().zip(caches.iter_mut()).enumerate() {
-        let mut ctx =
-            PreviewContext::new(&sample.state, pokemon_dex, move_dex, &config.preview, cache)
-                .map_err(|error| OpenListError::Preview { world, error })?;
+        let mut ctx = PreviewContext::new(
+            &sample.state,
+            pokemon_dex,
+            move_dex,
+            &config.preview,
+            &battle_config,
+            cache,
+            cancel,
+        )
+        .map_err(|error| OpenListError::Preview { world, error })?;
         ctx.started = started;
-        ctx.cancel = cancel;
         contexts.push(ctx);
     }
 
@@ -894,6 +945,7 @@ pub fn solve_open_list_preview_cancellable(
     };
     let mut warnings: Vec<SolveWarning> = Vec::new();
     let mut deadline_hit = false;
+    let mut cancel_hit = false;
     for ctx in &contexts {
         stats.cells_evaluated += ctx.stats.cells_evaluated;
         stats.cell_cache_hits += ctx.stats.cell_cache_hits;
@@ -901,6 +953,7 @@ pub fn solve_open_list_preview_cancellable(
         stats.turns_simulated += ctx.stats.turns_simulated;
         stats.lps_solved += ctx.stats.lps_solved;
         deadline_hit |= ctx.deadline_hit;
+        cancel_hit |= ctx.cancel_hit;
         for warning in &ctx.warnings {
             merge_warning(&mut warnings, warning.clone());
         }
@@ -908,7 +961,10 @@ pub fn solve_open_list_preview_cancellable(
     stats.lps_solved += oracle.lps_solved;
     stats.elapsed = started.elapsed();
     if let (true, Some(budget)) = (deadline_hit, config.preview.deadline) {
-        warnings.insert(0, SolveWarning::DeadlineExceeded { budget });
+        merge_warning(&mut warnings, SolveWarning::DeadlineExceeded { budget });
+    }
+    if cancel_hit {
+        merge_warning(&mut warnings, SolveWarning::Cancelled);
     }
 
     let value = solution.value.clamp(LOSS, WIN);
@@ -950,10 +1006,22 @@ fn sampling_error(per_world_values: Vec<f64>) -> PreviewSamplingError {
 // ── The cell oracle ─────────────────────────────────────────────────────────
 
 /// Everything one preview solve needs while it runs.
+///
+/// Each cell gets its own fresh [`search::SearchContext`] — one per
+/// `(row, col)` pair, the same way [`search::run`] builds one per battle
+/// solve — rather than one context shared across the whole matrix. Two
+/// different preview cells are two different bring-and-lead choices; the
+/// battle trees below them rarely transpose into each other, so a shared
+/// transposition table mostly just evicts one cell's useful entries with
+/// another's, at a real cost and no benefit. `battle_config.depth` still
+/// counts the send-out itself as one ply through that fresh context: depth 1
+/// resolves only the send-out matrix (scored by the leaf evaluator below it),
+/// and depth `N` resolves the send-out plus `N - 1` further battle turns.
 struct PreviewContext<'a> {
     pokemon_dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
-    config: &'a PreviewConfig,
+    battle_config: &'a SolveConfig,
+    cancel: Option<&'a CancelFlag>,
     /// The preview position, held as the type that `simulate_turn` takes.
     match_state: MatchState,
     p1: Vec<TeamPreviewCommand>,
@@ -965,20 +1033,24 @@ struct PreviewContext<'a> {
     cache: &'a mut PreviewCellCache,
     stats: PreviewStats,
     started: Instant,
+    depth: u8,
+    deadline: Option<Duration>,
     deadline_hit: bool,
-    /// The stop signal of the caller. `None` means that no caller can stop this
-    /// solve.
-    cancel: Option<&'a CancelFlag>,
+    cancel_hit: bool,
     warnings: Vec<SolveWarning>,
 }
 
 impl<'a> PreviewContext<'a> {
+    /// `battle_config` must be [`battle_config_of`]`(config)`, built by the
+    /// caller so it outlives this context the way `config` itself does.
     fn new(
         state: &TeamPreviewState,
         pokemon_dex: &'a HashMap<Species, PokemonData>,
         move_dex: &'a HashMap<PokemonMove, MoveData>,
         config: &'a PreviewConfig,
+        battle_config: &'a SolveConfig,
         cache: &'a mut PreviewCellCache,
+        cancel: Option<&'a CancelFlag>,
     ) -> Result<Self, PreviewError> {
         let p1 = preview_choices(state, Player::P1);
         if p1.is_empty() {
@@ -992,7 +1064,8 @@ impl<'a> PreviewContext<'a> {
         Ok(PreviewContext {
             pokemon_dex,
             move_dex,
-            config,
+            battle_config,
+            cancel,
             match_state: MatchState::TeamPreviewState(state.clone()),
             p1,
             p2,
@@ -1003,8 +1076,10 @@ impl<'a> PreviewContext<'a> {
             cache,
             stats: PreviewStats::default(),
             started: Instant::now(),
+            depth: battle_config.depth,
+            deadline: battle_config.deadline,
             deadline_hit: false,
-            cancel: None,
+            cancel_hit: false,
             warnings: Vec::new(),
         })
     }
@@ -1012,25 +1087,21 @@ impl<'a> PreviewContext<'a> {
     /// The value of one cell, from the cache when the cache holds it.
     fn cell_value(&mut self, row: usize, col: usize) -> f64 {
         // A cancelled solve computes no more cells. The even value costs no turn
-        // simulation, so double oracle ends at once. The warning tells the
-        // caller that the answer holds only the work that finished.
+        // simulation, so double oracle ends at once.
         if super::cancel_requested(self.cancel) {
-            merge_warning(&mut self.warnings, SolveWarning::Cancelled);
+            self.cancel_hit = true;
             return EVEN;
         }
         if self
             .cancel
             .is_some_and(super::CancelFlag::simulation_budget_hit)
         {
-            if let Some(budget) = self
-                .cancel
-                .and_then(super::CancelFlag::simulation_turn_budget)
-            {
-                merge_warning(
-                    &mut self.warnings,
-                    SolveWarning::SimulationTurnBudgetExhausted { budget },
-                );
-            }
+            return EVEN;
+        }
+        if let Some(deadline) = self.deadline
+            && self.started.elapsed() >= deadline
+        {
+            self.deadline_hit = true;
             return EVEN;
         }
         let key = (self.preview_key, self.config_key, self.dex_key, row, col);
@@ -1044,23 +1115,41 @@ impl<'a> PreviewContext<'a> {
             return cell.value;
         }
 
-        // Read once, so that the whole cell uses one answer. A cell that mixes a
-        // searched branch with an evaluated branch would be neither exact nor
-        // reproducible.
+        let p1_command = PlayerCommand::TeamPreview(self.p1[row].clone());
+        let p2_command = PlayerCommand::TeamPreview(self.p2[col].clone());
+        // A fresh context per cell, so this cell's own transposition table and
+        // turn cache serve only its own tree. `started` is shared across every
+        // cell, so `battle_config`'s deadline still bounds the whole solve.
         //
-        // A flag that rises inside this cell gives the battle solve below it a
-        // partial value, and the write below still stores that value. No read
-        // can reach it: the check above runs before the cache lookup, and a
-        // flag never falls again. A cancellable entry point must therefore keep
-        // its own cache, or it must drop a cell whose warnings hold
-        // `SolveWarning::Cancelled`.
-        let expired = self.deadline_expired();
-        let (value, cell_warnings) = self.evaluate(row, col, expired);
+        // Depth 1 resolves the send-out and stops there: `descend` lowers
+        // every branch to depth 0, and `node_value` scores a depth-0 battle
+        // with the leaf evaluator directly rather than searching further.
+        // Chain 0: the send-out is never a forced replacement or pivot phase.
+        let mut ctx = search::SearchContext::new(
+            self.pokemon_dex,
+            self.move_dex,
+            self.battle_config,
+            self.started,
+            self.cancel,
+        );
+        let value = ctx.cell_value(&self.match_state, &p1_command, &p2_command, self.depth, 0);
         self.stats.cells_evaluated += 1;
-        for warning in &cell_warnings {
-            merge_warning(&mut self.warnings, warning.clone());
+        self.stats.turns_simulated += ctx.stats.turns_simulated;
+        self.stats.lps_solved += ctx.stats.lps_solved;
+        self.stats.battles_solved += ctx.stats.nodes_expanded;
+
+        let cell_warnings =
+            search::stop_warnings(&ctx, self.battle_config, ctx.stopped(), self.depth, self.depth);
+        for warning in cell_warnings.iter().cloned() {
+            merge_warning(&mut self.warnings, warning);
         }
-        if self.cacheable && !expired {
+
+        // A cell that ran past the deadline (a wall clock, not reproducible
+        // between two solves) must not enter the cache. A node-budget or
+        // simulation-turn-budget stop is deterministic — the same position
+        // always exhausts it the same way — so it is as cacheable as a
+        // complete cell, just with `BudgetExhausted` attached.
+        if self.cacheable && !ctx.deadline_hit {
             self.cache.values.insert(
                 key,
                 CachedCell {
@@ -1069,122 +1158,9 @@ impl<'a> PreviewContext<'a> {
                 },
             );
         }
+        self.deadline_hit |= ctx.deadline_hit;
+        self.cancel_hit |= ctx.cancel_hit;
         value
-    }
-
-    /// Applies both preview choices and averages the branch values.
-    fn evaluate(&mut self, row: usize, col: usize, expired: bool) -> (f64, Vec<SolveWarning>) {
-        if self
-            .cancel
-            .is_some_and(|control| !control.claim_simulation_turn())
-        {
-            let budget = self
-                .cancel
-                .and_then(super::CancelFlag::simulation_turn_budget)
-                .unwrap_or_default();
-            return (
-                EVEN,
-                vec![SolveWarning::SimulationTurnBudgetExhausted { budget }],
-            );
-        }
-        let p1_command = PlayerCommand::TeamPreview(self.p1[row].clone());
-        let p2_command = PlayerCommand::TeamPreview(self.p2[col].clone());
-        let branches = simulate_turn(
-            &self.match_state,
-            &p1_command,
-            &p2_command,
-            self.move_dex,
-            self.pokemon_dex,
-            self.config.battle.consider_crit,
-            self.config.battle.damage_rolls,
-            None,
-        );
-        self.stats.turns_simulated += 1;
-
-        let total: f64 = branches.iter().map(|(_, _, probability)| probability).sum();
-        if total <= 0.0 {
-            return (EVEN, Vec::new());
-        }
-
-        let mut expected = 0.0;
-        let mut warnings = Vec::new();
-        for (child, _, probability) in branches {
-            if probability <= 0.0 {
-                continue;
-            }
-            expected += probability * self.branch_value(&child, expired, &mut warnings);
-        }
-        // The branch probabilities already sum to 1. The division protects the
-        // range of the result against rounding in a long branch list.
-        (expected / total, warnings)
-    }
-
-    /// The value of one battle that a preview choice pair produced.
-    fn branch_value(
-        &mut self,
-        child: &MatchState,
-        expired: bool,
-        warnings: &mut Vec<SolveWarning>,
-    ) -> f64 {
-        let battle = match child {
-            MatchState::GameOverState { winner, .. } => {
-                return match winner {
-                    Player::P1 => WIN,
-                    Player::P2 => LOSS,
-                };
-            }
-            // `simulate_turn` never returns a preview state from a preview
-            // state. Scoring it as even is the only neutral answer.
-            MatchState::TeamPreviewState(_) => return EVEN,
-            MatchState::BattleState(battle) => battle,
-        };
-
-        if expired {
-            return self.score(battle);
-        }
-
-        // `super::solve` is this call with no stop signal, so a `None` flag
-        // keeps the value of every earlier caller.
-        match super::search::run(
-            child,
-            self.pokemon_dex,
-            self.move_dex,
-            &self.config.battle,
-            None,
-            self.cancel,
-        ) {
-            Ok(result) => {
-                self.stats.battles_solved += 1;
-                self.stats.turns_simulated += result.stats.turns_simulated;
-                self.stats.lps_solved += result.stats.lps_solved;
-                for warning in result.warnings {
-                    merge_warning(warnings, warning);
-                }
-                result.value
-            }
-            // A finished battle arrives as a game-over state, and a preview state
-            // cannot reach this line. Score the position instead of failing.
-            Err(_) => self.score(battle),
-        }
-    }
-
-    /// Scores one position with the configured leaf evaluator.
-    ///
-    /// The evaluator reads the move dex, so every call site builds the same
-    /// context here instead of assembling one of its own.
-    fn score(&self, battle: &BattleState) -> f64 {
-        (self.config.battle.eval)(battle, &EvalContext::new(self.pokemon_dex, self.move_dex))
-    }
-
-    /// Checks the deadline and saves the result for the solve warning.
-    fn deadline_expired(&mut self) -> bool {
-        if let Some(deadline) = self.config.deadline
-            && self.started.elapsed() >= deadline
-        {
-            self.deadline_hit = true;
-            return true;
-        }
-        false
     }
 }
 
