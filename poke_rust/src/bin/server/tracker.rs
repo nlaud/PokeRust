@@ -368,9 +368,9 @@ pub async fn start_tracker_analysis(
             Ok(profile) => profile,
             Err(message) => return unprocessable(message),
         };
-    if !tracker_search_is_belief_aware(profile.search) {
+    if !profile.search.searches_belief() {
         return unprocessable(
-            "analysis.algorithm: tracker analysis requires ismcts or mccfr".to_string(),
+            "analysis.algorithm: tracker analysis requires ismcts, mccfr, or pimc".to_string(),
         );
     }
 
@@ -389,13 +389,6 @@ pub async fn start_tracker_analysis(
         Arc::clone(&app.tracker_sessions),
     );
     Json(session.analysis.view(session.solver_profile.as_ref())).into_response()
-}
-
-fn tracker_search_is_belief_aware(search: crate::bot::BotSearchConfig) -> bool {
-    matches!(
-        search,
-        crate::bot::BotSearchConfig::Ismcts(_) | crate::bot::BotSearchConfig::Mccfr(_)
-    )
 }
 
 /// `GET /api/tracker/{id}/analysis` — the record of the solver panel.
@@ -1246,6 +1239,7 @@ mod tests {
             ("mcts", false),
             ("ismcts", true),
             ("mccfr", true),
+            ("pimc", true),
         ] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
@@ -1253,7 +1247,7 @@ mod tests {
             };
             let profile = crate::bot::resolve("analysis", &request).unwrap();
             assert_eq!(
-                tracker_search_is_belief_aware(profile.search),
+                profile.search.searches_belief(),
                 allowed,
                 "{name}"
             );

@@ -23,6 +23,11 @@ const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] 
     hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief.',
   },
   {
+    value: 'pimc',
+    label: 'PIMC (averaged worlds)',
+    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if the hidden data were known, so the answer claims more than a real player can do.',
+  },
+  {
     value: 'doubleOracle',
     label: 'Double oracle (exact, one world)',
     hint: 'Exact for its depth, but it reads one drawn opponent. It reports each round while it runs.',

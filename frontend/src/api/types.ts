@@ -241,7 +241,7 @@ export type TeamMode = 'sheet' | 'meta'
 
 /** The search that a P2 bot profile configures.
  * The first three names solve the game exactly to the depth horizon.
- * The last three names sample, so they return an estimate. */
+ * The last four names sample, so they return an estimate. */
 export type BotAlgorithm =
   | 'backwardInduction'
   | 'serializedBounds'
@@ -249,6 +249,7 @@ export type BotAlgorithm =
   | 'mcts'
   | 'ismcts'
   | 'mccfr'
+  | 'pimc'
 
 /** The optional solver profile that plays P2.
  * Every field is optional. The server supplies each absent field.
@@ -257,7 +258,7 @@ export interface BotProfileRequest {
   /** As `botP2`, an absent value takes the search of the information mode.
    * A fog-of-war mode takes `ismcts`, and Perfect Information takes
    * `doubleOracle`. The response reports the name in `botP2.algorithm`.
-   * The tracker analysis endpoint takes `ismcts` or `mccfr`. */
+   * The tracker analysis endpoint takes `ismcts`, `mccfr`, or `pimc`. */
   algorithm?: BotAlgorithm
   /** The maximum number of uncached turns that the full search can simulate. */
   simulationTurnBudget?: number
@@ -825,7 +826,7 @@ export interface SolveStats {
 /** The sampling detail of one approximate answer.
  * An exact search sends none. */
 export interface SolveSampling {
-  algorithm: 'mcts' | 'ismcts' | 'mccfr'
+  algorithm: 'mcts' | 'ismcts' | 'mccfr' | 'pimc'
   /** The iterations that the search finished. */
   iterations: number
   /** The worlds that a belief search drew.

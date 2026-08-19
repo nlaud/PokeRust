@@ -93,6 +93,18 @@
 //! [`mccfr::continual_solve`] runs both halves: it solves each public belief of
 //! a first pass, and it then solves the root again against those values.
 //!
+//! # The determinized baseline
+//!
+//! [`pimc::search`] solves each drawn world with [`solve`] and averages the
+//! world strategies. This is perfect-information Monte Carlo.
+//!
+//! Each world solve reads the hidden data of that world, so the mix plays a
+//! different action in each world. No player can do that. This defect is
+//! strategy fusion, and every answer carries [`SolveWarning::StrategyFusion`].
+//!
+//! Use this search as a labeled baseline of the two searches above. Do not use
+//! it as the main fog-of-war solver.
+//!
 //! # Exploitability
 //!
 //! [`MctsConfig::widening`](mcts::MctsConfig::widening) lets a node play a
@@ -207,6 +219,7 @@ pub mod ismcts;
 pub mod matrix;
 pub mod mccfr;
 pub mod mcts;
+pub mod pimc;
 pub mod pool;
 pub mod preview;
 pub mod search;
@@ -260,6 +273,45 @@ struct SearchControl {
     simulation_turn_budget: AtomicU64,
     simulation_turns: AtomicU64,
     simulation_budget_hit: AtomicBool,
+    /// The control that also counts every turn of this one.
+    ///
+    /// [`CancelFlag::child_with_budget`] sets this field. A claim then passes
+    /// through to the parent, so one job budget still bounds the whole run while
+    /// the child holds its own share. See that method for the rule.
+    parent: Option<Arc<SearchControl>>,
+}
+
+impl SearchControl {
+    /// Claims one turn from this control and from every control above it.
+    fn claim(&self) -> bool {
+        if !self.claim_own() {
+            return false;
+        }
+        match &self.parent {
+            Some(parent) => parent.claim(),
+            None => true,
+        }
+    }
+
+    /// Claims one turn from this control alone.
+    ///
+    /// A zero budget has no limit, and it counts nothing.
+    fn claim_own(&self) -> bool {
+        let budget = self.simulation_turn_budget.load(Ordering::Relaxed);
+        if budget == 0 {
+            return true;
+        }
+        let claimed =
+            self.simulation_turns
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    (value < budget).then_some(value + 1)
+                });
+        if claimed.is_err() {
+            self.simulation_budget_hit.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -291,24 +343,44 @@ impl CancelFlag {
         self.0.cancelled.load(Ordering::Relaxed)
     }
 
+    /// A flag with its own budget that still spends the budget of this one.
+    ///
+    /// The child shares the cancel signal of the parent, so one `cancel` call
+    /// stops both. Each claim takes one turn from the child and one turn from
+    /// the parent, so the parent counter moves while the child runs. A caller
+    /// that reports progress therefore reads the parent as before.
+    ///
+    /// Either budget can stop a claim, and the two mean different things:
+    ///
+    /// - The child ran out. Its own share is spent, and the caller starts the
+    ///   next child.
+    /// - The parent ran out. The whole job is spent.
+    ///
+    /// Read [`CancelFlag::simulation_budget_hit`] on each flag to tell them
+    /// apart. A parent refusal leaves the child counter one turn high, because
+    /// the child claims first. No simulation runs on that claim, so the figure
+    /// only describes a child that already stopped.
+    ///
+    /// [`pimc`] uses this to give each drawn world an equal share of one job
+    /// budget.
+    pub(crate) fn child_with_budget(&self, budget: u64) -> CancelFlag {
+        CancelFlag(Arc::new(SearchControl {
+            cancelled: Arc::clone(&self.0.cancelled),
+            simulation_turn_budget: AtomicU64::new(budget),
+            simulation_turns: AtomicU64::new(0),
+            simulation_budget_hit: AtomicBool::new(false),
+            parent: Some(Arc::clone(&self.0)),
+        }))
+    }
+
     /// Claims one turn simulation from the shared budget.
     ///
     /// A flag with a zero budget has no simulation limit.
+    ///
+    /// A child flag claims from itself and then from every flag above it. See
+    /// [`CancelFlag::child_with_budget`].
     pub(crate) fn claim_simulation_turn(&self) -> bool {
-        let budget = self.0.simulation_turn_budget.load(Ordering::Relaxed);
-        if budget == 0 {
-            return true;
-        }
-        let claimed = self.0.simulation_turns.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| (value < budget).then_some(value + 1),
-        );
-        if claimed.is_err() {
-            self.0.simulation_budget_hit.store(true, Ordering::Relaxed);
-            return false;
-        }
-        true
+        self.0.claim()
     }
 
     /// Returns true after a search tries to pass the simulation-turn budget.
@@ -611,6 +683,13 @@ pub enum SolveWarning {
     /// strategy of its finished iterations. This warning describes the whole
     /// search, so it does not depend on which pass the search returned.
     Cancelled,
+    /// The answer mixed one strategy for each drawn world.
+    ///
+    /// [`pimc::search`] solves each world as a perfect-information game, so each
+    /// world plays the hidden data that it drew. The mix therefore claims
+    /// knowledge that no player holds. This defect is strategy fusion, and every
+    /// answer of that search carries this warning.
+    StrategyFusion { worlds: usize },
 }
 
 impl fmt::Display for SolveWarning {
@@ -646,6 +725,10 @@ impl fmt::Display for SolveWarning {
             SolveWarning::Cancelled => write!(
                 f,
                 "the search was cancelled; the answer holds the work that finished"
+            ),
+            SolveWarning::StrategyFusion { worlds } => write!(
+                f,
+                "the search solved {worlds} world(s) separately and averaged the strategies, so it played each world as if the hidden data were known (strategy fusion)"
             ),
         }
     }
@@ -848,5 +931,52 @@ mod budget_tests {
         assert_eq!(claimed, 37);
         assert_eq!(control.simulation_turns(), 37);
         assert!(control.simulation_budget_hit());
+    }
+
+    /// A child spends its own share, and the parent counts every turn of it.
+    #[test]
+    fn a_child_stops_at_its_share_and_the_parent_counts_it() {
+        let job = CancelFlag::with_simulation_turn_budget(10);
+        let world = job.child_with_budget(3);
+
+        assert!(world.claim_simulation_turn());
+        assert!(world.claim_simulation_turn());
+        assert!(world.claim_simulation_turn());
+        assert!(!world.claim_simulation_turn());
+        assert!(world.simulation_budget_hit());
+        // The parent counted the three turns, and its own budget still holds.
+        assert_eq!(job.simulation_turns(), 3);
+        assert!(!job.simulation_budget_hit());
+
+        // A second world takes its own share of the same job budget.
+        let next = job.child_with_budget(3);
+        assert!(next.claim_simulation_turn());
+        assert_eq!(job.simulation_turns(), 4);
+    }
+
+    /// A spent job budget stops a child that still holds its own share.
+    #[test]
+    fn a_spent_parent_stops_a_child_with_room_left() {
+        let job = CancelFlag::with_simulation_turn_budget(2);
+        let world = job.child_with_budget(100);
+
+        assert!(world.claim_simulation_turn());
+        assert!(world.claim_simulation_turn());
+        assert!(!world.claim_simulation_turn());
+        assert!(job.simulation_budget_hit());
+        // The child claims first, so its counter holds the refused claim too.
+        assert!(!world.simulation_budget_hit());
+        assert_eq!(world.simulation_turns(), 3);
+    }
+
+    /// One cancel must stop the parent and every child.
+    #[test]
+    fn a_cancelled_parent_cancels_its_child() {
+        let job = CancelFlag::with_simulation_turn_budget(10);
+        let world = job.child_with_budget(5);
+
+        assert!(!world.is_cancelled());
+        job.cancel();
+        assert!(world.is_cancelled());
     }
 }

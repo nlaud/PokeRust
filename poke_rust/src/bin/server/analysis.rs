@@ -599,13 +599,15 @@ pub fn start_job(
     let generation = session.analysis.generation;
     // Only a belief search reads the inference rules, and cloning the learnset
     // dex is not free, so build the copy for those two algorithms alone.
-    let inference = match search {
-        BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_) => session
-            .inference_config
-            .as_ref()
-            .map(clone_inference_config),
-        _ => None,
-    };
+    let inference = search
+        .searches_belief()
+        .then(|| {
+            session
+                .inference_config
+                .as_ref()
+                .map(clone_inference_config)
+        })
+        .flatten();
 
     let replay = AnalysisReplay {
         generation,
@@ -938,6 +940,34 @@ fn one_search(
                 &result.draw_warnings,
             ))
         }
+        BotSearchConfig::Pimc(config) => {
+            let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
+            let meta = meta.ok_or_else(unsupported_meta)?;
+            let result = solver::pimc::search_belief_cancellable(
+                seed,
+                belief,
+                meta,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &config,
+                &determinize,
+                // The bot job publishes one checkpoint at the end, so it reads
+                // no per-world answer.
+                None,
+                cancel,
+            )
+            .map_err(engine_error)?;
+            Ok(partial_checkpoint(
+                result.p2_win_odds,
+                P2Strategy::Battle(result.p2_strategy),
+                result.depth_reached,
+                result.stats.turns_simulated,
+                result.stats.nodes_expanded,
+                result.stats.elapsed,
+                &result.warnings,
+                &result.draw_warnings,
+            ))
+        }
         BotSearchConfig::Mccfr(config) => {
             let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
             let meta = meta.ok_or_else(unsupported_meta)?;
@@ -973,8 +1003,8 @@ fn one_search(
 /// P1's hidden data. The line names the algorithm names that the client already
 /// holds through the profile, and no state of either side.
 const PREVIEW_ONE_WORLD_NOTE: &str = "The search drew one world of the belief, so the whole \
-     answer assumes one guess of the opponent's hidden data. Only ismcts and mccfr draw more \
-     than one world.";
+     answer assumes one guess of the opponent's hidden data. Only ismcts, mccfr, and pimc draw \
+     more than one world.";
 
 /// Names the limit that a many-world preview answer carries.
 ///
@@ -989,8 +1019,10 @@ const PREVIEW_MEAN_MATRIX_NOTE: &str = "The preview search solved the mean matri
 ///
 /// The position selects the entry point:
 ///
-/// - A fog-of-war session with `ismcts` or `mccfr` solves P2's preview belief
-///   through the open list, so the answer reads only what P2 may hold.
+/// - A fog-of-war session with a belief search solves P2's preview belief
+///   through the open list, so the answer reads only what P2 may hold. That
+///   solve averages the payoff matrix of the drawn worlds, whatever the profile
+///   does at a battle position.
 /// - Every other session solves the true preview state. On a fog-of-war session
 ///   [`strategy_respects_fog`] then marks the answer as not playable, and
 ///   [`draw_p2_command`] falls through to its uniform case. This is the rule
@@ -1020,10 +1052,7 @@ fn one_preview_search(
     // nothing else. A battle position takes the same two rules through
     // `belief_search_inputs`, so a missing belief is an error rather than a
     // silent fall through to the true state.
-    if matches!(
-        search,
-        BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
-    ) {
+    if search.searches_belief() {
         let Some(UnknownMatchState::TeamPreview(belief)) = belief_p2 else {
             return Err(NO_FOG_OF_WAR.to_string());
         };
@@ -1093,8 +1122,9 @@ fn one_preview_search(
 /// Reports a search that read more than the fog of war allows.
 ///
 /// `Exact` and `Mcts` search the true `MatchState`, so on a fog-of-war session
-/// they read P1's unrevealed moves, item, ability, and spread. Only `Ismcts` and
-/// `Mccfr` draw their worlds from P2's belief. The profile's `approximations`
+/// they read P1's unrevealed moves, item, ability, and spread. Only a search
+/// that [`BotSearchConfig::searches_belief`] names draws its worlds from P2's
+/// belief. The profile's `approximations`
 /// list every way the answer falls short of exact and no way it overshoots, so
 /// name this one on the checkpoint.
 ///
@@ -1103,18 +1133,14 @@ fn one_preview_search(
 fn perfect_information_warning(search: BotSearchConfig, fogged: bool) -> Option<String> {
     (!strategy_respects_fog(search, fogged)).then(|| {
         "This algorithm searched the true position, so the answer used data that the fog of \
-         war hides. Only ismcts and mccfr search the belief."
+         war hides. Only ismcts, mccfr, and pimc search the belief."
             .to_string()
     })
 }
 
 /// True when this search can control P2 without reading hidden P1 data.
 fn strategy_respects_fog(search: BotSearchConfig, fogged: bool) -> bool {
-    !fogged
-        || matches!(
-            search,
-            BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
-        )
+    !fogged || search.searches_belief()
 }
 
 /// Reports a belief search that this session cannot serve.
@@ -1226,6 +1252,13 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::Cancelled => {
             "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
+        // The world count is a limit that the client already holds through the
+        // profile, so this line carries no new data about either side.
+        solver::SolveWarning::StrategyFusion { worlds } => format!(
+            "The search solved {worlds} world(s) separately and averaged the strategies. Each \
+             world played as if the hidden data were known (strategy fusion), so the answer \
+             claims more than a real player can do."
+        ),
     }
 }
 

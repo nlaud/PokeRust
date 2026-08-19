@@ -193,11 +193,7 @@ pub(crate) fn roster_legality_error<'a>(
 ///
 /// `SetupPanel.tsx` disables the same pairs in the picker.
 fn bot_algorithm_fits_mode(search: crate::bot::BotSearchConfig, mode: InformationMode) -> bool {
-    let searches_belief = matches!(
-        search,
-        crate::bot::BotSearchConfig::Ismcts(_) | crate::bot::BotSearchConfig::Mccfr(_)
-    );
-    searches_belief == (mode != InformationMode::PerfectInformation)
+    search.searches_belief() == (mode != InformationMode::PerfectInformation)
 }
 
 /// The search of a request that names no algorithm.
@@ -233,7 +229,7 @@ fn bot_algorithm_mismatch(algorithm: &str, mode_name: &str, mode: InformationMod
     } else {
         format!(
             "botP2.algorithm: {algorithm} reads the true position, and informationMode \
-             {mode_name:?} hides that position. Use ismcts or mccfr, or use \"perfect\"."
+             {mode_name:?} hides that position. Use ismcts, mccfr, or pimc, or use \"perfect\"."
         )
     }
 }
@@ -1343,7 +1339,7 @@ mod tests {
 
     #[test]
     fn a_belief_search_fits_only_a_fog_of_war_mode() {
-        for name in ["ismcts", "mccfr"] {
+        for name in ["ismcts", "mccfr", "pimc"] {
             let search = search_of(name);
             assert!(
                 !bot_algorithm_fits_mode(search, InformationMode::PerfectInformation),

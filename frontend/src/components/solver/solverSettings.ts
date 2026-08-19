@@ -20,8 +20,8 @@ export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
   particles: 8,
 }
 
-const BELIEF: BotAlgorithm[] = ['ismcts', 'mccfr']
-const SAMPLED: BotAlgorithm[] = ['mcts', 'ismcts', 'mccfr']
+const BELIEF: BotAlgorithm[] = ['ismcts', 'mccfr', 'pimc']
+const SAMPLED: BotAlgorithm[] = ['mcts', 'ismcts', 'mccfr', 'pimc']
 
 /** The default budget of an exact search, and the floor of a derived budget. */
 const FLAT_BUDGET = 1000

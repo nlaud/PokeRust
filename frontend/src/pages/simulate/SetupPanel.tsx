@@ -30,7 +30,7 @@ const BOT_OPTIONS = [
 ]
 
 // The first three algorithms solve the game exactly to the depth horizon.
-// The last three sample, so they return an estimate.
+// The last four sample, so they return an estimate.
 const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
   {
     value: 'doubleOracle',
@@ -62,6 +62,11 @@ const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string 
     label: 'MCCFR (sampled belief)',
     hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief. The answer is an estimate, and it respects the fog of war.',
   },
+  {
+    value: 'pimc',
+    label: 'PIMC (averaged worlds)',
+    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if it knew your hidden data, so the answer claims more than a real player can do (strategy fusion).',
+  },
 ]
 
 // An algorithm reads the true position, or it reads a belief.
@@ -72,7 +77,7 @@ const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string 
 // `strategy_respects_fog` and `belief_search_inputs` in
 // `poke_rust/src/bin/server/analysis.rs` hold the same rule.
 // A new algorithm needs one entry here and one arm there.
-const BELIEF_ALGORITHMS: BotAlgorithm[] = ['ismcts', 'mccfr']
+const BELIEF_ALGORITHMS: BotAlgorithm[] = ['ismcts', 'mccfr', 'pimc']
 
 /** True when this information mode hides data from P2. */
 function hidesData(mode: InformationMode): boolean {

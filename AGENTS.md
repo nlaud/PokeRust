@@ -191,6 +191,11 @@ Minimax reveals one player's action to the other player.
 The solver implements backward induction, serialized bounds, and double oracle.
 It solves each payoff matrix as a zero-sum game.
 
+`solver::pimc` is the labeled determinized baseline.
+It solves each drawn world with the exact search and averages the strategies.
+That method has strategy fusion, so every answer names the defect.
+Do not make it the main fog-of-war solver.
+
 ### Solver invariants
 
 - Utilities are P1 win probabilities from 0 through 1.

@@ -824,6 +824,42 @@ pub(crate) fn one_search(
                 }),
             })
         }
+        BotSearchConfig::Pimc(config) => {
+            let belief = inputs.belief.ok_or_else(no_belief)?;
+            let result = solver::pimc::search_belief_cancellable(
+                inputs.seed,
+                belief,
+                meta,
+                pokemon_dex,
+                move_dex,
+                &config,
+                &inputs.determinize,
+                // This search has no double-oracle round of its own at the root
+                // of the position. It publishes one answer for each world that
+                // it finishes instead.
+                progress,
+                cancel,
+            )
+            .map_err(engine_error)?;
+            Ok(RungResult {
+                depth_reached: result.depth_reached,
+                p1_win_odds: result.p1_win_odds,
+                p2_win_odds: result.p2_win_odds,
+                p1_strategy: result.p1_strategy,
+                p2_strategy: result.p2_strategy,
+                warnings: warning_lines(&result.warnings),
+                stats: result.stats,
+                sampling: Some(RungSampling {
+                    algorithm: "pimc",
+                    // One world is the unit of work of this search, as one
+                    // iteration is for a sampling search.
+                    iterations: result.worlds_solved as u64,
+                    particles: Some(result.particles),
+                    seed: inputs.seed,
+                    evaluator: evaluator_name(config.solve.eval),
+                }),
+            })
+        }
         BotSearchConfig::Mccfr(config) => {
             let belief = inputs.belief.ok_or_else(no_belief)?;
             let result = solver::mccfr::search_belief_cancellable(
@@ -946,6 +982,12 @@ pub(crate) fn preview_battle_config(search: BotSearchConfig) -> SolveConfig {
         BotSearchConfig::Mcts(config) => sampled(config),
         BotSearchConfig::Ismcts(config) => sampled(config.search),
         BotSearchConfig::Mccfr(config) => sampled(config.search),
+        // Each world of this search is already a `SolveConfig`, so the preview
+        // cells take it as it stands.
+        BotSearchConfig::Pimc(config) => SolveConfig {
+            deadline: None,
+            ..config.solve
+        },
     }
 }
 
@@ -959,6 +1001,7 @@ pub(crate) fn preview_worlds(search: BotSearchConfig) -> usize {
     match search {
         BotSearchConfig::Ismcts(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
         BotSearchConfig::Mccfr(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
+        BotSearchConfig::Pimc(config) => config.particles.clamp(1, MAX_PREVIEW_WORLDS),
         _ => 1,
     }
 }
@@ -1058,7 +1101,7 @@ fn run_preview_rung(
 pub(crate) fn preview_worlds_note(worlds: usize) -> String {
     if worlds == 1 {
         "The search drew one world of the belief, so the whole answer assumes one guess of the \
-         opponent's hidden data. Only ismcts and mccfr draw more than one world."
+         opponent's hidden data. Only ismcts, mccfr, and pimc draw more than one world."
             .to_string()
     } else {
         format!(
@@ -1129,13 +1172,20 @@ pub(crate) fn no_usage_cache() -> String {
 /// world.
 pub(crate) fn drawn_world_note(search: BotSearchConfig) -> String {
     match search {
+        BotSearchConfig::Pimc(_) => {
+            "This algorithm solved each drawn world by itself and averaged the strategies. Each \
+             row names the moves of one drawn world, and the opponent rows mix private builds, \
+             so they are not one playable strategy."
+                .to_string()
+        }
         BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_) => {
             "This algorithm searched the belief. Each row names the moves of one drawn world. \
              The opponent rows mix private builds, so they are not one playable strategy."
                 .to_string()
         }
         _ => "This algorithm searched one drawn world of the belief, so the answer assumes one \
-              guess of the opponent's hidden data. Only ismcts and mccfr search the belief."
+              guess of the opponent's hidden data. Only ismcts, mccfr, and pimc read the whole \
+              belief."
             .to_string(),
     }
 }
@@ -1165,11 +1215,11 @@ pub(crate) fn unknown_bring_line(belief: &UnknownBattleState) -> Option<String> 
 }
 
 /// True when the P2 rows describe one private state.
+///
+/// A belief search reads several worlds, and Player 2 holds a different private
+/// build in each one. Its rows are then an observer-side summary.
 pub(crate) fn p2_strategy_is_playable(search: BotSearchConfig) -> bool {
-    !matches!(
-        search,
-        BotSearchConfig::Ismcts(_) | BotSearchConfig::Mccfr(_)
-    )
+    !search.searches_belief()
 }
 
 /// Renders one solver warning for the panel.
@@ -1206,6 +1256,11 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::Cancelled => {
             "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
+        solver::SolveWarning::StrategyFusion { worlds } => format!(
+            "The search solved {worlds} world(s) separately and averaged the strategies. Each \
+             world played as if the hidden data were known (strategy fusion), so the answer \
+             claims more than a real player can do."
+        ),
     }
 }
 

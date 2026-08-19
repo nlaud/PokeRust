@@ -164,11 +164,6 @@ Neither control lowers the error of the reported value.
 
 ## Fog-of-war solver
 
-Do not average strategies from independent determinized worlds as the main
-method.
-That method lets the solver choose a different action for each hidden world.
-Use it only as a labeled perfect-information Monte Carlo baseline.
-
 `solver::belief` holds the particle filter.
 It has weighted particles, normalized weights, posterior updates,
 effective sample-size checks, resampling, and the observation key.
@@ -184,6 +179,37 @@ limit.
 `mccfr::continual_solve` retains private histories and solves each public
 belief.
 It then solves the root against the information-set values.
+
+### The determinized baseline
+
+`solver::pimc` is perfect-information Monte Carlo.
+It solves each drawn world with the exact search.
+It then averages the world strategies at the particle weights.
+
+Do not use this method as the main fog-of-war solver.
+Each world solve reads the hidden data of that world.
+The mix therefore plays a different action in each world, and no player can do
+that.
+This defect is strategy fusion.
+It makes the value too good for the player that the fog protects.
+
+Every answer carries `SolveWarning::StrategyFusion`.
+The profile also names the defect in its approximation list.
+The name is part of the method, because this search is a labeled baseline.
+
+`preview::solve_open_list_preview` draws worlds too.
+That search averages the payoff matrix and solves one time, so one strategy
+covers every world.
+It has no strategy fusion.
+
+One job budget covers a whole PIMC search.
+Each world takes an equal share through `CancelFlag::child_with_budget`.
+Without the share, the first world spends the budget of the job.
+The answer would then rest on one world.
+
+The search publishes one answer for each world that it finishes.
+It sends that answer through the root progress hook, which the exact search
+uses for its double-oracle rounds.
 
 ### Opponent response
 
@@ -280,9 +306,9 @@ Each rung records its depth.
 The panel shows the exact number of claimed simulation turns.
 The progress bar compares that count with the shared job budget.
 
-The tracker accepts `ismcts` and `mccfr` only.
-Both algorithms search the belief instead of treating one hidden world as the
-true state.
+The tracker accepts `ismcts`, `mccfr`, and `pimc` only.
+Each of these searches reads the belief instead of treating one hidden world as
+the true state.
 
 A position with no lead on either side is the team preview.
 The same module then searches the stored team-preview belief with
@@ -340,6 +366,8 @@ A committed turn cancels every job of that session.
 - [XDO](https://arxiv.org/abs/2103.06426)
 - [Double Oracle lower bounds](https://www.ijcai.org/proceedings/2024/0336.pdf)
 - [ISMCTS](https://orangehelicopter.com/academic/papers/tciaig_ismcts.pdf)
+- [Search in games with incomplete information](https://www.sciencedirect.com/science/article/pii/S0004370298000116)
+- [Why PIMC works](https://ojs.aaai.org/index.php/AAAI/article/view/7562)
 - [POMCP](https://proceedings.neurips.cc/paper/2010/hash/edfbe1afcf9246bb0d40eb4d8027d90f-Abstract.html)
 - [Online Outcome Sampling](https://www.mlanctot.info/files/papers/aamas15-iioos.pdf)
 - [ReBeL](https://arxiv.org/abs/2007.13544)

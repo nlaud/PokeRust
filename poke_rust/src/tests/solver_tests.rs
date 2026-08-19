@@ -34,6 +34,7 @@ use crate::solver::ismcts::{self, IsmctsConfig};
 use crate::solver::matrix::solve_matrix_game;
 use crate::solver::mccfr::{self, ContinualConfig, MccfrConfig};
 use crate::solver::mcts::{self, MctsConfig, SelectionPolicy, TransitionMode, Widening};
+use crate::solver::pimc::{self, PimcConfig};
 use crate::solver::pool::{WorkerPool, job_seed};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
@@ -6687,3 +6688,417 @@ fn job_seed_is_stable() {
 }
 
 
+
+// ── Perfect-information Monte Carlo ─────────────────────────────────────────
+//
+// `solver::pimc` solves each drawn world by itself and averages the strategies.
+// The exact search is therefore its oracle: one world must return what `solve`
+// returns, and two worlds must return the weighted mean of two `solve` calls.
+
+fn pimc_config(particles: usize) -> PimcConfig {
+    PimcConfig {
+        solve: base_config(),
+        particles,
+        resample_threshold: 0.5,
+    }
+}
+
+/// One active Pokemon and one bench Pokemon a side, two moves each.
+///
+/// Both players hold three actions: two attacks and one switch. That is enough
+/// structure for a strategy that is not one pure action.
+fn pimc_world(p2_moves: &[PokemonMove]) -> BattleState {
+    let mut battle = battle_state_from_lists(
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack],
+        )],
+        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall])],
+        vec![mon(Species::Snorlax, p2_moves)],
+        vec![mon(Species::Gengar, &[PokemonMove::ShadowBall])],
+    );
+    // A Tera or a Mega choice would multiply the action set of both sides.
+    battle.p1_has_tera = false;
+    battle.p2_has_tera = false;
+    battle.p1_has_mega = false;
+    battle.p2_has_mega = false;
+    battle
+}
+
+/// One strategy as a map from the joint action to its probability.
+///
+/// The rows sort by probability, and two mixtures can order equal rows
+/// differently. A map compares the content alone.
+fn strategy_map(strategy: &[JointActionProb]) -> HashMap<String, f64> {
+    strategy
+        .iter()
+        .map(|row| (format!("{:?}", row.commands), row.probability))
+        .collect()
+}
+
+/// The exact answer for one world.
+fn pimc_exact_of(world: &BattleState) -> SolveResult {
+    let (pokemon_dex, move_dex) = dexes();
+    solve(
+        &MatchState::BattleState(world.clone()),
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+    )
+    .expect("the position is playable")
+}
+
+fn assert_mixtures_close(found: &HashMap<String, f64>, expected: &HashMap<String, f64>) {
+    assert_eq!(
+        found.keys().collect::<HashSet<_>>(),
+        expected.keys().collect::<HashSet<_>>(),
+        "the mixtures hold different actions"
+    );
+    for (action, probability) in expected {
+        let got = found[action];
+        assert!(
+            (got - probability).abs() < 1e-9,
+            "{action}: the mixture gave {got}, the average is {probability}"
+        );
+    }
+}
+
+/// A belief of one world hides nothing, so the mixture is that world's answer.
+#[test]
+fn pimc_with_one_world_returns_the_exact_answer() {
+    let (pokemon_dex, move_dex) = dexes();
+    let world = pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
+    let exact = pimc_exact_of(&world);
+
+    let belief = belief_of_worlds(vec![world]);
+    let result = pimc::search(7, &belief, pokemon_dex, move_dex, &pimc_config(1))
+        .expect("the position is playable");
+
+    assert!(
+        (result.value - exact.value).abs() < 1e-9,
+        "the search returned {}, the exact value is {}",
+        result.value,
+        exact.value
+    );
+    assert!((result.p2_win_odds - (1.0 - exact.value)).abs() < 1e-9);
+    assert_mixtures_close(
+        &strategy_map(&result.p1_strategy),
+        &strategy_map(&exact.p1_strategy),
+    );
+    assert_mixtures_close(
+        &strategy_map(&result.p2_strategy),
+        &strategy_map(&exact.p2_strategy),
+    );
+    assert_eq!(result.worlds_solved, 1);
+    assert_eq!(result.particles, 1);
+    assert_eq!(result.depth_reached, base_config().depth);
+    // One world gives the sample variance no second point.
+    assert_eq!(result.sampling.standard_error, None);
+}
+
+/// Each world enters the mixture at the weight of its particle, and the value
+/// is the weighted mean of the world values.
+#[test]
+fn pimc_averages_the_world_answers_by_weight() {
+    let (pokemon_dex, move_dex) = dexes();
+    let first = pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
+    let second = pimc_world(&[PokemonMove::Earthquake, PokemonMove::IceBeam]);
+    let exact = [pimc_exact_of(&first), pimc_exact_of(&second)];
+    assert!(
+        (exact[0].value - exact[1].value).abs() > 1e-6,
+        "the fixture needs two worlds that differ: {} and {}",
+        exact[0].value,
+        exact[1].value
+    );
+
+    // Three parts of the first world and one part of the second.
+    let belief = ParticleBelief::from_particles(vec![
+        Particle {
+            state: MatchState::BattleState(first),
+            weight: 3.0,
+        },
+        Particle {
+            state: MatchState::BattleState(second),
+            weight: 1.0,
+        },
+    ])
+    .expect("the list is not empty");
+    let result = pimc::search(7, &belief, pokemon_dex, move_dex, &pimc_config(2))
+        .expect("the position is playable");
+
+    let expected_value = 0.75 * exact[0].value + 0.25 * exact[1].value;
+    assert!(
+        (result.value - expected_value).abs() < 1e-9,
+        "the search returned {}, the weighted mean is {expected_value}",
+        result.value
+    );
+
+    for (player, found) in [
+        (Player::P1, &result.p1_strategy),
+        (Player::P2, &result.p2_strategy),
+    ] {
+        let mut expected: HashMap<String, f64> = HashMap::new();
+        for (weight, answer) in [(0.75, &exact[0]), (0.25, &exact[1])] {
+            let rows = match player {
+                Player::P1 => &answer.p1_strategy,
+                Player::P2 => &answer.p2_strategy,
+            };
+            for (action, probability) in strategy_map(rows) {
+                *expected.entry(action).or_default() += weight * probability;
+            }
+        }
+        assert_mixtures_close(&strategy_map(found), &expected);
+    }
+    assert_eq!(result.worlds_solved, 2);
+}
+
+/// Two worlds can offer different actions. The mixture must hold the union of
+/// them, and it must still total one.
+#[test]
+fn pimc_mixes_the_union_of_the_world_actions() {
+    let (pokemon_dex, move_dex) = dexes();
+    // The second world gives Player 2 a third move, so it holds an action that
+    // the first world does not.
+    let first = pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
+    let second = pimc_world(&[
+        PokemonMove::BodySlam,
+        PokemonMove::Crunch,
+        PokemonMove::Earthquake,
+    ]);
+    let exact = [pimc_exact_of(&first), pimc_exact_of(&second)];
+
+    let belief = belief_of_worlds(vec![first, second]);
+    let result = pimc::search(7, &belief, pokemon_dex, move_dex, &pimc_config(2))
+        .expect("the position is playable");
+
+    let union: HashSet<String> = exact
+        .iter()
+        .flat_map(|answer| strategy_map(&answer.p2_strategy).into_keys())
+        .collect();
+    assert_eq!(
+        strategy_map(&result.p2_strategy)
+            .into_keys()
+            .collect::<HashSet<_>>(),
+        union,
+        "the mixture must hold every action that a world played"
+    );
+    let total: f64 = result.p2_strategy.iter().map(|row| row.probability).sum();
+    assert!((total - 1.0).abs() < 1e-9, "the mixture totals {total}");
+}
+
+/// The answer must name its own defect, whatever the position holds.
+#[test]
+fn pimc_always_reports_strategy_fusion() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![
+        pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]),
+        pimc_world(&[PokemonMove::Earthquake, PokemonMove::IceBeam]),
+    ]);
+    let result = pimc::search(7, &belief, pokemon_dex, move_dex, &pimc_config(2))
+        .expect("the position is playable");
+
+    assert!(
+        result
+            .warnings
+            .contains(&SolveWarning::StrategyFusion { worlds: 2 }),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// One world must not spend the budget of the whole job. Each world takes an
+/// equal share, so a small budget still reaches every world.
+#[test]
+fn pimc_splits_the_simulation_budget_between_the_worlds() {
+    let (pokemon_dex, move_dex) = dexes();
+    let worlds = 4;
+    let budget = 8;
+    let world = || pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
+
+    // One world of this position costs more than the whole budget, so an unsplit
+    // budget would leave the later worlds unsearched.
+    let single = pimc::search(
+        7,
+        &belief_of_worlds(vec![world()]),
+        pokemon_dex,
+        move_dex,
+        &pimc_config(1),
+    )
+    .expect("the position is playable");
+    assert!(
+        single.stats.turns_simulated > budget,
+        "the fixture needs a world that costs more than {budget} turns, it cost {}",
+        single.stats.turns_simulated
+    );
+
+    let belief = belief_of_worlds((0..worlds).map(|_| world()).collect());
+    let flag = CancelFlag::with_simulation_turn_budget(budget);
+    let result = pimc::search_progress_cancellable(
+        7,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &pimc_config(worlds),
+        None,
+        Some(&flag),
+    )
+    .expect("the position is playable");
+
+    assert_eq!(
+        result.worlds_solved, worlds,
+        "every world must get its own share of the budget"
+    );
+    assert!(
+        flag.simulation_turns() <= budget,
+        "the job simulated {} turns of a {budget}-turn budget",
+        flag.simulation_turns()
+    );
+    assert!(
+        result
+            .warnings
+            .contains(&SolveWarning::SimulationTurnBudgetExhausted { budget }),
+        "the answer must name the job budget, not the share of one world: {:?}",
+        result.warnings
+    );
+}
+
+/// A raised flag stops the search between two worlds, and the answer then holds
+/// the worlds that finished.
+#[test]
+fn pimc_returns_the_worlds_that_finished_after_a_cancel() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(
+        (0..3)
+            .map(|_| pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]))
+            .collect(),
+    );
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    let result = pimc::search_progress_cancellable(
+        7,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &pimc_config(3),
+        None,
+        Some(&flag),
+    )
+    .expect("the position is playable");
+
+    // World one always runs, so the mixture is never empty.
+    assert_eq!(result.worlds_solved, 1);
+    assert!(result.warnings.contains(&SolveWarning::Cancelled));
+    let total: f64 = result.p1_strategy.iter().map(|row| row.probability).sum();
+    assert!((total - 1.0).abs() < 1e-9, "the mixture totals {total}");
+}
+
+/// A caller reads one answer for each world that the search finishes.
+#[test]
+fn pimc_publishes_one_answer_for_each_world() {
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = belief_of_worlds(vec![
+        pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]),
+        pimc_world(&[PokemonMove::Earthquake, PokemonMove::IceBeam]),
+    ]);
+    let rounds = Mutex::new(Vec::new());
+    let hook = |round: crate::solver::RootRound| {
+        let total: f64 = round.p1_strategy.iter().map(|row| row.probability).sum();
+        rounds.lock().unwrap().push((round.value, total));
+    };
+
+    let result = pimc::search_progress_cancellable(
+        7,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &pimc_config(2),
+        Some(&hook),
+        None,
+    )
+    .expect("the position is playable");
+
+    let published = rounds.lock().unwrap().clone();
+    assert_eq!(published.len(), 2, "one answer for each world");
+    for (value, total) in &published {
+        assert!((0.0..=1.0).contains(value), "the value is {value}");
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "a published mixture totals {total}"
+        );
+    }
+    // The last answer is the answer of the whole search.
+    assert!((published[1].0 - result.value).abs() < 1e-9);
+}
+
+/// A set that holds a position with no decision must fail as a whole, as the
+/// other belief searches do.
+#[test]
+fn pimc_refuses_a_preview_world_and_a_finished_world() {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = pimc_config(1);
+
+    let preview = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::TeamPreviewState(small_preview()),
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        pimc::search(1, &preview, pokemon_dex, move_dex, &config).unwrap_err(),
+        pimc::PimcError::Position(SolveError::TeamPreviewUnsupported)
+    );
+
+    let finished = ParticleBelief::from_particles(vec![Particle {
+        state: MatchState::GameOverState {
+            winner: Player::P1,
+            pending_events: Vec::new(),
+            final_state: Box::new(certain_world()),
+        },
+        weight: 1.0,
+    }])
+    .expect("one particle is a belief");
+    assert_eq!(
+        pimc::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
+        pimc::PimcError::Position(SolveError::GameAlreadyOver {
+            winner: Player::P1
+        })
+    );
+}
+
+/// The draw and every world solve read the seed alone, so one seed gives one
+/// answer.
+#[test]
+fn pimc_is_deterministic_in_its_seed() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = species_only_belief();
+    let determinize = open_list_determinize_config();
+    let config = pimc_config(3);
+
+    let run = |seed: u64| {
+        pimc::search_belief(
+            seed,
+            &belief,
+            meta,
+            pokemon_dex,
+            move_dex,
+            &config,
+            &determinize,
+        )
+        .expect("the belief is valid")
+    };
+    let first = run(4_242);
+    let second = run(4_242);
+
+    assert_eq!(first.value, second.value);
+    assert_eq!(first.worlds_solved, 3);
+    assert_eq!(
+        strategy_map(&first.p1_strategy),
+        strategy_map(&second.p1_strategy)
+    );
+    assert_eq!(
+        strategy_map(&first.p2_strategy),
+        strategy_map(&second.p2_strategy)
+    );
+    assert!((first.effective_sample_size - 3.0).abs() < 1e-9);
+}

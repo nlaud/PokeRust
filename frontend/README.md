@@ -284,8 +284,10 @@ stream.
 
 The tracker holds a belief, not a concrete battle state.
 The server draws one world from the belief with the determinizer.
-An `ismcts` or `mccfr` profile reads the belief itself, and it renders its rows
-against the drawn world.
+An `ismcts`, `mccfr`, or `pimc` profile reads the belief itself, and it renders
+its rows against the drawn world.
+A `pimc` profile solves each drawn world by itself and averages the strategies.
+It sends one answer for each world that it finishes.
 A `doubleOracle` profile is exact for its depth, and it reads the drawn world
 alone.
 
@@ -319,7 +321,7 @@ Both players play one strategy for every drawn world.
 A real opponent reads its own hidden stats, so the answer names that limit in
 a note.
 
-An `ismcts` or `mccfr` profile draws up to eight worlds.
+An `ismcts`, `mccfr`, or `pimc` profile draws up to eight worlds.
 The answer names the count, because one world gives the whole answer one guess
 of the opponent's hidden data.
 

@@ -1072,7 +1072,7 @@ pub struct SolveStatsDto {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SolveSamplingDto {
-    /// One of `mcts`, `ismcts`, or `mccfr`.
+    /// One of `mcts`, `ismcts`, `mccfr`, or `pimc`.
     pub algorithm: String,
     /// The iterations that the search finished.
     pub iterations: u64,

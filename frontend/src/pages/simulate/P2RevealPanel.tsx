@@ -9,6 +9,7 @@ const ALGORITHM_LABELS: Record<BotProfileView['algorithm'], string> = {
   mcts: 'MCTS',
   ismcts: 'ISMCTS',
   mccfr: 'MCCFR',
+  pimc: 'PIMC',
 }
 
 const SOURCE_LABELS: Record<P2Reveal['source'], string> = {
