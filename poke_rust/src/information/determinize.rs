@@ -162,6 +162,10 @@ pub enum DeterminizeWarning {
     /// anyway: a warned-but-usable world beats an error in exactly the mid-game
     /// situations where beliefs are richest.
     UnsatisfiedConstraint { detail: String },
+    /// Every item this Pokemon may hold already belongs to a teammate, so the
+    /// draw repeated one. The belief wins over the format rule: a repeated item
+    /// still plays, and a failed draw would lose the whole world.
+    ItemClauseRelaxed { mon_idx: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,26 +188,45 @@ pub enum DeterminizeError {
     UnknownSpecies { mon_idx: usize, species: Species },
 }
 
+/// Names one Pokemon of a message.
+///
+/// A fainted Pokemon and an Illusion decoy have no place in the belief's
+/// `mon_idx` space, and [`build_side`] marks them with `usize::MAX`. Printing
+/// that number gives the reader a 20-digit index of a mon that does not exist.
+fn mon_label(mon_idx: usize) -> String {
+    if mon_idx == usize::MAX {
+        "a mon outside the belief index (fainted, or an Illusion decoy)".to_string()
+    } else {
+        format!("mon {mon_idx}")
+    }
+}
+
 impl std::fmt::Display for DeterminizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeterminizeError::SpeciesUndetermined { mon_idx } => {
-                write!(f, "mon {mon_idx}: species is not determined")
+                write!(f, "{}: species is not determined", mon_label(*mon_idx))
             }
-            DeterminizeError::NoLegalMoves { mon_idx, species } => {
-                write!(f, "mon {mon_idx} ({species:?}): no legal moves available")
-            }
+            DeterminizeError::NoLegalMoves { mon_idx, species } => write!(
+                f,
+                "{} ({species:?}): no legal moves available",
+                mon_label(*mon_idx)
+            ),
             DeterminizeError::InfeasibleSpread { mon_idx, species } => write!(
                 f,
-                "mon {mon_idx} ({species:?}): EV/stat bounds admit no spread"
+                "{} ({species:?}): EV/stat bounds admit no spread",
+                mon_label(*mon_idx)
             ),
             DeterminizeError::NoCandidates { mon_idx, attribute } => write!(
                 f,
-                "mon {mon_idx}: no valid candidates for {attribute}"
+                "{}: no valid candidates for {attribute}",
+                mon_label(*mon_idx)
             ),
-            DeterminizeError::UnknownSpecies { mon_idx, species } => {
-                write!(f, "mon {mon_idx} ({species:?}): species is not in the Pokemon dex")
-            }
+            DeterminizeError::UnknownSpecies { mon_idx, species } => write!(
+                f,
+                "{} ({species:?}): species is not in the Pokemon dex",
+                mon_label(*mon_idx)
+            ),
         }
     }
 }
@@ -347,6 +370,15 @@ fn sample_tera_type(
 /// a team hold the same item, so anything already assigned to a teammate is
 /// removed before the weights are renormalized. `Item::None` is exempt — any
 /// number of Pokemon may hold nothing.
+///
+/// # A revealed item is a fact, not a choice
+///
+/// The clause constrains what this draw may *choose*. It cannot overrule what
+/// the belief already knows: a Pokemon revealed holding Sitrus Berry holds it
+/// whatever a teammate drew earlier. `build_side` reserves every such item
+/// before the first sample for that reason, so a sampled draw never takes one.
+/// This function keeps the same rule locally, so a caller that skips the
+/// reservation still cannot lose a revealed item.
 pub(crate) fn sample_item(
     mon_idx: usize,
     unk: &UnknownPokemonState,
@@ -355,17 +387,20 @@ pub(crate) fn sample_item(
     cfg: &DeterminizeConfig,
     log: &mut DrawLog,
 ) -> Result<Item, DeterminizeError> {
-    let admissible = |item: &Item| {
-        !unknown_is_excluded(&unk.item, item)
-            && cfg.inference.legal_item_ok(item)
-            && (*item == Item::None
-                || cfg.inference.allow_repeat_items
-                || !used_items.contains(item))
+    // What the belief and the format permit. The item clause is separate,
+    // because it applies only to a choice.
+    let permitted =
+        |item: &Item| !unknown_is_excluded(&unk.item, item) && cfg.inference.legal_item_ok(item);
+    let free = |item: &Item| {
+        *item == Item::None || cfg.inference.allow_repeat_items || !used_items.contains(item)
     };
+    let admissible = |item: &Item| permitted(item) && free(item);
 
-    // A revealed item must satisfy the format rules.
+    // A revealed item must satisfy the format rules. It does not have to satisfy
+    // the item clause: a teammate that took it did so by a draw, and a draw
+    // cannot rewrite a revealed fact.
     if let Unknown::Known(item) = &unk.item {
-        return admissible(item)
+        return permitted(item)
             .then(|| item.clone())
             .ok_or(DeterminizeError::NoCandidates {
                 mon_idx,
@@ -394,34 +429,74 @@ pub(crate) fn sample_item(
     }
     let source = match &unk.item {
         Unknown::Possibly(items) => items.clone(),
-        _ => cfg
-            .inference
-            .legal_items
-            .as_ref()
-            .map(|items| items.iter().cloned().collect())
-            .unwrap_or_else(|| {
-                let mut items = meta_item_pool(meta);
-                items.push(Item::None);
-                items
-            }),
+        _ => {
+            let mut items: Vec<Item> = cfg
+                .inference
+                .legal_items
+                .as_ref()
+                .map(|items| items.iter().cloned().collect())
+                .unwrap_or_else(|| meta_item_pool(meta));
+            // Holding nothing is always a legal build, and a format catalog
+            // lists only real items. Without this the pool of a side that spent
+            // every catalog item would be empty.
+            items.push(Item::None);
+            items
+        }
     };
-    let pool: Vec<Item> = source.into_iter().filter(admissible).collect();
-    if pool.is_empty() {
-        return Err(DeterminizeError::NoCandidates {
+    let pool: Vec<Item> = source.iter().filter(|item| admissible(item)).cloned().collect();
+    if !pool.is_empty() {
+        log.warnings.push(DeterminizeWarning::UniformFallback {
+            mon_idx,
+            attribute: "item",
+            reason: "every listed item was excluded by the belief".to_string(),
+        });
+        return draw_uniform(pool, log).ok_or(DeterminizeError::NoCandidates {
             mon_idx,
             attribute: "item",
         });
     }
 
-    log.warnings.push(DeterminizeWarning::UniformFallback {
-        mon_idx,
-        attribute: "item",
-        reason: "every listed item was excluded by the belief".to_string(),
-    });
-    draw_uniform(pool, log).ok_or(DeterminizeError::NoCandidates {
+    // The belief and the item clause disagree: every item this Pokemon may hold
+    // already belongs to a teammate. The belief wins. A repeated item breaks a
+    // format rule, and a failed draw breaks the whole search.
+    let relaxed: Vec<Item> = source.into_iter().filter(|item| permitted(item)).collect();
+    if relaxed.is_empty() {
+        return Err(DeterminizeError::NoCandidates {
+            mon_idx,
+            attribute: "item",
+        });
+    }
+    log.warnings
+        .push(DeterminizeWarning::ItemClauseRelaxed { mon_idx });
+    draw_uniform(relaxed, log).ok_or(DeterminizeError::NoCandidates {
         mon_idx,
         attribute: "item",
     })
+}
+
+/// Reserves every item that a Pokemon of this side is known to hold.
+///
+/// The item clause is enforced in draw order: each sample removes the items that
+/// earlier Pokemon took. A revealed item is not a sample, so a Pokemon that
+/// samples first must not be able to spend it. Seeding the set with every
+/// revealed item of the side removes that whole class of dead end.
+///
+/// `Item::None` is exempt, because any number of Pokemon may hold nothing.
+fn reserve_known_items<'a>(
+    entries: impl IntoIterator<Item = &'a UnknownPokemonState>,
+    used_items: &mut HashSet<Item>,
+    cfg: &DeterminizeConfig,
+) {
+    if cfg.inference.allow_repeat_items {
+        return;
+    }
+    for unk in entries {
+        if let Unknown::Known(item) = &unk.item
+            && *item != Item::None
+        {
+            used_items.insert(item.clone());
+        }
+    }
 }
 
 fn meta_item_pool(meta: Option<&SpeciesMeta>) -> Vec<Item> {
@@ -1610,9 +1685,21 @@ pub fn determinize(
 ) -> Result<Determinized, DeterminizeError> {
     let oracle_belief = UnknownMatchState::Battle(belief.clone());
     let mut last: Option<(Determinized, Vec<String>)> = None;
+    let mut failure: Option<DeterminizeError> = None;
 
     for _ in 0..=cfg.max_repair_passes {
-        let world = determinize_once(belief, meta_dex, pokemon_dex, move_dex, cfg)?;
+        // A pass can dead-end on a draw rather than on the belief: one order of
+        // the item clause, or one sampled spread, leaves a later Pokemon with no
+        // candidate. Another draw usually clears it, so a failed pass costs a
+        // pass rather than the whole world. A belief that cannot be built at all
+        // fails every pass, and the last error then reaches the caller.
+        let world = match determinize_once(belief, meta_dex, pokemon_dex, move_dex, cfg) {
+            Ok(world) => world,
+            Err(error) => {
+                failure = Some(error);
+                continue;
+            }
+        };
         let violations = collect_true_state_subset_violations(
             &world.state,
             &oracle_belief,
@@ -1629,7 +1716,10 @@ pub fn determinize(
     // Budget exhausted. Return the last attempt rather than failing: it is still
     // a legal, playable state, and refusing to produce one would make the
     // determinizer useless exactly when the belief is richest.
-    let (mut world, violations) = last.expect("the loop always runs at least once");
+    let Some((mut world, violations)) = last else {
+        // No pass produced a world at all, so every pass failed.
+        return Err(failure.expect("a pass either returns a world or an error"));
+    };
     for detail in violations {
         world
             .warnings
@@ -2015,20 +2105,56 @@ fn build_side(
         }
     });
 
+    // A committed slot builds from the promoted hypothesis — the Zoroark's own
+    // species, ability, moves and stat bounds — not from the shown one. The
+    // entries resolve before the first build, so the item reservation below can
+    // read the record that each slot really uses.
+    let active_entries: Vec<UnknownPokemonState> = actives
+        .iter()
+        .enumerate()
+        .map(|(i, unk)| {
+            match (illusion_slots.contains(&i), &unk.possible_illusion_state) {
+                (true, Some(sub)) => {
+                    let mut promoted = unk.clone();
+                    promote_illusion_to_primary(&mut promoted, (**sub).clone());
+                    promoted
+                }
+                _ => unk.clone(),
+            }
+        })
+        .collect();
+
+    // The decoy that each committed Illusion slot displaces. It comes from the
+    // pristine team-preview template, and it joins the bench below.
+    let decoy_entries: Vec<UnknownPokemonState> = illusion_slots
+        .iter()
+        .map(|&slot| {
+            let template = find_decoy_template(&actives[slot])
+                .expect("illusion slots were filtered to backed templates");
+            let mut decoy = template.clone();
+            decoy.possible_illusion_state = None;
+            decoy
+        })
+        .collect();
+
+    // Reserve every revealed item of the side before the first sample. Without
+    // this the first draw can spend an item that a later Pokemon is known to
+    // hold, and that Pokemon then has nothing it may hold at all. The Pokemon
+    // that a `possible_back` draw selects are not settled yet; they sample after
+    // these groups, so they see the whole reservation.
+    reserve_known_items(
+        active_entries
+            .iter()
+            .chain(decoy_entries.iter())
+            .chain(known_back.iter())
+            .chain(fainted.iter()),
+        &mut used_items,
+        cfg,
+    );
+
     let mut active = Vec::with_capacity(actives.len());
     let mut active_ids = Vec::with_capacity(actives.len());
-    for (i, unk) in actives.iter().enumerate() {
-        // A committed slot builds from the promoted hypothesis — the Zoroark's
-        // own species, ability, moves and stat bounds — not from the shown one.
-        let mut promoted;
-        let entry = match (illusion_slots.contains(&i), &unk.possible_illusion_state) {
-            (true, Some(sub)) => {
-                promoted = unk.clone();
-                promote_illusion_to_primary(&mut promoted, (**sub).clone());
-                &promoted
-            }
-            _ => unk,
-        };
+    for (i, entry) in active_entries.iter().enumerate() {
         active.push(build_one(
             hidden,
             active_start + i,
@@ -2051,16 +2177,11 @@ fn build_side(
     // really Zoroark, while the roster's explicit Zoroark record is really the
     // decoy that Illusion selected. Materialize that decoy from its pristine
     // team-preview template and later omit the stale Zoroark bench record.
-    for &slot in &illusion_slots {
-        let shown = &actives[slot];
-        let template =
-            find_decoy_template(shown).expect("illusion slots were filtered to backed templates");
-        let mut decoy = template.clone();
-        decoy.possible_illusion_state = None;
+    for decoy in &decoy_entries {
         back.push(build_one(
             hidden,
             usize::MAX,
-            &decoy,
+            decoy,
             meta_dex,
             pokemon_dex,
             move_dex,
@@ -2068,7 +2189,7 @@ fn build_side(
             cfg,
             log,
         )?);
-        back_ids.push(known_mon_id(&decoy));
+        back_ids.push(known_mon_id(decoy));
     }
 
     let active_illusion_committed = !illusion_slots.is_empty();

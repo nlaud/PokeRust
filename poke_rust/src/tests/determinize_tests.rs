@@ -1768,3 +1768,119 @@ fn the_unseeded_entry_point_works() {
     let world = determinize(&belief, meta, pokemon_dex(), move_dex(), &config()).unwrap();
     assert_eq!(world.state.p2_active_mons[0].species, Species::Garchomp);
 }
+
+// ── The item clause and the draw order ───────────────────────────────────────
+
+/// A hidden side where one bench Pokemon revealed its item.
+///
+/// The active holds an unknown item, so the draw samples one for it. The bench
+/// Pokemon is known to hold `revealed`, and the item clause gives one item to
+/// one Pokemon. A draw that spends `revealed` on the active therefore leaves the
+/// bench Pokemon with nothing it may hold.
+fn belief_with_a_revealed_bench_item(revealed: Item, fainted: bool) -> UnknownBattleState {
+    let mut belief = belief_1v1(Species::Pikachu, Species::Garchomp, 1);
+    let mut bench = opponent(Species::Toxapex);
+    bench.item = Unknown::Known(revealed);
+    if fainted {
+        bench.hp = PokemonHP::Percent(0);
+        belief.p2_fainted_mons.push(bench);
+    } else {
+        belief.p2_known_back_mons.push(bench);
+    }
+    belief
+}
+
+/// The item clause must not let a sampled item take an item that another
+/// Pokemon of the same side is known to hold.
+#[test]
+fn a_revealed_item_survives_every_draw_order() {
+    with_meta!(meta);
+    let cfg = config_with_learnsets();
+    for fainted in [false, true] {
+        let belief = belief_with_a_revealed_bench_item(Item::SitrusBerry, fainted);
+        for seed in 0..60 {
+            let drawn = determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &cfg)
+                .unwrap_or_else(|error| {
+                    panic!("seed {seed} (fainted {fainted}) failed: {error}")
+                });
+            let bench = drawn
+                .state
+                .p2_back_mons
+                .iter()
+                .find(|mon| mon.species == Species::Toxapex)
+                .expect("the bench Pokemon is in the world");
+            assert_eq!(
+                bench.item,
+                Item::SitrusBerry,
+                "seed {seed} (fainted {fainted}) changed a revealed item"
+            );
+        }
+    }
+}
+
+/// A Pokemon may always hold nothing. A side that spent every item of a small
+/// format catalog must therefore still draw, rather than fail.
+#[test]
+fn an_exhausted_item_catalog_falls_back_to_holding_nothing() {
+    with_meta!(meta);
+    let mut cfg = config_with_learnsets();
+    // A catalog of one item, which the bench Pokemon already revealed.
+    cfg.inference.legal_items = Some(HashSet::from([Item::Leftovers]));
+    let mut belief = belief_1v1(Species::Pikachu, Species::Garchomp, 1);
+    let mut bench = opponent(Species::Toxapex);
+    bench.item = Unknown::Known(Item::Leftovers);
+    belief.p2_known_back_mons.push(bench);
+
+    for seed in 0..20 {
+        let drawn = determinize_seeded(seed, &belief, meta, pokemon_dex(), move_dex(), &cfg)
+            .unwrap_or_else(|error| panic!("seed {seed} failed: {error}"));
+        assert_eq!(drawn.state.p2_active_mons[0].item, Item::None);
+        let bench = drawn
+            .state
+            .p2_back_mons
+            .iter()
+            .find(|mon| mon.species == Species::Toxapex)
+            .expect("the bench Pokemon is in the world");
+        assert_eq!(bench.item, Item::Leftovers);
+    }
+}
+
+/// The belief outranks the item clause. A Pokemon whose every permitted item
+/// belongs to a teammate repeats one and reports it, because a world with a
+/// repeated item still plays and a failed draw loses the whole search.
+#[test]
+fn a_belief_that_only_permits_a_used_item_relaxes_the_item_clause() {
+    with_meta!(meta);
+    let cfg = config_with_learnsets();
+    let mut belief = belief_1v1(Species::Pikachu, Species::Garchomp, 1);
+    belief.p2_active_mons[0].item = Unknown::Possibly(vec![Item::Leftovers]);
+    let mut bench = opponent(Species::Toxapex);
+    bench.item = Unknown::Known(Item::Leftovers);
+    belief.p2_known_back_mons.push(bench);
+
+    let drawn = determinize_seeded(3, &belief, meta, pokemon_dex(), move_dex(), &cfg)
+        .expect("a repeated item beats a failed draw");
+    assert_eq!(drawn.state.p2_active_mons[0].item, Item::Leftovers);
+    assert_eq!(drawn.state.p2_back_mons[0].item, Item::Leftovers);
+    assert!(
+        drawn
+            .warnings
+            .iter()
+            .any(|w| matches!(w, DeterminizeWarning::ItemClauseRelaxed { .. })),
+        "{:?}",
+        drawn.warnings
+    );
+}
+
+/// A fainted Pokemon and an Illusion decoy carry no belief index. A message
+/// about one must say so, rather than print the sentinel as a mon number.
+#[test]
+fn a_message_never_prints_the_index_sentinel() {
+    let line = DeterminizeError::NoCandidates {
+        mon_idx: usize::MAX,
+        attribute: "item",
+    }
+    .to_string();
+    assert!(!line.contains(&usize::MAX.to_string()), "{line}");
+    assert!(line.contains("fainted"), "{line}");
+}
