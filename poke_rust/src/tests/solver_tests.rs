@@ -8,6 +8,7 @@
 //! Tests therefore use few moves, short benches, and one damage roll.
 
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
@@ -39,8 +40,9 @@ use crate::solver::pool::{WorkerPool, job_seed};
 use crate::solver::preview::{
     OpenListConfig, OpenListError, PreviewCellCache, PreviewConfig, open_list_worlds,
     precompute_preview_cells, preview_cell_value, preview_choices, solve_open_list_preview,
-    solve_open_list_preview_cancellable, solve_team_preview, solve_team_preview_cached,
-    solve_team_preview_cancellable,
+    solve_open_list_preview_cancellable, solve_open_list_preview_progress_cancellable,
+    solve_team_preview, solve_team_preview_cached, solve_team_preview_cancellable,
+    solve_team_preview_progress_cancellable,
 };
 use crate::solver::{
     CHAIN_MASK, CancelFlag, EXTENDED_FLAG, JointActionProb, SolveConfig, SolveError, SolveResult,
@@ -1523,6 +1525,30 @@ fn preview_double_oracle_matches_full_matrix() {
     assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
 }
 
+/// Preview progress must end on the strategy that the completed solve returns.
+#[test]
+fn team_preview_publishes_completed_rounds() {
+    let (pokemon_dex, move_dex) = dexes();
+    let rounds = RefCell::new(Vec::new());
+    let progress = |round| rounds.borrow_mut().push(round);
+    let result = solve_team_preview_progress_cancellable(
+        &small_preview(),
+        pokemon_dex,
+        move_dex,
+        &preview_config(),
+        Some(&progress),
+        None,
+    )
+    .expect("the preview state is well formed");
+
+    let rounds = rounds.into_inner();
+    let last = rounds.last().expect("the preview reported no round");
+    assert!((last.value - result.value).abs() < 1e-9);
+    assert_eq!(last.p1_strategy.len(), result.p1_strategy.len());
+    assert_eq!(last.p2_strategy.len(), result.p2_strategy.len());
+    assert_eq!(last.stats.turns_simulated, result.stats.turns_simulated);
+}
+
 /// A shared cache must remove the cell work of a repeated solve. Double oracle
 /// is deterministic, so the second solve asks for exactly the cells the first
 /// solve stored.
@@ -1962,6 +1988,34 @@ fn open_list_preview_one_world_has_no_sampling_error() {
     assert_eq!(result.sampling.per_world_values.len(), 1);
     assert!(result.sampling.standard_error.is_none());
     assert!((result.sampling.mean - result.value).abs() < 1e-9);
+}
+
+/// Open-list preview progress must report the mean-matrix strategy.
+#[test]
+fn open_list_preview_publishes_completed_rounds() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_1v1();
+    let rounds = RefCell::new(Vec::new());
+    let progress = |round| rounds.borrow_mut().push(round);
+    let result = solve_open_list_preview_progress_cancellable(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &open_list_config(2),
+        &open_list_determinize_config(),
+        Some(&progress),
+        None,
+    )
+    .expect("the belief is well formed");
+
+    let rounds = rounds.into_inner();
+    let last = rounds.last().expect("the preview reported no round");
+    assert!((last.value - result.value).abs() < 1e-9);
+    assert_eq!(last.p1_strategy.len(), result.p1_strategy.len());
+    assert_eq!(last.p2_strategy.len(), result.p2_strategy.len());
+    assert_eq!(last.stats.turns_simulated, result.stats.turns_simulated);
 }
 
 /// Several worlds must report a finite, non-negative standard error. The mean of
@@ -2461,6 +2515,19 @@ fn wide_position() -> MatchState {
             mon(Species::Alakazam, &[PokemonMove::Psychic, PokemonMove::Recover]),
         ],
     ))
+}
+
+/// A completed exact search must keep a mixed strategy when the battle needs
+/// one. This checks the search result after the matrix solver and root mapping.
+#[test]
+fn a_completed_battle_search_keeps_its_mixed_strategy() {
+    let (pokemon_dex, move_dex) = dexes();
+    let result = solve(&wide_position(), pokemon_dex, move_dex, &base_config())
+        .expect("the position is playable");
+
+    assert!(result.p1_strategy.len() > 1, "{:?}", result.p1_strategy);
+    assert!(result.p2_strategy.len() > 1, "{:?}", result.p2_strategy);
+    assert_valid_strategies(&result);
 }
 
 /// The complete joint actions of one player, with no cap and no dominance
@@ -5513,14 +5580,14 @@ fn an_expired_deadline_does_not_hide_a_cancel() {
 /// 2 is not. `BudgetExhausted` must not appear, because the returned answer is a
 /// complete depth-1 search rather than a part-static one.
 #[test]
-fn a_cancel_returns_the_last_complete_depth() {
+fn a_cancel_returns_the_newest_completed_round() {
     let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (pokemon_dex, move_dex) = dexes();
     let state = quiet_position();
 
     // The leaf cost of one complete depth-1 pass, under the same evaluator.
     arm_probe(None, None);
-    let shallow = solve(
+    let _shallow = solve(
         &state,
         pokemon_dex,
         move_dex,
@@ -5536,7 +5603,9 @@ fn a_cancel_returns_the_last_complete_depth() {
 
     let flag = CancelFlag::new();
     arm_probe(Some(&flag), Some(pass_one_leaves + 1));
-    let result = solve_seeded_cancellable(
+    let rounds = RefCell::new(Vec::new());
+    let progress = |round: crate::solver::RootRound| rounds.borrow_mut().push(round);
+    let result = solve_seeded_progress_cancellable(
         1,
         &state,
         pokemon_dex,
@@ -5547,6 +5616,7 @@ fn a_cancel_returns_the_last_complete_depth() {
             eval: probe_eval,
             ..base_config()
         },
+        Some(&progress),
         Some(&flag),
     )
     .expect("a cancel returns an answer, never an error");
@@ -5554,12 +5624,15 @@ fn a_cancel_returns_the_last_complete_depth() {
 
     assert_valid_strategies(&result);
     assert!(flag.is_cancelled());
-    assert_eq!(result.depth_reached, 1);
+    assert_eq!(result.depth_reached, 2);
+    let rounds = rounds.into_inner();
+    let newest = rounds.last().expect("the search completed one root round");
+    assert_eq!(newest.depth, 2);
     assert!(
-        (result.value - shallow.value).abs() < 1e-12,
-        "the cancel returned {}, depth 1 alone returns {}",
+        (result.value - newest.value).abs() < 1e-12,
+        "the cancel returned {}, the newest round returns {}",
         result.value,
-        shallow.value
+        newest.value
     );
     assert!(
         result.warnings.contains(&SolveWarning::Cancelled),
@@ -5569,7 +5642,7 @@ fn a_cancel_returns_the_last_complete_depth() {
     assert!(
         result.warnings.contains(&SolveWarning::DepthNotReached {
             target: 3,
-            reached: 1
+            reached: 2
         }),
         "{:?}",
         result.warnings
@@ -5585,6 +5658,65 @@ fn a_cancel_returns_the_last_complete_depth() {
 }
 
 // ── Cancellation of the sampling searches ───────────────────────────────────
+
+/// Sampled searches report only completed iteration checkpoints.
+#[test]
+fn sampled_searches_publish_deterministic_checkpoints() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let mcts_counts = RefCell::new(Vec::new());
+    let mcts_progress = |root: mcts::SampledRoot| {
+        mcts_counts.borrow_mut().push(root.stats.iterations);
+    };
+    let config = MctsConfig {
+        iterations: 300,
+        ..mcts_config()
+    };
+    mcts::search_progress_cancellable(
+        9,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&mcts_progress),
+        None,
+    )
+    .expect("the position is playable");
+    assert_eq!(*mcts_counts.borrow(), [1, 2, 256]);
+
+    let belief = belief_of_worlds(vec![certain_world(), world_with_opponent_speed(60)]);
+    let ismcts_counts = RefCell::new(Vec::new());
+    let ismcts_progress = |root: mcts::SampledRoot| {
+        ismcts_counts.borrow_mut().push(root.stats.iterations);
+    };
+    ismcts::search_progress_cancellable(
+        9,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &ismcts_config(300, 2),
+        Some(&ismcts_progress),
+        None,
+    )
+    .expect("the belief is playable");
+    assert_eq!(*ismcts_counts.borrow(), [1, 2, 256]);
+
+    let mccfr_counts = RefCell::new(Vec::new());
+    let mccfr_progress = |root: mcts::SampledRoot| {
+        mccfr_counts.borrow_mut().push(root.stats.iterations);
+    };
+    mccfr::search_progress_cancellable(
+        9,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &mccfr_config(300, 2),
+        Some(&mccfr_progress),
+        None,
+    )
+    .expect("the belief is playable");
+    assert_eq!(*mccfr_counts.borrow(), [2, 256]);
+}
 
 /// A flag that nobody raises must leave each sampling search alone. A long
 /// analysis job runs these three, so an unwanted early stop would show up as a

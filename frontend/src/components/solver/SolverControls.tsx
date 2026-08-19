@@ -1,9 +1,5 @@
 import type { BotAlgorithm } from '../../api/types'
-import {
-  autoSimulationTurnBudget,
-  isBeliefSearch,
-  type SolverSettings,
-} from './solverSettings'
+import { isBeliefSearch, type SolverSettings } from './solverSettings'
 
 function NumberField({
   label,
@@ -46,7 +42,7 @@ export default function SolverControls({
   disabled,
   onChange,
 }: {
-  algorithm: BotAlgorithm
+  algorithm?: BotAlgorithm
   settings: SolverSettings
   disabled?: boolean
   onChange: (settings: SolverSettings) => void
@@ -54,21 +50,16 @@ export default function SolverControls({
   const set = <K extends keyof SolverSettings>(key: K, value: SolverSettings[K]) =>
     onChange({ ...settings, [key]: value })
 
-  // The budget that the server derives while the field stays on "Scale
-  // automatically". Showing it keeps the number in front of the reader, and it
-  // seeds the field when the reader takes the budget over.
-  const autoBudget = autoSimulationTurnBudget(algorithm, settings)
-
   return (
     <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
       <label className="block min-w-[8rem] flex-1">
         <span className="mb-0.5 block text-ink-muted">Simulation turns</span>
         <input
           type="number"
-          value={settings.simulationTurnBudget ?? autoBudget}
+          value={settings.simulationTurnBudget}
           min={1}
           max={1_000_000_000}
-          disabled={disabled || settings.simulationTurnBudget === null}
+          disabled={disabled}
           onChange={(event) => {
             const next = Number(event.target.value)
             if (Number.isFinite(next))
@@ -76,17 +67,6 @@ export default function SolverControls({
           }}
           className="w-full rounded-card border border-subtle bg-card px-2 py-2 text-ink disabled:opacity-50"
         />
-        <span className="mt-1 flex items-center gap-1 text-ink-muted">
-          <input
-            type="checkbox"
-            checked={settings.simulationTurnBudget === null}
-            disabled={disabled}
-            onChange={(event) =>
-              set('simulationTurnBudget', event.target.checked ? null : autoBudget)
-            }
-          />
-          Scale automatically
-        </span>
       </label>
       <NumberField
         label="Depth"
@@ -128,12 +108,12 @@ export default function SolverControls({
         disabled={disabled}
         onChange={(value) => set('damageRolls', value)}
       />
-      {isBeliefSearch(algorithm) && (
+      {(algorithm === undefined || isBeliefSearch(algorithm)) && (
         <NumberField
           label="Particles"
           value={settings.particles}
           min={1}
-          max={512}
+          max={32}
           disabled={disabled}
           onChange={(value) => set('particles', value)}
         />

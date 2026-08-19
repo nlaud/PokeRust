@@ -9,7 +9,7 @@
 //! [`AnalysisState::invalidate`] raises the generation and cancels the running
 //! job. [`AnalysisState::accept`] drops a result when its generation or job ID
 //! is not current. Thus, a slow job cannot overwrite a newer answer. Both calls
-//! keep the last complete checkpoint after a failure or a cancellation.
+//! keep the newest checkpoint after a failure or a cancellation.
 //!
 //! Every search reads the cancel flag during the search, so a raised flag stops
 //! the work rather than only the start of it. A cancelled search still returns
@@ -17,22 +17,17 @@
 //! drop that partial answer. An explicit finish request keeps it as the current
 //! strategy.
 //!
-//! P1 reads `GET /api/battles/{id}/analysis` during a battle, so the progress
-//! view holds no P2 action, no P2 win odds, and no engine-written text. It does
-//! expose the exact simulation count so the client can show progress.
+//! P1 reads `GET /api/battles/{id}/analysis` during a bot battle. The response
+//! includes the current P2 strategy and win estimate. It also includes the
+//! exact simulation count.
 //!
 //! [`draw_p2_command`] draws the command that P2 plays. The turn response
 //! reveals that one command after the turn resolves, so both commands are
 //! already locked. See [`P2Draw`] for what the reveal carries.
 //!
-//! # The reveal setting
-//!
-//! `botP2.revealStrategy` opens both responses. A session with that setting
-//! reads P2's whole mixed strategy: [`progress_dto`] renders the strategy of the
-//! current position, and [`reveal_dto`] renders the strategy that supplied the
-//! drawn command. The setting defaults to false, and this module is the only
-//! place that renders those rows, so a session without it sends no strategy row
-//! at all. The rules above still hold for every session that keeps the default.
+//! [`progress_dto`] renders the strategy of the current position.
+//! [`reveal_dto`] renders the strategy that supplied the drawn command.
+//! A hotseat battle has no bot profile and sends no bot strategy.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,8 +42,8 @@ use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::UnknownMatchState;
 use poke_rust::meta::{MetaDex, MetaFormat};
 use poke_rust::solver::preview::{
-    OpenListConfig, PreviewChoiceProb, PreviewConfig, solve_open_list_preview_cancellable,
-    solve_team_preview_cancellable,
+    OpenListConfig, PreviewChoiceProb, PreviewConfig, PreviewRound,
+    solve_open_list_preview_progress_cancellable, solve_team_preview_progress_cancellable,
 };
 use poke_rust::solver::{self, CancelFlag, JointActionProb};
 use poke_rust::state::battle::{
@@ -74,15 +69,13 @@ pub struct AnalysisCheckpoint {
     pub generation: u64,
     pub turn_number: u16,
     /// P2's odds of winning, in `[0, 1]`.
-    ///
-    /// No endpoint returns this. The answer is private to P2, and a hotseat
-    /// battle lets P1 read every endpoint.
-    #[allow(dead_code)]
     pub p2_win_odds: f64,
+    /// True when the solver completed this depth.
+    pub complete: bool,
     /// P2's mixed strategy at the root.
     ///
-    /// No endpoint returns this list. [`draw_p2_command`] draws one action from
-    /// it, and the turn response reveals that one action alone.
+    /// The analysis endpoint returns it for the current bot position.
+    /// [`draw_p2_command`] also draws one action from it.
     pub p2_strategy: P2Strategy,
     /// The depth that the search reached.
     /// A sampling search reports its configured depth.
@@ -300,7 +293,7 @@ impl AnalysisState {
         match outcome {
             Ok(checkpoint) => {
                 let line = complete_line(job, &checkpoint);
-                self.checkpoint = Some(checkpoint);
+                self.store_newest(checkpoint);
                 self.last_error = None;
                 line
             }
@@ -312,6 +305,33 @@ impl AnalysisState {
                 self.last_error = Some(message);
                 line
             }
+        }
+    }
+
+    /// Stores a solver checkpoint while the job continues.
+    fn publish(&mut self, job: &JobTicket, checkpoint: AnalysisCheckpoint) {
+        if job.generation != self.generation {
+            return;
+        }
+        if !self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.id == job.id && running.generation == job.generation)
+        {
+            return;
+        }
+        self.store_newest(checkpoint);
+    }
+
+    fn store_newest(&mut self, checkpoint: AnalysisCheckpoint) {
+        let replace = self.checkpoint.as_ref().is_none_or(|current| {
+            checkpoint.generation != current.generation
+                || checkpoint.depth_reached > current.depth_reached
+                || (checkpoint.depth_reached == current.depth_reached
+                    && checkpoint.turns_simulated >= current.turns_simulated)
+        });
+        if replace {
+            self.checkpoint = Some(checkpoint);
         }
     }
 
@@ -365,7 +385,7 @@ impl AnalysisState {
             .filter(|c| c.generation == self.generation)
     }
 
-    /// The last complete checkpoint, stale or not.
+    /// The last strategy checkpoint, stale or not.
     #[cfg(test)]
     fn checkpoint(&self) -> Option<&AnalysisCheckpoint> {
         self.checkpoint.as_ref()
@@ -404,14 +424,15 @@ fn complete_line(job: &JobTicket, checkpoint: &AnalysisCheckpoint) -> String {
 ///
 /// The row carries the wall-clock cost and the exact simulation count.
 ///
-/// [`progress_dto`] adds the strategy afterwards, and only for a session whose
-/// profile holds `reveal_strategy`.
+/// [`progress_dto`] adds the strategy for a bot session.
 fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisCheckpointDto {
     AnalysisCheckpointDto {
         generation: checkpoint.generation,
         stale: checkpoint.generation != generation,
         turn_number: checkpoint.turn_number,
         depth_reached: checkpoint.depth_reached,
+        complete: checkpoint.complete,
+        p2_win_odds: checkpoint.p2_win_odds,
         elapsed_ms: checkpoint.elapsed.as_millis() as u64,
         turns_simulated: checkpoint.turns_simulated,
         seed: checkpoint.seed,
@@ -423,15 +444,14 @@ fn checkpoint_dto(checkpoint: &AnalysisCheckpoint, generation: u64) -> AnalysisC
 /// The analysis response of one session.
 ///
 /// [`AnalysisState::progress`] builds the private view, which every session
-/// gets. A session whose profile holds `reveal_strategy` then also gets P2's
-/// strategy at the current position.
+/// gets. A bot session also gets P2's strategy at the current position.
 ///
 /// Only a checkpoint of the current position carries rows. A stale checkpoint
 /// names actions of an older position, and [`strategy_dto`] would render them
 /// against a field that no longer holds those Pokemon.
 pub fn progress_dto(session: &BattleSession) -> AnalysisProgressDto {
     let mut view = session.analysis.progress();
-    if !reveals_strategy(session) {
+    if session.bot_p2.is_none() {
         return view;
     }
     let Some(checkpoint) = session.analysis.current_checkpoint() else {
@@ -443,15 +463,8 @@ pub fn progress_dto(session: &BattleSession) -> AnalysisProgressDto {
     view
 }
 
-/// True when the client of this session may read P2's strategy.
-///
-/// A hotseat session holds no profile, so it never reveals a strategy. This is
-/// the whole gate: no other call site renders a P2 strategy row.
 fn reveals_strategy(session: &BattleSession) -> bool {
-    session
-        .bot_p2
-        .as_ref()
-        .is_some_and(|profile| profile.view.reveal_strategy)
+    session.bot_p2.is_some()
 }
 
 // ── The revealed strategy ────────────────────────────────────────────────────
@@ -651,6 +664,14 @@ pub fn start_job(
             );
             return;
         }
+        let progress_sessions = Arc::clone(&sessions);
+        let progress_battle_id = battle_id.clone();
+        let publish = |checkpoint: AnalysisCheckpoint| {
+            let mut sessions = progress_sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = sessions.get_mut(&progress_battle_id) {
+                session.analysis.publish(&job, checkpoint);
+            }
+        };
         let outcome = run_search(
             search,
             seed,
@@ -662,12 +683,11 @@ pub fn start_job(
             inference,
             replay,
             &job.cancel,
+            Some(&publish),
         );
-        // A cancelled search returns an answer that holds only the work that
-        // finished, so this task reports nothing at all. Two rules need that.
-        // A partial answer must not replace the last complete checkpoint. A
-        // cancelled job must also leave the record of the replacement job.
-        // The ticket check in `accept` protects the race after this flag check.
+        // A state change can cancel this job after it publishes a checkpoint.
+        // The new generation must keep control of the session record.
+        // The ticket check in `accept` protects the later race.
         if job.cancel.is_cancelled() && !job.should_publish_cancelled_result() {
             eprintln!(
                 "analysis job {} (generation {}): cancelled during the search, \
@@ -764,6 +784,7 @@ fn forced_checkpoint(
         generation: session.analysis.generation(),
         turn_number,
         p2_win_odds: 0.5,
+        complete: true,
         p2_strategy: strategy,
         depth_reached: 0,
         turns_simulated: 0,
@@ -809,6 +830,7 @@ fn run_search(
     inference: Option<InferenceConfig>,
     replay: AnalysisReplay,
     cancel: &CancelFlag,
+    progress: Option<&dyn Fn(AnalysisCheckpoint)>,
 ) -> Result<AnalysisCheckpoint, String> {
     let turn_number = match state {
         MatchState::BattleState(battle) => battle.turn_number,
@@ -824,12 +846,42 @@ fn run_search(
 
     // A solver panic must not poison the session mutex, so catch it here and
     // report it as an ordinary job failure.
+    let publish = |mut checkpoint: AnalysisCheckpoint| {
+        decorate_checkpoint(
+            &mut checkpoint,
+            generation,
+            turn_number,
+            seed,
+            &replay,
+            search,
+            belief_p2.is_some(),
+        );
+        if let Some(progress) = progress {
+            progress(checkpoint);
+        }
+    };
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match state {
         MatchState::TeamPreviewState(preview) => one_preview_search(
-            search, seed, preview, belief_p2, dexes, meta, inference, cancel,
+            search,
+            seed,
+            preview,
+            belief_p2,
+            dexes,
+            meta,
+            inference,
+            cancel,
+            Some(&publish),
         ),
         _ => one_search(
-            search, seed, state, belief_p2, dexes, meta, inference, cancel,
+            search,
+            seed,
+            state,
+            belief_p2,
+            dexes,
+            meta,
+            inference,
+            cancel,
+            Some(&publish),
         ),
     }));
     let mut checkpoint = match caught {
@@ -837,21 +889,42 @@ fn run_search(
         Err(payload) => return Err(panic_message(payload)),
     };
 
+    decorate_checkpoint(
+        &mut checkpoint,
+        generation,
+        turn_number,
+        seed,
+        &replay,
+        search,
+        belief_p2.is_some(),
+    );
+    let _ = started;
+    Ok(checkpoint)
+}
+
+fn decorate_checkpoint(
+    checkpoint: &mut AnalysisCheckpoint,
+    generation: u64,
+    turn_number: u16,
+    seed: u64,
+    replay: &AnalysisReplay,
+    search: BotSearchConfig,
+    fogged: bool,
+) {
     checkpoint.generation = generation;
     checkpoint.turn_number = turn_number;
     checkpoint.seed = seed;
-    checkpoint.turns_simulated = cancel.simulation_turns();
     checkpoint.replay = AnalysisReplay {
         turn_number,
         turns_simulated: checkpoint.turns_simulated,
-        ..replay
+        ..replay.clone()
     };
-    checkpoint.strategy_is_playable = strategy_respects_fog(search, belief_p2.is_some());
-    if let Some(line) = perfect_information_warning(search, belief_p2.is_some()) {
+    checkpoint.strategy_is_playable = strategy_respects_fog(search, fogged);
+    if let Some(line) = perfect_information_warning(search, fogged)
+        && !checkpoint.warnings.contains(&line)
+    {
         checkpoint.warnings.push(line);
     }
-    let _ = started;
-    Ok(checkpoint)
 }
 
 /// Routes one resolved profile to its solver entry point.
@@ -870,20 +943,38 @@ fn one_search(
     meta: Option<&MetaDex>,
     inference: Option<InferenceConfig>,
     cancel: &CancelFlag,
+    progress: Option<&dyn Fn(AnalysisCheckpoint)>,
 ) -> Result<AnalysisCheckpoint, String> {
     let cancel = Some(cancel);
     match search {
         BotSearchConfig::Exact(config) => {
-            let result = solver::solve_seeded_cancellable(
+            let round = |round: solver::RootRound| {
+                let mut checkpoint = partial_checkpoint(
+                    1.0 - round.value,
+                    P2Strategy::Battle(round.p2_strategy),
+                    round.depth,
+                    round.stats.turns_simulated,
+                    round.stats.nodes_expanded,
+                    round.stats.elapsed,
+                    &[],
+                    &[],
+                );
+                checkpoint.complete = false;
+                if let Some(progress) = progress {
+                    progress(checkpoint);
+                }
+            };
+            let result = solver::solve_seeded_progress_cancellable(
                 seed,
                 state,
                 &dexes.pokemon_dex,
                 &dexes.move_dex,
                 &config,
+                Some(&round),
                 cancel,
             )
             .map_err(engine_error)?;
-            Ok(partial_checkpoint(
+            let mut checkpoint = partial_checkpoint(
                 result.p2_win_odds,
                 P2Strategy::Battle(result.p2_strategy),
                 result.depth_reached,
@@ -892,15 +983,44 @@ fn one_search(
                 result.stats.elapsed,
                 &result.warnings,
                 &[],
-            ))
+            );
+            checkpoint.complete = result.depth_reached == config.depth
+                && !result.warnings.iter().any(|warning| {
+                    matches!(
+                        warning,
+                        solver::SolveWarning::BudgetExhausted { .. }
+                            | solver::SolveWarning::DeadlineExceeded { .. }
+                            | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
+                            | solver::SolveWarning::Cancelled
+                            | solver::SolveWarning::DepthNotReached { .. }
+                    )
+                });
+            Ok(checkpoint)
         }
         BotSearchConfig::Mcts(config) => {
-            let result = solver::mcts::search_cancellable(
+            let sampled = |root: solver::mcts::SampledRoot| {
+                let mut checkpoint = partial_checkpoint(
+                    1.0 - root.value,
+                    P2Strategy::Battle(root.p2_strategy),
+                    config.depth,
+                    root.stats.turns_simulated,
+                    root.stats.nodes_created,
+                    root.stats.elapsed,
+                    &[],
+                    &[],
+                );
+                checkpoint.complete = false;
+                if let Some(progress) = progress {
+                    progress(checkpoint);
+                }
+            };
+            let result = solver::mcts::search_progress_cancellable(
                 seed,
                 state,
                 &dexes.pokemon_dex,
                 &dexes.move_dex,
                 &config,
+                Some(&sampled),
                 cancel,
             )
             .map_err(engine_error)?;
@@ -918,7 +1038,23 @@ fn one_search(
         BotSearchConfig::Ismcts(config) => {
             let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
             let meta = meta.ok_or_else(unsupported_meta)?;
-            let result = solver::ismcts::search_belief_cancellable(
+            let sampled = |root: solver::mcts::SampledRoot| {
+                let mut checkpoint = partial_checkpoint(
+                    1.0 - root.value,
+                    P2Strategy::Battle(root.p2_strategy),
+                    config.search.depth,
+                    root.stats.turns_simulated,
+                    root.stats.nodes_created,
+                    root.stats.elapsed,
+                    &[],
+                    &[],
+                );
+                checkpoint.complete = false;
+                if let Some(progress) = progress {
+                    progress(checkpoint);
+                }
+            };
+            let result = solver::ismcts::search_belief_progress_cancellable(
                 seed,
                 belief,
                 meta,
@@ -926,6 +1062,7 @@ fn one_search(
                 &dexes.move_dex,
                 &config,
                 &determinize,
+                Some(&sampled),
                 cancel,
             )
             .map_err(engine_error)?;
@@ -971,7 +1108,23 @@ fn one_search(
         BotSearchConfig::Mccfr(config) => {
             let (belief, determinize) = belief_search_inputs(belief_p2, inference)?;
             let meta = meta.ok_or_else(unsupported_meta)?;
-            let result = solver::mccfr::search_belief_cancellable(
+            let sampled = |root: solver::mcts::SampledRoot| {
+                let mut checkpoint = partial_checkpoint(
+                    1.0 - root.value,
+                    P2Strategy::Battle(root.p2_strategy),
+                    config.search.depth,
+                    root.stats.turns_simulated,
+                    root.stats.nodes_created,
+                    root.stats.elapsed,
+                    &[],
+                    &[],
+                );
+                checkpoint.complete = false;
+                if let Some(progress) = progress {
+                    progress(checkpoint);
+                }
+            };
+            let result = solver::mccfr::search_belief_progress_cancellable(
                 seed,
                 belief,
                 meta,
@@ -979,6 +1132,7 @@ fn one_search(
                 &dexes.move_dex,
                 &config,
                 &determinize,
+                Some(&sampled),
                 cancel,
             )
             .map_err(engine_error)?;
@@ -1040,6 +1194,7 @@ fn one_preview_search(
     meta: Option<&MetaDex>,
     inference: Option<InferenceConfig>,
     cancel: &CancelFlag,
+    progress: Option<&dyn Fn(AnalysisCheckpoint)>,
 ) -> Result<AnalysisCheckpoint, String> {
     let battle = preview_battle_config(search);
     let depth = battle.depth;
@@ -1071,13 +1226,35 @@ fn one_preview_search(
             observer: Player::P2,
             ..DeterminizeConfig::default()
         };
-        let result = solve_open_list_preview_cancellable(
+        let publish_round = |round: PreviewRound| {
+            let mut checkpoint = partial_checkpoint(
+                1.0 - round.value,
+                P2Strategy::Preview(round.p2_strategy),
+                depth,
+                round.stats.turns_simulated,
+                round.stats.cells_evaluated,
+                round.stats.elapsed,
+                &[],
+                &[],
+            );
+            checkpoint.complete = false;
+            checkpoint.warnings.push(if worlds == 1 {
+                PREVIEW_ONE_WORLD_NOTE.to_string()
+            } else {
+                PREVIEW_MEAN_MATRIX_NOTE.to_string()
+            });
+            if let Some(progress) = progress {
+                progress(checkpoint);
+            }
+        };
+        let result = solve_open_list_preview_progress_cancellable(
             belief,
             meta,
             &dexes.pokemon_dex,
             &dexes.move_dex,
             &open_list,
             &determinize,
+            Some(&publish_round),
             Some(cancel),
         )
         .map_err(engine_error)?;
@@ -1099,11 +1276,28 @@ fn one_preview_search(
         return Ok(checkpoint);
     }
 
-    let result = solve_team_preview_cancellable(
+    let publish_round = |round: PreviewRound| {
+        let mut checkpoint = partial_checkpoint(
+            1.0 - round.value,
+            P2Strategy::Preview(round.p2_strategy),
+            depth,
+            round.stats.turns_simulated,
+            round.stats.cells_evaluated,
+            round.stats.elapsed,
+            &[],
+            &[],
+        );
+        checkpoint.complete = false;
+        if let Some(progress) = progress {
+            progress(checkpoint);
+        }
+    };
+    let result = solve_team_preview_progress_cancellable(
         preview,
         &dexes.pokemon_dex,
         &dexes.move_dex,
         &config,
+        Some(&publish_round),
         Some(cancel),
     )
     .map_err(engine_error)?;
@@ -1297,6 +1491,7 @@ fn partial_checkpoint(
         generation: 0,
         turn_number: 0,
         p2_win_odds,
+        complete: true,
         p2_strategy,
         depth_reached,
         turns_simulated,
@@ -1334,13 +1529,7 @@ impl DrawSource {
 
 /// One drawn P2 command.
 ///
-/// The record holds one action. It holds no probability of that action and no
-/// other action of the strategy, so the reveal that [`reveal_dto`] builds shows
-/// P2's choice and nothing else of P2's plan.
-///
-/// A session with `reveal_strategy` also fills `strategy`, which holds the whole
-/// mixed strategy that the draw sampled from. That field is the one exception,
-/// and the setting is its only source.
+/// The record holds one drawn action and the strategy that supplied it.
 pub struct P2Draw {
     pub command: PlayerCommand,
     pub source: DrawSource,
@@ -1351,8 +1540,7 @@ pub struct P2Draw {
     pub replay: Option<AnalysisReplay>,
     /// The strategy that this draw sampled from.
     ///
-    /// `None` unless the session profile holds `reveal_strategy`, and `None` for
-    /// either uniform draw, which reads no strategy.
+    /// `None` for a uniform draw, which reads no strategy.
     pub strategy: Option<P2StrategyDto>,
 }
 
@@ -1798,6 +1986,7 @@ mod tests {
             generation,
             turn_number,
             p2_win_odds: 0.75,
+            complete: true,
             p2_strategy: P2Strategy::Battle(vec![JointActionProb {
                 commands: vec![BattleCommand::Pass],
                 probability: 1.0,
@@ -1976,8 +2165,7 @@ mod tests {
         assert!(state.progress().error.is_none());
     }
 
-    /// The progress endpoint is private data of the P2 side, so it must never
-    /// carry an action or a win probability.
+    /// The state view carries odds but no rendered action row.
     #[test]
     fn the_progress_view_holds_no_p2_strategy() {
         let mut state = AnalysisState::default();
@@ -1989,8 +2177,8 @@ mod tests {
 
         assert!(!json.contains("Pass"), "{json}");
         assert!(!json.contains("strategy"), "{json}");
-        assert!(!json.contains("0.75"), "{json}");
-        assert!(!json.to_lowercase().contains("odds"), "{json}");
+        assert!(json.contains("0.75"), "{json}");
+        assert!(json.contains("p2WinOdds"), "{json}");
         assert!(!json.to_lowercase().contains("command"), "{json}");
         // Wall-clock cost is public.
         assert!(json.contains("elapsedMs"), "{json}");
@@ -2792,16 +2980,15 @@ mod tests {
             session.analysis.accept(&job, Ok(stored));
         }
 
-        /// The default session must send no part of P2's plan, which is the rule
-        /// that held before this setting existed.
+        /// Every bot session sends its current strategy.
         #[test]
-        fn a_hidden_session_sends_no_strategy_row() {
+        fn a_bot_session_sends_its_strategy_row() {
             let mut hidden = session(MatchState::BattleState(battle_state()), false);
             store(&mut hidden, battle_strategy([0.5, 0.3, 0.2]));
 
             let json = serde_json::to_string(&progress_dto(&hidden)).unwrap();
 
-            assert!(!json.contains("p2Strategy"), "{json}");
+            assert!(json.contains("p2Strategy"), "{json}");
             assert!(!json.to_lowercase().contains("thunderbolt"), "{json}");
             assert!(json.contains("elapsedMs"), "{json}");
         }
@@ -2946,10 +3133,9 @@ mod tests {
             assert!(strategy_dto(&preview, &battle_strategy([1.0, 0.0, 0.0]), None).is_none());
         }
 
-        /// The draw carries the strategy only for the open session, so the
-        /// reveal of a default session holds the drawn command alone.
+        /// Every bot draw can carry the strategy that supplied it.
         #[test]
-        fn the_reveal_carries_the_strategy_of_the_open_session_alone() {
+        fn each_bot_reveal_carries_its_strategy() {
             let strategy = battle_strategy([0.5, 0.3, 0.2]);
             let mut hidden = session(MatchState::BattleState(battle_state()), false);
             store(&mut hidden, strategy.clone());
@@ -2961,7 +3147,7 @@ mod tests {
                 revealed_strategy(session, checkpoint, 1)
             };
 
-            assert!(stored(&hidden).is_none());
+            assert_eq!(stored(&hidden).unwrap().drawn_index, Some(1));
             let revealed = stored(&open).expect("an open session reveals the draw");
             assert_eq!(revealed.drawn_index, Some(1));
         }

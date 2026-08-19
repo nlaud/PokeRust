@@ -53,7 +53,8 @@ use poke_rust::information::unknowns::{
 };
 use poke_rust::meta::{MetaDex, MetaFormat};
 use poke_rust::solver::preview::{
-    OpenListConfig, PreviewChoiceProb, PreviewConfig, solve_open_list_preview_cancellable,
+    OpenListConfig, PreviewChoiceProb, PreviewConfig, PreviewRound,
+    solve_open_list_preview_progress_cancellable,
 };
 use poke_rust::solver::{self, CancelFlag, JointActionProb, SolveConfig};
 use poke_rust::state::battle::{BattleState, MatchState, Player};
@@ -174,7 +175,7 @@ pub struct TrackerAnalysisState {
     /// The ID for the next job in this session.
     next_job_id: u64,
     running: Option<RunningJob>,
-    /// The newest complete rung.
+    /// The newest strategy checkpoint.
     /// A failure and a cancellation both keep it.
     checkpoint: Option<TrackerAnalysisCheckpoint>,
     /// Player 1's win odds at the position before the current one.
@@ -280,8 +281,8 @@ impl TrackerAnalysisState {
 
     /// Records the rung that is starting.
     ///
-    /// The panel reads this record between two complete rungs, so it can show
-    /// the depth in progress and the spent part of the budget.
+    /// The panel reads this record while a rung runs, so it can show the depth
+    /// in progress and the spent part of the budget.
     fn note_rung(&mut self, job: &JobTicket, depth: u8) {
         if !self.is_current(job) {
             return;
@@ -291,18 +292,17 @@ impl TrackerAnalysisState {
         }
     }
 
-    /// Stores one complete rung and leaves the job running.
+    /// Stores one strategy checkpoint and leaves the job running.
     ///
     /// Drops a rung of an old generation or of a replaced job. It also drops a
-    /// rung that is not deeper than the rung already stored for this position,
-    /// so the panel never steps backwards.
+    /// shallower rung than the checkpoint already stored for this position.
     fn publish(&mut self, job: &JobTicket, checkpoint: TrackerAnalysisCheckpoint) {
         if !self.is_current(job) {
             return;
         }
         let already_deeper = self.checkpoint.as_ref().is_some_and(|stored| {
             stored.generation == checkpoint.generation
-                && stored.depth_reached >= checkpoint.depth_reached
+                && stored.depth_reached > checkpoint.depth_reached
         });
         if already_deeper {
             return;
@@ -358,7 +358,7 @@ impl TrackerAnalysisState {
         }
     }
 
-    /// The last complete rung, stale or not.
+    /// The last strategy checkpoint, stale or not.
     #[cfg(test)]
     fn checkpoint(&self) -> Option<&TrackerAnalysisCheckpoint> {
         self.checkpoint.as_ref()
@@ -579,7 +579,11 @@ fn run_ladder(
         determinize: belief_draw_config(&inputs.inference),
     };
 
-    let first_depth = inputs.search.first_depth(inputs.target_depth);
+    let first_depth = if matches!(inputs.search, BotSearchConfig::Exact(_)) {
+        inputs.target_depth
+    } else {
+        inputs.search.first_depth(inputs.target_depth)
+    };
     for depth in first_depth..=inputs.target_depth {
         if cancel.is_cancelled() {
             return Ok(());
@@ -590,7 +594,7 @@ fn run_ladder(
         // A solver panic must not poison the session mutex, so catch it here
         // and report it as an ordinary job failure.
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            one_search(search, &search_inputs, &state, None, cancel)
+            one_search(search, &search_inputs, &state, None, None, cancel)
         }));
         let rung = match caught {
             Ok(result) => result?,
@@ -704,7 +708,7 @@ fn exact_rung(result: solver::SolveResult) -> RungResult {
 }
 
 /// Converts the statistics of a sampling search to the shared shape.
-fn sampled_stats(stats: &poke_rust::solver::mcts::MctsStats) -> solver::SolveStats {
+pub(crate) fn sampled_stats(stats: &poke_rust::solver::mcts::MctsStats) -> solver::SolveStats {
     solver::SolveStats {
         nodes_expanded: stats.nodes_created,
         turns_simulated: stats.turns_simulated,
@@ -747,6 +751,7 @@ pub(crate) fn one_search(
     inputs: &SearchInputs<'_>,
     state: &MatchState,
     progress: Option<solver::RootProgress<'_>>,
+    sampled_progress: Option<solver::mcts::SampledProgress<'_>>,
     cancel: &CancelFlag,
 ) -> Result<RungResult, String> {
     let pokemon_dex = &inputs.dexes.pokemon_dex;
@@ -768,12 +773,13 @@ pub(crate) fn one_search(
             Ok(exact_rung(result))
         }
         BotSearchConfig::Mcts(config) => {
-            let result = solver::mcts::search_cancellable(
+            let result = solver::mcts::search_progress_cancellable(
                 inputs.seed,
                 state,
                 pokemon_dex,
                 move_dex,
                 &config,
+                sampled_progress,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -796,7 +802,7 @@ pub(crate) fn one_search(
         }
         BotSearchConfig::Ismcts(config) => {
             let belief = inputs.belief.ok_or_else(no_belief)?;
-            let result = solver::ismcts::search_belief_cancellable(
+            let result = solver::ismcts::search_belief_progress_cancellable(
                 inputs.seed,
                 belief,
                 meta,
@@ -804,6 +810,7 @@ pub(crate) fn one_search(
                 move_dex,
                 &config,
                 &inputs.determinize,
+                sampled_progress,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -862,7 +869,7 @@ pub(crate) fn one_search(
         }
         BotSearchConfig::Mccfr(config) => {
             let belief = inputs.belief.ok_or_else(no_belief)?;
-            let result = solver::mccfr::search_belief_cancellable(
+            let result = solver::mccfr::search_belief_progress_cancellable(
                 inputs.seed,
                 belief,
                 meta,
@@ -870,6 +877,7 @@ pub(crate) fn one_search(
                 move_dex,
                 &config,
                 &inputs.determinize,
+                sampled_progress,
                 cancel,
             )
             .map_err(engine_error)?;
@@ -1006,7 +1014,7 @@ pub(crate) fn preview_worlds(search: BotSearchConfig) -> usize {
     }
 }
 
-/// Searches the team preview and publishes one rung.
+/// Searches the team preview and publishes each completed strategy.
 ///
 /// The preview search runs double oracle one time over the whole choice
 /// matrix, so it has no depth ladder. Each depth would repeat the complete run,
@@ -1036,13 +1044,33 @@ fn run_preview_rung(
     // A solver panic must not poison the session mutex, so catch it here and
     // report it as an ordinary job failure.
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        solve_open_list_preview_cancellable(
+        let round = |round: PreviewRound| {
+            (hooks.publish)(TrackerAnalysisCheckpoint {
+                generation: inputs.generation,
+                turn_number: inputs.turn_number,
+                position: PositionKind::TeamPreview,
+                depth_reached: depth,
+                p1_win_odds: round.value,
+                p2_win_odds: 1.0 - round.value,
+                p1_strategy: preview_rows(&belief.p1_mons, &round.p1_strategy),
+                p2_strategy: preview_rows(&belief.p2_mons, &round.p2_strategy),
+                p2_strategy_is_playable: true,
+                elapsed: round.stats.elapsed,
+                seed: inputs.seed,
+                warnings: vec![
+                    PREVIEW_MEAN_MATRIX_NOTE.to_string(),
+                    preview_worlds_note(config.worlds),
+                ],
+            });
+        };
+        solve_open_list_preview_progress_cancellable(
             belief,
             meta,
             &inputs.dexes.pokemon_dex,
             &inputs.dexes.move_dex,
             &config,
             &determinize,
+            Some(&round),
             Some(cancel),
         )
     }));
@@ -1935,7 +1963,8 @@ Level: 50
     }
 
     /// Before the first `leads` line the ladder must answer the bring-and-lead
-    /// question rather than report that the field is empty.
+    /// question rather than report that the field is empty. It must publish
+    /// completed double-oracle rounds before the final answer.
     #[test]
     fn the_ladder_answers_the_team_preview_before_the_first_leads_line() {
         let Some(inputs) = preview_inputs("doubleOracle", 8_000) else {
@@ -1946,11 +1975,20 @@ Level: 50
         let (outcome, rungs, noted) = run_and_collect(&inputs, &cancel);
 
         outcome.expect("the preview position is searchable");
-        assert_eq!(rungs.len(), 1, "the preview answers with one rung");
-        assert_eq!(rungs[0].position, PositionKind::TeamPreview);
-        assert_eq!(rungs[0].turn_number, 0);
+        assert!(rungs.len() > 1, "the preview published no partial strategy");
+        assert!(
+            rungs
+                .iter()
+                .all(|rung| rung.position == PositionKind::TeamPreview)
+        );
+        assert!(rungs.iter().all(|rung| rung.turn_number == 0));
         assert_eq!(noted, vec![inputs.target_depth]);
-        for row in rungs[0].p1_strategy.iter().chain(&rungs[0].p2_strategy) {
+        let final_rung = rungs.last().expect("a final preview answer");
+        for row in final_rung
+            .p1_strategy
+            .iter()
+            .chain(&final_rung.p2_strategy)
+        {
             let choice = row.preview.as_ref().expect("a preview row");
             assert_eq!(choice.leads.len(), 1, "{choice:?}");
             assert!(choice.back.is_empty(), "{choice:?}");
@@ -1962,10 +2000,10 @@ Level: 50
                 .map(|row| row.preview.as_ref().unwrap().leads[0].clone())
                 .collect()
         };
-        for name in leads(&rungs[0].p1_strategy) {
+        for name in leads(&final_rung.p1_strategy) {
             assert!(["Pikachu", "Snorlax"].contains(&name.as_str()), "{name}");
         }
-        for name in leads(&rungs[0].p2_strategy) {
+        for name in leads(&final_rung.p2_strategy) {
             assert!(["Garchomp", "Gengar"].contains(&name.as_str()), "{name}");
         }
     }
@@ -1996,10 +2034,9 @@ Level: 50
         }
     }
 
-    /// A committed turn cancels the running preview search, and a cancelled run
-    /// publishes nothing.
+    /// A cancelled preview search keeps every strategy that it completed.
     #[test]
-    fn a_cancelled_preview_ladder_publishes_no_rung() {
+    fn a_cancelled_preview_ladder_keeps_a_partial_strategy() {
         let Some(inputs) = preview_inputs("doubleOracle", 8_000) else {
             return;
         };
@@ -2009,7 +2046,12 @@ Level: 50
         let (outcome, rungs, _) = run_and_collect(&inputs, &cancel);
 
         assert!(outcome.is_ok(), "{outcome:?}");
-        assert!(rungs.is_empty(), "a cancelled ladder published a rung");
+        assert!(!rungs.is_empty(), "the cancelled ladder lost its strategy");
+        assert!(
+            rungs.iter().all(|rung| !rung.p1_strategy.is_empty()
+                && !rung.p2_strategy.is_empty()),
+            "the cancelled ladder published an empty strategy"
+        );
     }
 
     /// An engine error names a drawn species, which is a guess about the live

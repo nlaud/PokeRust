@@ -468,6 +468,21 @@ pub struct MctsResult {
     pub warnings: Vec<SolveWarning>,
 }
 
+/// One completed strategy checkpoint from a sampled search.
+#[derive(Debug, Clone)]
+pub struct SampledRoot {
+    pub value: f64,
+    pub p1_strategy: Vec<JointActionProb>,
+    pub p2_strategy: Vec<JointActionProb>,
+    pub stats: MctsStats,
+}
+
+pub type SampledProgress<'a> = &'a dyn Fn(SampledRoot);
+
+pub(super) fn reports_iteration(iterations: u64) -> bool {
+    iterations <= 2 || iterations.is_multiple_of(256)
+}
+
 /// Samples `state` to the configured depth.
 ///
 /// The same `seed` and configuration always give the same result. The seed
@@ -507,6 +522,19 @@ pub fn search_cancellable(
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &MctsConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<MctsResult, SolveError> {
+    search_progress_cancellable(seed, state, pokemon_dex, move_dex, config, None, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_progress_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &MctsConfig,
+    progress: Option<SampledProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<MctsResult, SolveError> {
     match state {
@@ -568,6 +596,20 @@ pub fn search_cancellable(
             break;
         }
         values.push(ctx.iterate(state, root_depth, root_chain));
+        if reports_iteration(values.count)
+            && let Some(progress) = progress
+        {
+            let root = ctx.tree.get(&root_key).expect("the root exists");
+            let mut stats = ctx.stats.clone();
+            stats.iterations = values.count;
+            stats.elapsed = started.elapsed();
+            progress(SampledRoot {
+                value: values.mean().clamp(LOSS, WIN),
+                p1_strategy: strategy_of(&root.p1_actions, &root.p1.average_strategy(), 0.0),
+                p2_strategy: strategy_of(&root.p2_actions, &root.p2.average_strategy(), 0.0),
+                stats,
+            });
+        }
     }
 
     // Every field that the report needs, read before the truncation record

@@ -640,8 +640,7 @@ pub struct TurnResponse {
 
 // ── Strategy rows ────────────────────────────────────────────────────────────
 // A strategy row renders one joint action of one mixed strategy. The tracker
-// panel shows both players, and a battle session shows Player 2 only when its
-// profile carries `revealStrategy`.
+// panel shows both players. A bot battle shows Player 2.
 
 /// One bring-and-lead choice of a team-preview strategy.
 #[derive(Serialize, Clone)]
@@ -669,9 +668,7 @@ pub struct StrategyRowDto {
 
 /// Player 2's mixed strategy at one battle position.
 ///
-/// A battle response carries this block only when the session profile holds
-/// `revealStrategy`. Without that setting the field is absent, so a default
-/// session sends no part of Player 2's plan.
+/// A bot battle response carries this block. A hotseat response does not.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct P2StrategyDto {
@@ -696,8 +693,7 @@ pub struct P2StrategyDto {
 /// of that action, no second action, and no win odds. The server returns it
 /// only with the resolved turn, so both commands are already locked.
 ///
-/// A session with `revealStrategy` also carries `strategy`, which holds the
-/// whole mixed strategy that the draw sampled from.
+/// A bot session also carries the mixed strategy that supplied the draw.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct P2RevealDto {
@@ -718,8 +714,7 @@ pub struct P2RevealDto {
     pub replay: Option<AnalysisReplayDto>,
     /// The strategy that the draw sampled from.
     ///
-    /// Absent unless the session profile holds `revealStrategy`, and absent for
-    /// either uniform draw, which reads no strategy.
+    /// Absent for a hotseat or uniform draw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy: Option<P2StrategyDto>,
 }
@@ -773,7 +768,7 @@ pub struct AnalysisProgressDto {
     pub turns_simulated: Option<u64>,
     /// The maximum turn simulations of the running job.
     pub simulation_turn_budget: Option<u64>,
-    /// The last complete answer.
+    /// The newest strategy checkpoint.
     /// A failure and a cancellation both keep it.
     pub checkpoint: Option<AnalysisCheckpointDto>,
     /// Why the last job produced no checkpoint.
@@ -785,8 +780,7 @@ pub struct AnalysisProgressDto {
 /// The row exposes the exact simulation count for progress. It does not expose
 /// a solver node count.
 ///
-/// A session with `revealStrategy` also carries `p2Strategy`. That setting is
-/// the one way a strategy row reaches this response.
+/// A bot session also carries `p2Strategy`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisCheckpointDto {
@@ -797,6 +791,10 @@ pub struct AnalysisCheckpointDto {
     pub turn_number: u16,
     /// The depth that the search reached.
     pub depth_reached: u8,
+    /// True when the solver completed this depth.
+    pub complete: bool,
+    /// Player 2's current estimated win rate.
+    pub p2_win_odds: f64,
     pub elapsed_ms: u64,
     pub turns_simulated: u64,
     /// The seed of this search, which makes the result reproducible.
@@ -805,9 +803,7 @@ pub struct AnalysisCheckpointDto {
     pub warnings: Vec<String>,
     /// Player 2's strategy at the position that this checkpoint answers.
     ///
-    /// Absent unless the session profile holds `revealStrategy`. Also absent
-    /// while the checkpoint is stale, because a stale strategy names actions of
-    /// an older position.
+    /// Absent for a hotseat or stale checkpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p2_strategy: Option<P2StrategyDto>,
 }

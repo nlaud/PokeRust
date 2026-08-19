@@ -76,6 +76,8 @@ The server accepts `replacementDepth` from 1 through 8 in a profile request.
 `solver::preview` solves the perfect-information preview.
 It runs double oracle over the 180 choices.
 It caches or precomputes the matrix cells.
+It reports the equilibrium after each completed double-oracle round.
+The server can therefore show the newest preview strategy before convergence.
 
 ### Parallel search
 
@@ -233,12 +235,12 @@ These files live in `poke_rust/src/bin/server/`.
 
 ### Simulator bot
 
-`analysis.rs` holds the generation, the running job, and the last checkpoint.
+`analysis.rs` holds the generation, the running job, and the newest checkpoint.
 `invalidate` raises the cancel flag of the running job.
 The generation check in `accept` drops a result that a state change made old.
 `solver::CancelFlag` stops a search that already runs.
-A state-change cancellation leaves the last complete checkpoint in place.
-An explicit finish request keeps the cancelled search result.
+A state-change cancellation leaves the old checkpoint in place and marks it stale.
+An explicit finish request keeps the newest checkpoint of the current search.
 
 Each job exit writes one console line, and each line names the exit that ran.
 The lines hold no count of P2's actions.
@@ -252,9 +254,9 @@ The client waits for the current analysis job until that job stops.
 One shared simulation-turn budget stops the full job.
 The budget covers all depth passes, preview worlds, and nested searches.
 Cached turns do not use the budget.
-`POST /api/battles/{id}/analysis` requests the current complete result.
-The cancel flag stops the active search, and the job keeps its last complete
-strategy for the draw.
+`POST /api/battles/{id}/analysis` requests the newest result.
+The cancel flag stops the active search. The job keeps the newest completed
+strategy checkpoint for the draw.
 A job that ends with no answer blocks one submission and reports the reason.
 The next submission plays the turn.
 
@@ -298,10 +300,10 @@ A cell whose simulation stops takes a static score.
 
 `tracker_analysis.rs` runs the same profile for a tracker session.
 It draws one world from the belief.
-An exact search runs one search for each depth through the configured depth.
-Each depth publishes a complete answer, so the panel moves while the search
-goes deeper. A sampled search starts at the requested depth. It runs until it
-uses the shared simulation-turn budget.
+An exact search uses iterative deepening inside one search. It finishes a lower
+depth before it starts a higher depth. All depths use one shared budget.
+A sampled search starts at the requested depth. It runs until it uses the
+shared simulation-turn budget.
 Each rung records its depth.
 The panel shows the exact number of claimed simulation turns.
 The progress bar compares that count with the shared job budget.
@@ -313,7 +315,8 @@ the true state.
 A position with no lead on either side is the team preview.
 The same module then searches the stored team-preview belief with
 `solve_open_list_preview`.
-It publishes one rung of bring-and-lead choices.
+It publishes each completed double-oracle strategy and then the final strategy.
+Each strategy contains bring-and-lead choices for both players.
 
 `frontend/README.md` explains the two panels that show these answers.
 
@@ -335,20 +338,20 @@ search statistics.
 A sampled answer also carries its iteration count, its world count, its seed,
 and the name of its leaf evaluator.
 
-The job publishes one answer at the end of each depth.
-An exact double-oracle search also publishes one answer after both
-best-response checks of each round.
-A round answer carries `complete: false`, and a rate limit holds those answers
-to one each 250 milliseconds.
-A depth answer ignores that limit.
+The job publishes the newest strategy during the search.
+An exact double-oracle search publishes after both best-response checks of each
+round. MCTS and ISMCTS publish after a completed iteration checkpoint. MCCFR
+publishes after a complete pair of player traversals. These checkpoints use
+work counts. They do not use elapsed time.
+A partial answer carries `complete: false`.
 
 `matrix::CellOracle` carries the round hook into the matrix solver.
 `solve_seeded_progress_cancellable` supplies that hook at the root position
 alone.
 
 A tracker answer carries both strategies.
-A battle answer carries the Player 2 strategy only when the profile holds
-`revealStrategy`.
+A battle answer carries the Player 2 strategy and win estimate for each bot
+checkpoint. A hotseat battle has no bot profile and carries no bot strategy.
 A committed turn cancels every job of that session.
 
 ## Research

@@ -134,7 +134,7 @@ export const useSolve = create<SolveStore>((set, get) => ({
         if (active()) set({ phase: 'failed', error: failed.message })
       },
       onCancelled: () => {
-        if (active()) set({ phase: 'cancelled', stale: get().complete !== null })
+        if (active()) set({ phase: 'cancelled', stale: false })
       },
       onAborted: (message) => {
         if (active()) set({ phase: 'failed', error: message })
@@ -162,7 +162,7 @@ export const useSolve = create<SolveStore>((set, get) => ({
     cancelStream?.()
     cancelStream = null
     if (jobId !== null) void api.cancelSolve(jobId).catch(() => undefined)
-    set({ phase: 'cancelled', jobId: null, stale: get().complete !== null, error: null })
+    set({ phase: 'cancelled', jobId: null, stale: get().live !== null, error: null })
   },
 
   reset: () => {

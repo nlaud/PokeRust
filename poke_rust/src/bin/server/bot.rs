@@ -98,31 +98,23 @@ impl BotAlgorithm {
 /// `analysis::random_seed` draws inside this range for the same reason.
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// The default simulation-turn budget of an exact search.
-///
-/// It is also the floor of the sampled default that
-/// [`default_simulation_turn_budget`] derives.
-pub const DEFAULT_SIMULATION_TURN_BUDGET: u64 = 1_000;
+pub const FAST_SIMULATION_TURN_BUDGET: u64 = 10_000;
+pub const BALANCED_SIMULATION_TURN_BUDGET: u64 = 100_000;
+pub const COMPETITIVE_SIMULATION_TURN_BUDGET: u64 = 500_000;
+pub const DEFAULT_SIMULATION_TURN_BUDGET: u64 = BALANCED_SIMULATION_TURN_BUDGET;
 
-/// Rollouts for each particle that the default budget of a sampled search buys.
-pub const DEFAULT_ROLLOUTS_PER_PARTICLE: u64 = 500;
-
-/// The ceiling of the derived default.
-///
-/// The maximum depth and the maximum particle count together derive a budget
-/// that runs for minutes. A default stays speed-first, so it stops here. A
-/// client that wants more sends the budget itself.
-pub const MAX_DEFAULT_SIMULATION_TURN_BUDGET: u64 = 100_000;
-
-pub const DEFAULT_DEPTH: u8 = 2;
+pub const DEFAULT_DEPTH: u8 = 3;
 pub const DEFAULT_DAMAGE_ROLLS: u8 = 1;
-pub const DEFAULT_PARTICLES: usize = 8;
+pub const DEFAULT_PARTICLES: usize = 16;
+pub const MAX_PARTICLES: usize = 32;
 
 /// The profile as the client sends it.
 /// Every field is optional. The server supplies speed-first defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BotProfileRequest {
+    /// One of `fast`, `balanced`, `competitive`, or `custom`.
+    pub preset: Option<String>,
     /// Defaults to `doubleOracle`.
     ///
     /// `routes::resolve_bot_p2` fills an absent field before this call, because
@@ -131,9 +123,7 @@ pub struct BotProfileRequest {
     pub algorithm: Option<String>,
     /// The turn simulations that the whole search may spend.
     ///
-    /// An absent field takes the default of
-    /// [`default_simulation_turn_budget`], which reads the depth and the
-    /// particle count. A field that is present is used as it stands.
+    /// An absent field takes the fixed budget of the selected preset.
     pub simulation_turn_budget: Option<u64>,
     pub depth: Option<u8>,
     pub damage_rolls: Option<u8>,
@@ -146,12 +136,8 @@ pub struct BotProfileRequest {
     /// Makes a sampled search reproducible.
     /// The maximum is JavaScript's largest safe integer.
     pub seed: Option<u64>,
-    /// Shows Player 2's strategy to the client. Defaults to false.
-    ///
-    /// A battle session reads this field. It is the fog-of-war boundary of the
-    /// two battle endpoints: without it, no response carries a Player 2 strategy
-    /// row. A tracker session already returns both strategies, because the
-    /// tracker user typed both rosters, so it ignores the field.
+    /// Kept for request compatibility. Bot sessions always show the strategy.
+    #[allow(dead_code)]
     pub reveal_strategy: Option<bool>,
 }
 
@@ -276,29 +262,14 @@ pub struct BotProfile {
     pub search: BotSearchConfig,
 }
 
-/// The default simulation-turn budget of one resolved profile.
-///
-/// A sampled search runs until the budget stops it, and one rollout costs about
-/// one turn simulation for each turn of depth. One rollout also reads one
-/// particle. A flat budget therefore buys fewer rollouts for each particle at
-/// every higher depth and at every larger particle count, so both controls look
-/// like they make the answer worse. This default holds the rollouts for each
-/// particle steady instead.
-///
-/// An exact search runs no rollouts, so it keeps the flat budget.
-///
-/// A budget that the client sends is never scaled. `frontend/src/components/
-/// solver/solverSettings.ts` repeats this rule, so the interface can show the
-/// derived number.
-fn default_simulation_turn_budget(exact: bool, depth: u8, particles: Option<usize>) -> u64 {
-    if exact {
-        return DEFAULT_SIMULATION_TURN_BUDGET;
+fn preset_limits(scope: &str, preset: Option<&str>) -> Result<(u64, u8, usize), String> {
+    match preset.unwrap_or("balanced") {
+        "fast" => Ok((FAST_SIMULATION_TURN_BUDGET, 2, 8)),
+        "balanced" => Ok((BALANCED_SIMULATION_TURN_BUDGET, 3, 16)),
+        "competitive" => Ok((COMPETITIVE_SIMULATION_TURN_BUDGET, 4, 32)),
+        "custom" => Ok((DEFAULT_SIMULATION_TURN_BUDGET, DEFAULT_DEPTH, DEFAULT_PARTICLES)),
+        name => Err(format!("{scope}.preset: unknown preset {name:?}")),
     }
-    let particles = particles.unwrap_or(1).max(1) as u64;
-    (DEFAULT_ROLLOUTS_PER_PARTICLE * particles * depth as u64).clamp(
-        DEFAULT_SIMULATION_TURN_BUDGET,
-        MAX_DEFAULT_SIMULATION_TURN_BUDGET,
-    )
 }
 
 /// Rejects a value outside its permitted range.
@@ -331,6 +302,8 @@ fn reject_unused(scope: &str, present: bool, field: &str, reason: &str) -> Resul
 /// passes `botP2`, and the tracker analysis endpoint passes `analysis`.
 ///
 pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, String> {
+    let (preset_budget, preset_depth, preset_particles) =
+        preset_limits(scope, req.preset.as_deref())?;
     let algorithm = match &req.algorithm {
         Some(name) => BotAlgorithm::from_wire(scope, name)?,
         None => BotAlgorithm::DoubleOracle,
@@ -349,7 +322,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         "a seed applies only to a sampling algorithm",
     )?;
 
-    let depth = req.depth.unwrap_or(DEFAULT_DEPTH);
+    let depth = req.depth.unwrap_or(preset_depth);
     check_range(scope, "depth", depth, 1, 8)?;
     let replacement_depth = match req.replacement_depth {
         Some(value) => {
@@ -363,21 +336,19 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
     let consider_crit = req.consider_crit.unwrap_or(false);
     let particles = match req.particles {
         Some(value) => {
-            check_range(scope, "particles", value, 1, 512)?;
+            check_range(scope, "particles", value, 1, MAX_PARTICLES)?;
             value
         }
-        None => DEFAULT_PARTICLES,
+        None => preset_particles,
     };
     let exact = algorithm.is_exact();
     if let Some(seed) = req.seed {
         check_range(scope, "seed", seed, 0, MAX_SAFE_INTEGER)?;
     }
     let particles = algorithm.uses_particles().then_some(particles);
-    // The budget resolves last, because an absent field reads the depth, the
-    // particle count, and whether the algorithm samples.
     let simulation_turn_budget = req
         .simulation_turn_budget
-        .unwrap_or_else(|| default_simulation_turn_budget(exact, depth, particles));
+        .unwrap_or(preset_budget);
     check_range(
         scope,
         "simulationTurnBudget",
@@ -444,7 +415,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
             workers: search_workers(&search),
             particles,
             seed: req.seed,
-            reveal_strategy: req.reveal_strategy.unwrap_or(false),
+            reveal_strategy: true,
             approximations,
         },
         search,
@@ -550,11 +521,11 @@ mod current_tests {
     use super::*;
 
     #[test]
-    fn an_empty_request_uses_speed_first_defaults() {
+    fn an_empty_request_uses_balanced_defaults() {
         let profile = resolve("botP2", &BotProfileRequest::default()).unwrap();
         assert_eq!(profile.view.algorithm, "doubleOracle");
-        assert_eq!(profile.view.simulation_turn_budget, 1_000);
-        assert_eq!(profile.view.depth, 2);
+        assert_eq!(profile.view.simulation_turn_budget, 100_000);
+        assert_eq!(profile.view.depth, 3);
         assert_eq!(profile.view.damage_rolls, 1);
         assert!(!profile.view.consider_crit);
         match profile.search {
@@ -591,60 +562,45 @@ mod current_tests {
         assert_eq!(profile.search.first_depth(3), 3);
     }
 
-    /// A sampled search that names no budget keeps its rollout count as the
-    /// depth grows. A flat budget would divide the same turns over deeper paths.
     #[test]
-    fn the_default_budget_of_a_sampled_search_grows_with_the_depth() {
-        let mut previous = 0;
-        for depth in 1..=8 {
+    fn each_preset_has_fixed_limits() {
+        for (preset, budget, depth, particles) in [
+            ("fast", 10_000, 2, 8),
+            ("balanced", 100_000, 3, 16),
+            ("competitive", 500_000, 4, 32),
+        ] {
             let request = BotProfileRequest {
-                algorithm: Some("mcts".to_string()),
-                depth: Some(depth),
+                preset: Some(preset.to_string()),
+                algorithm: Some("ismcts".to_string()),
                 ..BotProfileRequest::default()
             };
-            let budget = resolve("botP2", &request).unwrap().view.simulation_turn_budget;
-            // The floor holds the two shallowest depths at the flat budget.
-            assert_eq!(
-                budget,
-                (DEFAULT_ROLLOUTS_PER_PARTICLE * depth as u64).max(DEFAULT_SIMULATION_TURN_BUDGET)
-            );
-            assert!(budget >= previous, "depth {depth} must not lower the budget");
-            previous = budget;
+            let profile = resolve("botP2", &request).unwrap();
+            assert_eq!(profile.view.simulation_turn_budget, budget);
+            assert_eq!(profile.view.depth, depth);
+            assert_eq!(profile.view.particles, Some(particles));
         }
-        assert!(previous > DEFAULT_SIMULATION_TURN_BUDGET, "depth 8 must raise it");
     }
 
-    /// One rollout reads one particle, so a larger set needs more rollouts to
-    /// give each particle the same number of visits.
     #[test]
-    fn the_default_budget_of_a_belief_search_grows_with_the_particles() {
+    fn a_depth_override_does_not_scale_the_budget() {
         let request = BotProfileRequest {
-            algorithm: Some("ismcts".to_string()),
-            particles: Some(8),
+            preset: Some("fast".to_string()),
+            algorithm: Some("mcts".to_string()),
+            depth: Some(8),
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
-        assert_eq!(profile.view.particles, Some(8));
-        assert_eq!(
-            profile.view.simulation_turn_budget,
-            DEFAULT_ROLLOUTS_PER_PARTICLE * 8 * DEFAULT_DEPTH as u64
-        );
+        assert_eq!(profile.view.simulation_turn_budget, FAST_SIMULATION_TURN_BUDGET);
     }
 
-    /// The derived default stays speed-first at the largest limits.
     #[test]
-    fn the_derived_default_stops_at_the_ceiling() {
+    fn particles_stop_at_32() {
         let request = BotProfileRequest {
             algorithm: Some("mccfr".to_string()),
-            depth: Some(8),
-            particles: Some(512),
+            particles: Some(33),
             ..BotProfileRequest::default()
         };
-        let profile = resolve("analysis", &request).unwrap();
-        assert_eq!(
-            profile.view.simulation_turn_budget,
-            MAX_DEFAULT_SIMULATION_TURN_BUDGET
-        );
+        assert!(resolve("analysis", &request).unwrap_err().contains("particles"));
     }
 
     /// The scaling reads an absent field alone.
@@ -654,7 +610,7 @@ mod current_tests {
             algorithm: Some("ismcts".to_string()),
             simulation_turn_budget: Some(1_000),
             depth: Some(8),
-            particles: Some(64),
+            particles: Some(32),
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
@@ -746,26 +702,20 @@ mod current_tests {
         );
     }
 
-    /// One rollout of a sampled search reads one particle, and one world of a
-    /// PIMC search takes one share of the budget. Both scale the same way.
     #[test]
-    fn the_default_budget_of_a_pimc_profile_grows_with_the_particles() {
+    fn the_default_budget_of_a_pimc_profile_is_fixed() {
         let request = BotProfileRequest {
             algorithm: Some("pimc".to_string()),
             particles: Some(4),
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
-        assert_eq!(
-            profile.view.simulation_turn_budget,
-            DEFAULT_ROLLOUTS_PER_PARTICLE * 4 * DEFAULT_DEPTH as u64
-        );
+        assert_eq!(profile.view.simulation_turn_budget, DEFAULT_SIMULATION_TURN_BUDGET);
     }
 
     #[test]
     fn old_wire_fields_are_rejected() {
         for body in [
-            r#"{"preset":"fast"}"#,
             r#"{"timeMs":1000}"#,
             r#"{"nodeBudget":1000}"#,
             r#"{"iterations":200}"#,

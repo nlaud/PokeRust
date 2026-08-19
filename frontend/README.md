@@ -154,15 +154,15 @@ The load path replaces a stored pair the same way.
   It also shows a "Choose current move" button and a "Change my move" button.
 - After the turn resolves it shows the drawn command and the draw source.
 
-The profile, progress, strategy, and reveal use one expandable card.
+The profile, progress, strategy, win estimate, and reveal use one expandable card.
 Approximation notes appear only while the user points to or focuses the
 `Approx.` control.
 
 The client waits for the current analysis job until that job stops.
 The shared simulation-turn budget stops the full job.
 The progress bar compares the exact count with that budget.
-`POST /api/battles/{id}/analysis` stops the search and keeps its current
-complete strategy.
+`POST /api/battles/{id}/analysis` stops the search and keeps its newest
+completed strategy checkpoint.
 A job that ends with no answer blocks one submission and reports the reason.
 The next submission plays the turn.
 
@@ -170,20 +170,15 @@ The panel marks a uniform draw with a warning.
 `poke_rust/src/solver/README.md` explains when the server falls back to that
 draw.
 
-### Show the opponent strategy
+### Opponent strategy
 
-The setup panel holds one checkbox under the P2 solver profile.
-The checkbox sets `botP2.revealStrategy` on the create request.
-The setting is off by default.
+A bot session always shows its newest strategy and win estimate.
+A hotseat battle holds no bot profile, so it shows no bot strategy.
 
-The server is the gate.
-A session without the setting sends no P2 strategy row.
-A hotseat battle holds no profile, so it never sends one.
-
-A session with the setting reads two strategies:
+A bot session reads two strategies:
 
 1. `GET /api/battles/{id}/analysis` carries the strategy of the current
-   position. `P2RevealPanel.tsx` reads it once each second.
+   position. `P2RevealPanel.tsx` keeps this value current during the search.
 2. `POST /api/battles/{id}/turn` carries the strategy that supplied the drawn
    command. The response also names the row of that command.
 
@@ -194,8 +189,7 @@ The response includes every positive-rate row.
 Only a checkpoint of the current position carries rows.
 A stale answer names actions of an older position.
 
-This setting shows you what P2 plans.
-Keep it off for a fair battle.
+The shared top menu shows the newest win estimate and highest-rate action.
 
 ## Tracker mode
 
@@ -249,8 +243,8 @@ An open panel grows upward, and it scrolls only when it passes the window.
 Approximation notes appear only while the user points to or focuses the
 `Approx.` control.
 
-Open the panel, select an algorithm, set the raw limits, and start the search.
-The controls hold the same knobs as the simulator setup panel.
+Open the panel, select an algorithm, and start the search.
+Set the solver limits in the Settings sidebar.
 
 Both panels expose these limits:
 
@@ -259,13 +253,14 @@ Both panels expose these limits:
 - Damage rolls and critical-hit branches.
 - Particles for a belief search.
 
-The simulation-turn budget holds a "Scale automatically" box.
-A checked box sends no budget, and the server derives one.
-A sampled search spends about one turn simulation for each turn of depth, and
-one rollout reads one particle.
-The derived budget multiplies both numbers, so a deeper search keeps its
-rollout count instead of losing accuracy.
-Clear the box to set the budget directly.
+The Settings sidebar supplies three presets:
+
+- Fast uses 10,000 simulation turns, depth 2, and 8 particles.
+- Balanced uses 100,000 simulation turns, depth 3, and 16 particles.
+- High uses 500,000 simulation turns, depth 4, and 32 particles.
+
+Advanced limits create a custom preset. The particle limit is 32.
+The server never scales the simulation-turn budget by depth or particle count.
 
 These damage settings apply only to solver searches.
 A played simulator turn still uses 16 damage rolls and critical-hit branches.
@@ -291,16 +286,16 @@ It sends one answer for each world that it finishes.
 A `doubleOracle` profile is exact for its depth, and it reads the drawn world
 alone.
 
-An exact search runs one search for each depth through the configured depth.
-Each depth sends a complete answer. A `doubleOracle` search also sends one
-answer after each round. The numbers move while the search goes deeper.
+An exact search finishes each lower depth before it starts the next depth.
+The depths share one simulation-turn budget. A `doubleOracle` search sends one
+answer after each completed round.
 
-A sampled search starts at the requested depth.
-It runs until it uses the shared simulation-turn budget.
+A sampled search starts at the requested depth. It sends deterministic
+iteration checkpoints until it uses the shared simulation-turn budget.
+MCCFR sends a checkpoint only after both player traversals finish.
 
-The store keeps the last complete answer while the next depth runs.
-The panel shows that answer, the depth in progress, and the count of answers so
-far.
+The store keeps the newest answer, including a partial answer.
+The panel and the shared top menu show that answer while the search continues.
 It also shows the exact simulation count for the full job.
 
 The panel compares the last two complete answers.
@@ -326,7 +321,10 @@ The answer names the count, because one world gives the whole answer one guess
 of the opponent's hidden data.
 
 The panel shows the win odds of both players.
-The tracker user typed both rosters, so both complete strategies appear.
+The tracker user typed both rosters, so both strategies appear.
+The first strategy appears after the first completed double-oracle round.
+Each later round replaces it, and the final result replaces the last partial
+strategy.
 A belief search mixes the opponent's private builds.
 The panel labels that list as a summary, not as one playable strategy.
 

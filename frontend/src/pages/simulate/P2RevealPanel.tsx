@@ -21,7 +21,7 @@ const SOURCE_LABELS: Record<P2Reveal['source'], string> = {
 const UNIFORM_NOTE =
   'Player 2 picked one legal command at random. The search supplied no strategy that Player 2 can play here.'
 
-const POLL_MS = 1000
+const POLL_MS = 250
 
 function limitLine(profile: BotProfileView): string {
   const parts = [
@@ -111,6 +111,7 @@ export default function P2RevealPanel() {
     botP2,
     p2Reveal,
     p2Strategy,
+    botAnalysis,
     refreshP2Strategy,
     waitingForBot,
     botTurnProgress,
@@ -120,7 +121,7 @@ export default function P2RevealPanel() {
   const [open, setOpen] = useState(false)
   const [finishing, setFinishing] = useState(false)
 
-  const polls = Boolean(botP2?.revealStrategy) && view !== null && view.phase !== 'gameOver'
+  const polls = botP2 !== null && view !== null && view.phase !== 'gameOver'
   useEffect(() => {
     if (!polls) return
     void refreshP2Strategy()
@@ -137,12 +138,13 @@ export default function P2RevealPanel() {
   const drawnStrategy = p2Reveal?.strategy ?? null
   const played = p2Reveal !== null && p2Reveal.commands.length > 0
   const progress = botTurnProgress
+  const topStrategy = p2Strategy?.rows[0]
   const summary = waitingForBot
     ? 'Player 2 is thinking…'
     : played && p2Reveal
       ? p2Reveal.commands.map((option) => option.description).join(' · ')
       : p2Strategy
-        ? 'Strategy ready'
+        ? `P2 ${percent(botAnalysis?.p2WinOdds ?? 0.5)} to win · ${topStrategy ? `${actionLabel(topStrategy)} (${percent(topStrategy.probability)})` : 'no move'}${botAnalysis?.complete ? '' : ' · partial'}`
         : 'Preparing strategy'
 
   return (
@@ -160,11 +162,9 @@ export default function P2RevealPanel() {
           <span className="rounded-card bg-primary px-2 py-0.5 font-semibold text-white">P2 solver</span>
           <span className="font-semibold">{ALGORITHM_LABELS[botP2.algorithm]}</span>
           <span className="truncate text-ink-muted">{summary}</span>
-          {botP2.revealStrategy && (
-            <span data-testid="bot-badge-reveal" className="rounded-card bg-warning/15 px-2 py-0.5 font-semibold text-warning">
-              strategy shown
-            </span>
-          )}
+          <span data-testid="bot-badge-reveal" className="rounded-card bg-warning/15 px-2 py-0.5 font-semibold text-warning">
+            live strategy
+          </span>
           <span aria-hidden className="ml-auto text-ink-muted">{open ? '▾' : '▸'}</span>
         </button>
         <NotesTooltip lines={botP2.approximations} />
@@ -214,6 +214,12 @@ export default function P2RevealPanel() {
       {open && (
         <div className="mt-2 border-t border-subtle pt-2" data-testid="bot-badge-detail">
           <p className="text-ink-muted">{limitLine(botP2)}</p>
+          {botAnalysis && (
+            <p className="mt-1 font-semibold" data-testid="bot-win-odds">
+              Player 2 win estimate {percent(botAnalysis.p2WinOdds)} · depth {botAnalysis.depthReached}
+              {botAnalysis.complete ? '' : ' · partial round'}
+            </p>
+          )}
           {(played || p2Strategy || drawnStrategy) && (
             <div data-testid="p2-reveal" className="mt-2 border-t border-subtle pt-2">
               {played && p2Reveal && (

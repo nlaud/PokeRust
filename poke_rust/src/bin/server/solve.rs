@@ -32,12 +32,9 @@
 //!
 //! # What the answers carry
 //!
-//! The job publishes one answer at the end of each depth. An exact double-oracle
-//! search also publishes one answer after both best-response checks of each
+//! The job publishes completed strategy checkpoints while it runs. An exact
+//! double-oracle search publishes after both best-response checks of each
 //! round. A round answer carries `complete: false`.
-//!
-//! A rate limit holds the round answers to one each 250 milliseconds. A depth
-//! answer ignores that limit, so a complete answer is never dropped.
 //!
 //! # Fog of war
 //!
@@ -70,7 +67,9 @@ use poke_rust::information::unknowns::{
     UnknownBattleState, UnknownMatchState, UnknownTeamPreviewState,
 };
 use poke_rust::meta::{MetaDex, MetaFormat};
-use poke_rust::solver::preview::{OpenListConfig, PreviewConfig, solve_open_list_preview_cancellable};
+use poke_rust::solver::preview::{
+    OpenListConfig, PreviewConfig, PreviewRound, solve_open_list_preview_progress_cancellable,
+};
 use poke_rust::solver::{self, CancelFlag, RootRound};
 use poke_rust::state::battle::{BattleState, MatchState, Player};
 
@@ -82,12 +81,6 @@ use crate::tracker_analysis::{
     PositionKind, RungResult, RungSampling, SearchInputs, TrackerStrategyRow, preview_rows,
     strategy_rows,
 };
-
-/// The smallest gap between two round answers.
-///
-/// A double-oracle round can finish in a few milliseconds, and a browser cannot
-/// paint that fast. A depth answer ignores this gap.
-const MIN_UPDATE_GAP: Duration = Duration::from_millis(250);
 
 /// How many events the channel holds before a send waits.
 ///
@@ -548,22 +541,11 @@ struct Publisher<'a> {
     started: Instant,
     reveal_p2: bool,
     revision: Cell<u64>,
-    last_sent: Cell<Option<Instant>>,
     /// The deepest complete answer that this job already sent.
     deepest: Cell<u8>,
 }
 
 impl Publisher<'_> {
-    /// True when the rate limit would drop a round answer now.
-    ///
-    /// The round hook calls this before it renders any row, because rendering a
-    /// strategy costs more than the check.
-    fn round_is_too_soon(&self) -> bool {
-        self.last_sent
-            .get()
-            .is_some_and(|last| last.elapsed() < MIN_UPDATE_GAP)
-    }
-
     /// Builds the wire answer.
     ///
     /// The Player 2 rows leave the answer here when the profile hides them.
@@ -600,9 +582,7 @@ impl Publisher<'_> {
 
     /// Sends one answer, and returns true when it went out.
     ///
-    /// A complete answer always goes out. A round answer waits for the rate
-    /// limit, and it takes a lossy send, so a slow client never slows the
-    /// search.
+    /// Every completed checkpoint goes out in revision order.
     fn send(&self, answer: Answer) -> bool {
         if answer.complete {
             // A depth that is not deeper than the deepest complete answer would
@@ -611,21 +591,13 @@ impl Publisher<'_> {
                 return false;
             }
             self.deepest.set(answer.depth);
-        } else if self.round_is_too_soon() {
-            return false;
         }
 
         let revision = self.revision.get();
-        let complete = answer.complete;
         let sent = event("update", self.update_dto(answer, revision));
-        let delivered = if complete {
-            self.tx.blocking_send(sent).is_ok()
-        } else {
-            self.tx.try_send(sent).is_ok()
-        };
+        let delivered = self.tx.blocking_send(sent).is_ok();
         if delivered {
             self.revision.set(revision + 1);
-            self.last_sent.set(Some(Instant::now()));
         }
         delivered
     }
@@ -675,7 +647,6 @@ fn run_job(
         started: Instant::now(),
         reveal_p2: inputs.reveal_p2,
         revision: Cell::new(0),
-        last_sent: Cell::new(None),
         deepest: Cell::new(0),
     };
     let meta = inputs
@@ -701,7 +672,7 @@ fn run_job(
     }
 }
 
-/// Runs one rung for each depth, and publishes each complete rung.
+/// Runs the configured search and publishes each completed checkpoint.
 fn run_battle_ladder(
     inputs: &JobInputs,
     meta: &MetaDex,
@@ -751,18 +722,17 @@ fn run_battle_ladder(
     let notes = fixed_notes(inputs, draw_warnings);
     let p2_is_playable = crate::tracker_analysis::p2_strategy_is_playable(inputs.search);
 
-    let first_depth = inputs.search.first_depth(inputs.target_depth);
+    let first_depth = if matches!(inputs.search, BotSearchConfig::Exact(_)) {
+        inputs.target_depth
+    } else {
+        inputs.search.first_depth(inputs.target_depth)
+    };
     for depth in first_depth..=inputs.target_depth {
         if cancel.is_cancelled() {
             return Ok(());
         }
         let search = inputs.search.with_depth(depth);
-        // The hook fires between two matrix cells, so it must stay short. The
-        // rate check comes before the row rendering for that reason.
         let round = |round: RootRound| {
-            if publisher.round_is_too_soon() {
-                return;
-            }
             publisher.send(Answer {
                 depth: round.depth,
                 complete: false,
@@ -777,12 +747,28 @@ fn run_battle_ladder(
                 warnings: notes.clone(),
             });
         };
+        let sampled = |root: solver::mcts::SampledRoot| {
+            publisher.send(Answer {
+                depth,
+                complete: false,
+                value: root.value,
+                p1_win_odds: root.value,
+                p2_win_odds: 1.0 - root.value,
+                p1_strategy: strategy_rows(&battle, Player::P1, &root.p1_strategy),
+                p2_strategy: strategy_rows(&battle, Player::P2, &root.p2_strategy),
+                p2_is_playable,
+                stats: crate::tracker_analysis::sampled_stats(&root.stats),
+                sampling: None,
+                warnings: notes.clone(),
+            });
+        };
 
         let rung = crate::tracker_analysis::one_search(
             search,
             &search_inputs,
             &state,
             Some(&round),
+            Some(&sampled),
             cancel,
         )?;
         // A cancelled search returns the work that finished, which is not a
@@ -852,10 +838,11 @@ fn complete_answer(
     }
 }
 
-/// Searches the team preview and publishes one answer.
+/// Searches the team preview and publishes each completed strategy.
 ///
 /// The preview search runs double oracle one time over the whole choice matrix,
-/// so it has no depth ladder.
+/// so it has no depth ladder. Each double-oracle round publishes a partial
+/// answer. The converged strategy publishes the final answer.
 fn run_preview(
     inputs: &JobInputs,
     meta: &MetaDex,
@@ -878,13 +865,39 @@ fn run_preview(
     };
     let determinize = crate::tracker_analysis::belief_draw_config(&inputs.inference);
 
-    let result = solve_open_list_preview_cancellable(
+    let round = |round: PreviewRound| {
+        publisher.send(Answer {
+            depth,
+            complete: false,
+            value: round.value,
+            p1_win_odds: round.value,
+            p2_win_odds: 1.0 - round.value,
+            p1_strategy: preview_rows(&belief.p1_mons, &round.p1_strategy),
+            p2_strategy: preview_rows(&belief.p2_mons, &round.p2_strategy),
+            p2_is_playable: true,
+            stats: solver::SolveStats {
+                turns_simulated: round.stats.turns_simulated,
+                matrix_cells_evaluated: round.stats.cells_evaluated,
+                matrix_cells_total: round.stats.cells_total,
+                lps_solved: round.stats.lps_solved,
+                elapsed: round.stats.elapsed,
+                ..solver::SolveStats::default()
+            },
+            sampling: None,
+            warnings: vec![
+                crate::tracker_analysis::PREVIEW_MEAN_MATRIX_NOTE.to_string(),
+                crate::tracker_analysis::preview_worlds_note(config.worlds),
+            ],
+        });
+    };
+    let result = solve_open_list_preview_progress_cancellable(
         belief,
         meta,
         &inputs.dexes.pokemon_dex,
         &inputs.dexes.move_dex,
         &config,
         &determinize,
+        Some(&round),
         Some(cancel),
     )
     .map_err(crate::tracker_analysis::engine_error)?;
@@ -948,7 +961,6 @@ mod tests {
             started: Instant::now(),
             reveal_p2,
             revision: Cell::new(0),
-            last_sent: Cell::new(None),
             deepest: Cell::new(0),
         }
     }
@@ -998,22 +1010,18 @@ mod tests {
         assert!(json.contains("\"depthTarget\":2"), "{json}");
     }
 
-    /// A round answer must wait for the rate limit. A depth answer must never
-    /// wait, because losing it would strand the panel on an old depth.
+    /// The stream sends each completed checkpoint.
     #[test]
-    fn the_rate_limit_drops_a_round_answer_and_never_a_depth_answer() {
+    fn each_checkpoint_is_sent() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16);
         let publisher = publisher(&tx, true);
 
         assert!(publisher.send(answer(1, false)));
-        // The gap has not passed, so the next round answer goes nowhere.
-        assert!(publisher.round_is_too_soon());
-        assert!(!publisher.send(answer(1, false)));
-        // The depth answer ignores the gap.
+        assert!(publisher.send(answer(1, false)));
         assert!(publisher.send(answer(1, true)));
 
-        assert_eq!(publisher.updates(), 2);
-        assert_eq!(delivered(&mut rx), 2);
+        assert_eq!(publisher.updates(), 3);
+        assert_eq!(delivered(&mut rx), 3);
     }
 
     /// A depth that is not deeper than the deepest complete answer would step

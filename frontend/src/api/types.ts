@@ -255,6 +255,7 @@ export type BotAlgorithm =
  * Every field is optional. The server supplies each absent field.
  * The server rejects a limit that the algorithm cannot read. */
 export interface BotProfileRequest {
+  preset?: 'fast' | 'balanced' | 'competitive' | 'custom'
   /** As `botP2`, an absent value takes the search of the information mode.
    * A fog-of-war mode takes `ismcts`, and Perfect Information takes
    * `doubleOracle`. The response reports the name in `botP2.algorithm`.
@@ -275,12 +276,7 @@ export interface BotProfileRequest {
   /** Makes a sampled search reproducible.
    * The maximum value is `Number.MAX_SAFE_INTEGER`. */
   seed?: number
-  /** Shows Player 2's strategy to this client. Defaults to false.
-   *
-   * A battle session reads this field, and it is the fog-of-war boundary of
-   * both battle endpoints: without it, no response carries a Player 2 strategy
-   * row. A tracker session already returns both strategies, so it ignores the
-   * field. */
+  /** Kept for compatibility. Bot sessions always show the strategy. */
   revealStrategy?: boolean
 }
 
@@ -303,7 +299,7 @@ export interface BotProfileView {
   workers: number
   particles: number | null
   seed: number | null
-  /** True when this client may read Player 2's strategy. */
+  /** Always true for a bot profile. */
   revealStrategy: boolean
   /** Each reason that the result can differ from the exact answer. */
   approximations: string[]
@@ -382,8 +378,7 @@ export interface TurnResponse {
 
 // ── Strategy rows ───────────────────────────────────────────────────────────
 // A strategy row renders one joint action of one mixed strategy. The tracker
-// panel shows both players, and a battle session shows Player 2 only when its
-// profile carries `revealStrategy`.
+// panel shows both players. A bot battle shows Player 2.
 
 /** One bring-and-lead choice of a team-preview strategy. */
 export interface PreviewChoice {
@@ -405,11 +400,7 @@ export interface StrategyRow {
   probability: number
 }
 
-/** Player 2's mixed strategy at one battle position.
- *
- * A battle response carries this block only when the session profile holds
- * `revealStrategy`. Without that setting the field is absent, so a default
- * session reads no part of Player 2's plan. */
+/** Player 2's mixed strategy at one battle position. */
 export interface P2Strategy {
   /** Which question this block answers.
    * A `teamPreview` block answers the bring-and-lead choice. */
@@ -431,8 +422,7 @@ export interface P2Strategy {
  * of that action, no second action, and no win odds. The server returns it only
  * with the resolved turn, so both commands are already locked.
  *
- * A session with `revealStrategy` also carries `strategy`, which holds the
- * whole mixed strategy that the draw sampled from. */
+ * A bot session also carries the strategy that supplied the draw. */
 export interface P2Reveal {
   /** The drawn command of each active slot, rendered against the position
    * before the turn.
@@ -449,8 +439,7 @@ export interface P2Reveal {
   replay?: AnalysisReplay
   /** The strategy that the draw sampled from.
    *
-   * Absent unless the session profile holds `revealStrategy`, and absent for
-   * either uniform draw, which reads no strategy. */
+   * Absent for a hotseat or uniform draw. */
   strategy?: P2Strategy
 }
 
@@ -485,6 +474,10 @@ export interface AnalysisCheckpoint {
   turnNumber: number
   /** The depth that the search reached. */
   depthReached: number
+  /** True when the solver completed this depth. */
+  complete: boolean
+  /** Player 2's current estimated win rate. */
+  p2WinOdds: number
   elapsedMs: number
   /** The uncached turns that the full search simulated. */
   turnsSimulated: number
@@ -495,20 +488,15 @@ export interface AnalysisCheckpoint {
   warnings: string[]
   /** Player 2's strategy at the position that this checkpoint answers.
    *
-   * Absent unless the session profile holds `revealStrategy`. Also absent
-   * while the checkpoint is stale, because a stale strategy names actions of
-   * an older position. */
+   * Absent for a stale checkpoint because its actions belong to an older
+   * position. */
   p2Strategy?: P2Strategy
 }
 
-/** The private progress of the P2 analysis job.
+/** The progress of the P2 analysis job.
  *
- * `GET /api/battles/{id}/analysis` returns progress alone. It carries no P2
- * action, no P2 strategy, and no P2 win odds, because P1 reads the same
- * endpoint during a hotseat battle.
- *
- * One session breaks that rule on purpose: a profile with `revealStrategy`
- * asks for P2's strategy, and the checkpoint then carries it. */
+ * A bot session includes the newest P2 strategy and win estimate. A hotseat
+ * session has no bot analysis. */
 export interface AnalysisProgressResponse {
   /** The generation of the current position.
    * Every state change raises it by one. */
@@ -520,7 +508,7 @@ export interface AnalysisProgressResponse {
   turnsSimulated: number | null
   /** The turn limit of the running job. */
   simulationTurnBudget: number | null
-  /** The last complete answer.
+  /** The newest strategy checkpoint.
    * A failure and a cancellation both keep it. */
   checkpoint: AnalysisCheckpoint | null
   /** Why the last job produced no checkpoint. */
@@ -596,7 +584,7 @@ export interface TrackerAnalysisResponse {
   /** The rung that runs now.
    * `null` when no job runs, and before the first rung starts. */
   rung: TrackerAnalysisRung | null
-  /** The newest complete rung.
+  /** The newest strategy checkpoint.
    * A failure and a cancellation both keep it. */
   checkpoint: TrackerAnalysisCheckpoint | null
   /** Player 1's win odds at the position before the current one. */
@@ -856,8 +844,7 @@ export interface SolveUpdate {
   p1Strategy: StrategyRow[]
   /** The complete mixed strategy of Player 2.
    *
-   * A battle job sends null unless the profile holds `revealStrategy`. A
-   * tracker job always sends the rows. */
+   * A tracker job always sends the rows. */
   p2Strategy: StrategyRow[] | null
   /** True when the Player 2 rows form one strategy for one private state. */
   p2StrategyIsPlayable: boolean

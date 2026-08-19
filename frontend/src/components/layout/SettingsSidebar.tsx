@@ -1,6 +1,8 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import MusicPlayer from './MusicPlayer'
 import { useSettings, type Theme } from '../../store/settingsStore'
+import SolverControls from '../solver/SolverControls'
+import type { SolverPreset } from '../solver/solverSettings'
 
 const sunIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -29,8 +31,25 @@ const themes: { value: Theme; label: string; icon: ReactNode }[] = [
 ]
 
 export default function SettingsSidebar() {
-  const { sidebarOpen, setSidebarOpen, theme, setTheme, customBackground, customAccent, setCustomColors } =
-    useSettings()
+  const {
+    sidebarOpen,
+    setSidebarOpen,
+    theme,
+    setTheme,
+    customBackground,
+    customAccent,
+    setCustomColors,
+    solverPreset,
+    solverSettings,
+    setSolverPreset,
+    setSolverSettings,
+  } = useSettings()
+  const [advanced, setAdvanced] = useState(false)
+  const presets: { value: SolverPreset; label: string; detail: string }[] = [
+    { value: 'fast', label: 'Fast', detail: '10K turns' },
+    { value: 'balanced', label: 'Balanced', detail: '100K turns' },
+    { value: 'competitive', label: 'High', detail: '500K turns' },
+  ]
 
   // Keep the sidebar and MusicPlayer mounted.
   // CSS hides the sidebar without restarting audio.
@@ -44,7 +63,7 @@ export default function SettingsSidebar() {
         aria-hidden
       />
       <aside
-        className={`absolute right-0 top-0 flex h-full w-80 flex-col bg-card p-6 shadow-xl transition-transform duration-200 ${
+        className={`absolute right-0 top-0 flex h-full w-96 max-w-full flex-col overflow-y-auto bg-card p-6 shadow-xl transition-transform duration-200 ${
           sidebarOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
@@ -103,6 +122,44 @@ export default function SettingsSidebar() {
                   aria-label="Accent color"
                 />
               </label>
+            </div>
+          )}
+        </section>
+
+        <section className="mt-6 border-t border-subtle pt-5">
+          <h3 className="mb-2 text-sm font-medium text-ink-muted">Solver</h3>
+          <div className="grid grid-cols-3 gap-2">
+            {presets.map((preset) => (
+              <button
+                key={preset.value}
+                type="button"
+                onClick={() => setSolverPreset(preset.value)}
+                aria-pressed={solverPreset === preset.value}
+                className={`rounded-card border px-2 py-2 text-sm font-medium ${
+                  solverPreset === preset.value
+                    ? 'border-primary bg-primary-soft text-primary'
+                    : 'border-subtle text-ink-muted hover:text-ink'
+                }`}
+              >
+                <span className="block">{preset.label}</span>
+                <span className="block text-[10px] font-normal">{preset.detail}</span>
+              </button>
+            ))}
+          </div>
+          {solverPreset === 'custom' && (
+            <p className="mt-2 text-xs font-medium text-primary">Custom solver limits are active.</p>
+          )}
+          <button
+            type="button"
+            className="mt-3 text-sm font-medium text-ink-muted hover:text-ink"
+            onClick={() => setAdvanced(!advanced)}
+            aria-expanded={advanced}
+          >
+            {advanced ? 'Hide advanced limits' : 'Advanced limits'}
+          </button>
+          {advanced && (
+            <div className="text-xs">
+              <SolverControls settings={solverSettings} onChange={setSolverSettings} />
             </div>
           )}
         </section>

@@ -1,5 +1,8 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { useSettings } from '../../store/settingsStore'
+import { useBattle } from '../../store/battleStore'
+import { useSolve } from '../../store/solveStore'
+import type { StrategyRow } from '../../api/types'
 
 const tabs = [
   { to: '/', label: 'Teams' },
@@ -10,6 +13,23 @@ const tabs = [
 
 export default function NavBar() {
   const setSidebarOpen = useSettings((s) => s.setSidebarOpen)
+  const location = useLocation()
+  const botAnalysis = useBattle((state) => state.botAnalysis)
+  const solveLive = useSolve((state) => state.live ?? state.complete)
+
+  const percent = (value: number) => `${(value * 100).toFixed(1)}%`
+  const label = (row: StrategyRow | undefined) => {
+    if (!row) return 'No move yet'
+    if (row.preview) return `Lead ${row.preview.leads.join(' + ')}`
+    return row.commands.map((command) => command.description).join(' · ') || 'No action'
+  }
+  const strategyLabel = (row: StrategyRow | undefined) =>
+    row ? `${label(row)} (${percent(row.probability)})` : 'No move yet'
+  const summary = location.pathname.startsWith('/simulate') && botAnalysis
+    ? `P2 win ${percent(botAnalysis.p2WinOdds)} · ${strategyLabel(botAnalysis.p2Strategy?.rows[0])}${botAnalysis.complete ? '' : ' · partial'}`
+    : location.pathname.startsWith('/tracker') && solveLive
+      ? `You ${percent(solveLive.p1WinOdds)} · Opp ${percent(solveLive.p2WinOdds)} · ${strategyLabel(solveLive.p1Strategy[0])}${solveLive.complete ? '' : ' · partial'}`
+      : null
 
   return (
     <header className="sticky top-0 z-40 glass">
@@ -32,6 +52,15 @@ export default function NavBar() {
             </NavLink>
           ))}
         </nav>
+        {summary && (
+          <div
+            className="hidden min-w-0 max-w-md flex-1 truncate rounded-card bg-primary-soft px-3 py-1.5 text-xs font-medium text-primary lg:block"
+            data-testid="solver-nav-summary"
+            title={summary}
+          >
+            {summary}
+          </div>
+        )}
         <NavLink
           to="/benchmark"
           className={({ isActive }) =>
@@ -54,6 +83,15 @@ export default function NavBar() {
           </svg>
         </button>
       </div>
+      {summary && (
+        <div
+          className="truncate border-t border-subtle bg-primary-soft px-4 py-1 text-xs font-medium text-primary lg:hidden"
+          data-testid="solver-nav-summary-mobile"
+          title={summary}
+        >
+          {summary}
+        </div>
+      )}
     </header>
   )
 }

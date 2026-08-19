@@ -93,20 +93,49 @@ fn solve_reduced(a: &[Vec<f64>]) -> MatrixSolution {
 fn degenerate(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     if m == 1 {
         // P2 minimizes along the only row.
-        let (j, value) = extremum(a[0].iter().copied(), |x, y| x < y);
+        let value = a[0].iter().copied().fold(f64::INFINITY, f64::min);
+        let count = a[0]
+            .iter()
+            .filter(|&&payoff| (payoff - value).abs() <= EPS)
+            .count();
         return Some(MatrixSolution {
             value,
             row_strategy: vec![1.0],
-            col_strategy: unit_vector(n, j),
+            col_strategy: a[0]
+                .iter()
+                .map(|&payoff| {
+                    if (payoff - value).abs() <= EPS {
+                        1.0 / count as f64
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
             used_lp: false,
         });
     }
     if n == 1 {
         // P1 maximizes down the only column.
-        let (i, value) = extremum(a.iter().map(|row| row[0]), |x, y| x > y);
+        let value = a
+            .iter()
+            .map(|row| row[0])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let count = a
+            .iter()
+            .filter(|row| (row[0] - value).abs() <= EPS)
+            .count();
         return Some(MatrixSolution {
             value,
-            row_strategy: unit_vector(m, i),
+            row_strategy: a
+                .iter()
+                .map(|row| {
+                    if (row[0] - value).abs() <= EPS {
+                        1.0 / count as f64
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
             col_strategy: vec![1.0],
             used_lp: false,
         });
@@ -114,22 +143,59 @@ fn degenerate(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     None
 }
 
-/// Returns a pure saddle-point equilibrium when one exists.
+/// Returns a saddle-point equilibrium when one exists.
+///
+/// The strategy is uniform over all equivalent security actions. This prevents
+/// the fast path from selecting one arbitrary action when several actions give
+/// the same equilibrium guarantee.
 fn saddle_point(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
-    let (best_row, maximin) = extremum(
-        a.iter()
-            .map(|row| row.iter().copied().fold(f64::INFINITY, f64::min)),
-        |x, y| x > y,
-    );
-    let (best_col, minimax) = extremum(
-        (0..n).map(|j| (0..m).map(|i| a[i][j]).fold(f64::NEG_INFINITY, f64::max)),
-        |x, y| x < y,
-    );
+    let row_guarantees: Vec<f64> = a
+        .iter()
+        .map(|row| row.iter().copied().fold(f64::INFINITY, f64::min))
+        .collect();
+    let col_limits: Vec<f64> = (0..n)
+        .map(|j| (0..m).map(|i| a[i][j]).fold(f64::NEG_INFINITY, f64::max))
+        .collect();
+    let maximin = row_guarantees
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let minimax = col_limits.iter().copied().fold(f64::INFINITY, f64::min);
 
-    ((maximin - minimax).abs() <= EPS).then(|| MatrixSolution {
+    if (maximin - minimax).abs() > EPS {
+        return None;
+    }
+
+    let row_count = row_guarantees
+        .iter()
+        .filter(|&&value| (value - maximin).abs() <= EPS)
+        .count();
+    let col_count = col_limits
+        .iter()
+        .filter(|&&value| (value - minimax).abs() <= EPS)
+        .count();
+    Some(MatrixSolution {
         value: maximin,
-        row_strategy: unit_vector(m, best_row),
-        col_strategy: unit_vector(n, best_col),
+        row_strategy: row_guarantees
+            .iter()
+            .map(|&value| {
+                if (value - maximin).abs() <= EPS {
+                    1.0 / row_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+        col_strategy: col_limits
+            .iter()
+            .map(|&value| {
+                if (value - minimax).abs() <= EPS {
+                    1.0 / col_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
         used_lp: false,
     })
 }
@@ -1080,6 +1146,16 @@ mod tests {
         assert_eq!(solution.row_strategy, vec![0.0, 0.0, 1.0]);
     }
 
+    /// One-choice games must mix the equivalent choices of the other player.
+    #[test]
+    fn one_choice_games_mix_equivalent_replies() {
+        let one_row = solve_matrix_game(&[vec![0.2, 0.2, 0.7]]);
+        assert_eq!(one_row.col_strategy, vec![0.5, 0.5, 0.0]);
+
+        let one_col = solve_matrix_game(&[vec![0.8], vec![0.3], vec![0.8]]);
+        assert_eq!(one_col.row_strategy, vec![0.5, 0.0, 0.5]);
+    }
+
     #[test]
     fn single_cell() {
         let solution = solve_matrix_game(&[vec![0.42]]);
@@ -1132,6 +1208,23 @@ mod tests {
         let a = vec![vec![0.25; 4]; 4];
         let solution = solve_matrix_game(&a);
         assert!((solution.value - 0.25).abs() < 1e-9);
+        assert_eq!(solution.row_strategy, vec![0.25; 4]);
+        assert_eq!(solution.col_strategy, vec![0.25; 4]);
+        assert_equilibrium(&a, &solution, 1e-9);
+    }
+
+    /// Equivalent security actions must share the strategy probability.
+    #[test]
+    fn saddle_point_mixes_equivalent_actions() {
+        let a = vec![
+            vec![0.5, 0.5, 0.8],
+            vec![0.5, 0.5, 0.9],
+            vec![0.4, 0.5, 1.0],
+        ];
+        let solution = solve_matrix_game(&a);
+
+        assert_eq!(solution.row_strategy, vec![0.5, 0.5, 0.0]);
+        assert_eq!(solution.col_strategy, vec![0.5, 0.5, 0.0]);
         assert_equilibrium(&a, &solution, 1e-9);
     }
 

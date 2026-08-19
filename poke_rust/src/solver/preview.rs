@@ -79,7 +79,9 @@ use crate::state::battle::{
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::chance::ChanceMode;
-use super::matrix::{self, EPS, OracleLimits, OracleSeed};
+use super::matrix::{
+    self, CellOracle, EPS, MatrixSolution, OracleLimits, OracleSeed, OracleStats,
+};
 use super::search;
 use super::{CancelFlag, SolveConfig, SolveWarning};
 
@@ -267,6 +269,18 @@ pub struct PreviewResult {
     pub warnings: Vec<SolveWarning>,
 }
 
+/// One completed double-oracle round of a preview search.
+#[derive(Debug, Clone)]
+pub struct PreviewRound {
+    pub value: f64,
+    pub p1_strategy: Vec<PreviewChoiceProb>,
+    pub p2_strategy: Vec<PreviewChoiceProb>,
+    pub stats: PreviewStats,
+}
+
+/// Receives each completed preview strategy while the search runs.
+pub type PreviewProgress<'a> = &'a dyn Fn(PreviewRound);
+
 /// Why a preview position has no equilibrium.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PreviewError {
@@ -449,8 +463,36 @@ pub fn solve_team_preview_cancellable(
     config: &PreviewConfig,
     cancel: Option<&CancelFlag>,
 ) -> Result<PreviewResult, PreviewError> {
+    solve_team_preview_progress_cancellable(
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        None,
+        cancel,
+    )
+}
+
+/// [`solve_team_preview_cancellable`], with completed-round reports.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_team_preview_progress_cancellable(
+    state: &TeamPreviewState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &PreviewConfig,
+    progress: Option<PreviewProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<PreviewResult, PreviewError> {
     let mut cache = PreviewCellCache::new();
-    solve_preview_with_cancel(state, pokemon_dex, move_dex, config, &mut cache, cancel)
+    solve_preview_with_cancel(
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        &mut cache,
+        progress,
+        cancel,
+    )
 }
 
 /// [`solve_team_preview`], reading and writing `cache`.
@@ -464,7 +506,7 @@ pub fn solve_team_preview_cached(
     config: &PreviewConfig,
     cache: &mut PreviewCellCache,
 ) -> Result<PreviewResult, PreviewError> {
-    solve_preview_with_cancel(state, pokemon_dex, move_dex, config, cache, None)
+    solve_preview_with_cancel(state, pokemon_dex, move_dex, config, cache, None, None)
 }
 
 /// The body of every single-world preview solve.
@@ -474,6 +516,7 @@ fn solve_preview_with_cancel(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &PreviewConfig,
     cache: &mut PreviewCellCache,
+    progress: Option<PreviewProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<PreviewResult, PreviewError> {
     let battle_config = battle_config_of(config);
@@ -489,7 +532,7 @@ fn solve_preview_with_cancel(
     let rows = ctx.p1.len();
     let cols = ctx.p2.len();
 
-    let (solution, oracle) = matrix::double_oracle(
+    let (solution, oracle) = matrix::double_oracle_with(
         rows,
         cols,
         OracleSeed::default(),
@@ -499,7 +542,12 @@ fn solve_preview_with_cancel(
             low: LOSS,
             high: WIN,
         },
-        |row, col| ctx.cell_value(row, col),
+        SinglePreviewOracle {
+            ctx: &mut ctx,
+            progress,
+            rows,
+            cols,
+        },
     );
     // `cell_value` already folded each cell's own turns/lps/nodes into
     // `ctx.stats` as it went; `oracle.lps_solved` adds this solve's own
@@ -834,6 +882,30 @@ pub fn solve_open_list_preview_cancellable(
     determinize: &DeterminizeConfig,
     cancel: Option<&CancelFlag>,
 ) -> Result<OpenListResult, OpenListError> {
+    solve_open_list_preview_progress_cancellable(
+        belief,
+        meta_dex,
+        pokemon_dex,
+        move_dex,
+        config,
+        determinize,
+        None,
+        cancel,
+    )
+}
+
+/// [`solve_open_list_preview_cancellable`], with completed-round reports.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_open_list_preview_progress_cancellable(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &OpenListConfig,
+    determinize: &DeterminizeConfig,
+    progress: Option<PreviewProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<OpenListResult, OpenListError> {
     let started = Instant::now();
     let drawn = open_list_worlds(belief, meta_dex, pokemon_dex, move_dex, config, determinize)?;
 
@@ -887,7 +959,7 @@ pub fn solve_open_list_preview_cancellable(
     }
 
     let mut cell_worlds: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-    let (solution, oracle) = matrix::double_oracle(
+    let (solution, oracle) = matrix::double_oracle_with(
         rows,
         cols,
         OracleSeed::default(),
@@ -897,14 +969,13 @@ pub fn solve_open_list_preview_cancellable(
             low: LOSS,
             high: WIN,
         },
-        |row, col| {
-            let values: Vec<f64> = contexts
-                .iter_mut()
-                .map(|ctx| ctx.cell_value(row, col))
-                .collect();
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            cell_worlds.insert((row, col), values);
-            mean
+        OpenListPreviewOracle {
+            contexts: &mut contexts,
+            cell_worlds: &mut cell_worlds,
+            progress,
+            rows,
+            cols,
+            started,
         },
     );
 
@@ -1162,6 +1233,101 @@ impl<'a> PreviewContext<'a> {
         self.cancel_hit |= ctx.cancel_hit;
         value
     }
+}
+
+/// Connects one concrete preview search to the double-oracle round hook.
+struct SinglePreviewOracle<'context, 'data, 'progress> {
+    ctx: &'context mut PreviewContext<'data>,
+    progress: Option<PreviewProgress<'progress>>,
+    rows: usize,
+    cols: usize,
+}
+
+impl CellOracle for SinglePreviewOracle<'_, '_, '_> {
+    fn cell(&mut self, row: usize, col: usize) -> f64 {
+        self.ctx.cell_value(row, col)
+    }
+
+    fn round(&mut self, solution: &MatrixSolution, oracle: &OracleStats) {
+        let Some(progress) = self.progress else {
+            return;
+        };
+        let mut stats = self.ctx.stats.clone();
+        stats.cells_total = (self.rows * self.cols) as u64;
+        stats.lps_solved += oracle.lps_solved;
+        stats.elapsed = self.ctx.started.elapsed();
+        progress(PreviewRound {
+            value: solution.value.clamp(LOSS, WIN),
+            p1_strategy: strategy_of(&self.ctx.p1, &solution.row_strategy),
+            p2_strategy: strategy_of(&self.ctx.p2, &solution.col_strategy),
+            stats,
+        });
+    }
+}
+
+/// Connects a mean-matrix preview search to the double-oracle round hook.
+struct OpenListPreviewOracle<'context, 'data, 'progress> {
+    contexts: &'context mut [PreviewContext<'data>],
+    cell_worlds: &'context mut HashMap<(usize, usize), Vec<f64>>,
+    progress: Option<PreviewProgress<'progress>>,
+    rows: usize,
+    cols: usize,
+    started: Instant,
+}
+
+impl CellOracle for OpenListPreviewOracle<'_, '_, '_> {
+    fn cell(&mut self, row: usize, col: usize) -> f64 {
+        let values: Vec<f64> = self
+            .contexts
+            .iter_mut()
+            .map(|ctx| ctx.cell_value(row, col))
+            .collect();
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        self.cell_worlds.insert((row, col), values);
+        mean
+    }
+
+    fn round(&mut self, solution: &MatrixSolution, oracle: &OracleStats) {
+        let Some(progress) = self.progress else {
+            return;
+        };
+        progress(PreviewRound {
+            value: solution.value.clamp(LOSS, WIN),
+            p1_strategy: strategy_of(&self.contexts[0].p1, &solution.row_strategy),
+            p2_strategy: strategy_of(&self.contexts[0].p2, &solution.col_strategy),
+            stats: open_list_stats(
+                self.contexts,
+                oracle,
+                self.rows,
+                self.cols,
+                self.started,
+            ),
+        });
+    }
+}
+
+/// Adds the work of all drawn worlds to one preview progress record.
+fn open_list_stats(
+    contexts: &[PreviewContext<'_>],
+    oracle: &OracleStats,
+    rows: usize,
+    cols: usize,
+    started: Instant,
+) -> PreviewStats {
+    let mut stats = PreviewStats {
+        cells_total: (rows * cols) as u64,
+        ..PreviewStats::default()
+    };
+    for ctx in contexts {
+        stats.cells_evaluated += ctx.stats.cells_evaluated;
+        stats.cell_cache_hits += ctx.stats.cell_cache_hits;
+        stats.battles_solved += ctx.stats.battles_solved;
+        stats.turns_simulated += ctx.stats.turns_simulated;
+        stats.lps_solved += ctx.stats.lps_solved;
+    }
+    stats.lps_solved += oracle.lps_solved;
+    stats.elapsed = started.elapsed();
+    stats
 }
 
 /// Adds one warning without repeating it.

@@ -1,13 +1,10 @@
 import { useState } from 'react'
 import Select from '../../components/common/Select'
-import SolverControls from '../../components/solver/SolverControls'
-import {
-  DEFAULT_SOLVER_SETTINGS,
-  solverProfile,
-} from '../../components/solver/solverSettings'
+import { solverProfile } from '../../components/solver/solverSettings'
 import type { BotAlgorithm, SolveUpdate, StrategyRow } from '../../api/types'
 import { useSolve } from '../../store/solveStore'
 import { useTracker } from '../../store/trackerStore'
+import { useSettings } from '../../store/settingsStore'
 
 // These hints describe how each search reads the tracker belief.
 
@@ -197,8 +194,7 @@ function AnswerBody({
           Opponent {percent(answer.p2WinOdds)}
         </span>
         <span className="ml-auto text-ink-muted" data-testid="tracker-solver-depth">
-          Depth {answer.depth} of {answer.depthTarget} · {(answer.elapsedMs / 1000).toFixed(1)} s ·
-          revision {answer.revision}
+          Depth {answer.depth} of {answer.depthTarget} · revision {answer.revision}
         </span>
       </div>
 
@@ -248,7 +244,7 @@ function AnswerBody({
  * because the tracker user typed both rosters.
  *
  * `POST /api/solve` registers one job, and its event stream sends each answer.
- * The panel keeps the last complete answer on screen while the next depth runs.
+ * The panel shows the newest completed strategy checkpoint while search runs.
  *
  * The panel writes no command to the input bar. Every row is text, and the user
  * types the command they choose.
@@ -260,7 +256,8 @@ export default function TrackerSolverPanel() {
   const [open, setOpen] = useState(false)
   // A sampling belief search is the default. It respects the fog of war.
   const [algorithm, setAlgorithm] = useState<BotAlgorithm>('ismcts')
-  const [settings, setSettings] = useState(DEFAULT_SOLVER_SETTINGS)
+  const { solverPreset, solverSettings } = useSettings()
+  const answer = live ?? complete
 
   const running = phase === 'starting' || phase === 'running'
   const on = phase !== 'off'
@@ -278,9 +275,12 @@ export default function TrackerSolverPanel() {
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <span className="font-semibold">Solver</span>
-          {complete && (
+          {answer && (
             <span className="font-mono" data-testid="tracker-solver-summary">
-              You {percent(complete.p1WinOdds)} · Opponent {percent(complete.p2WinOdds)}
+              You {percent(answer.p1WinOdds)} · Opponent {percent(answer.p2WinOdds)}
+              {answer.p1Strategy[0]
+                ? ` · ${actionLabel(answer.p1Strategy[0])} (${percent(answer.p1Strategy[0].probability)})`
+                : ''}
               {stale ? ' · old position' : ''}
             </span>
           )}
@@ -315,7 +315,7 @@ export default function TrackerSolverPanel() {
                 void start({
                   source: 'tracker',
                   sessionId: trackerId,
-                  profile: solverProfile(algorithm, settings),
+                  profile: solverProfile(algorithm, solverSettings, solverPreset),
                 })
               }}
               data-testid="tracker-solver-start"
@@ -334,15 +334,11 @@ export default function TrackerSolverPanel() {
             )}
           </div>
 
-          <SolverControls
-            algorithm={algorithm}
-            settings={settings}
-            disabled={running}
-            onChange={setSettings}
-          />
-
           <p className="mt-1 text-ink-muted">
             {ALGORITHM_OPTIONS.find((o) => o.value === algorithm)?.hint}
+          </p>
+          <p className="mt-1 text-ink-muted">
+            Search limits use the {solverPreset === 'competitive' ? 'high' : solverPreset} preset in Settings.
           </p>
           <p className="mt-1 text-ink-muted" data-testid="tracker-solver-no-submit">
             The panel shows each suggested command as text. It never writes one to the input bar.
@@ -352,7 +348,7 @@ export default function TrackerSolverPanel() {
               {error}
             </p>
           )}
-          {on && !complete && !error && (
+          {on && !answer && !error && (
             <p className="mt-1 text-ink-muted">
               {running ? 'Searching this position…' : 'No answer yet.'}
             </p>
@@ -382,14 +378,14 @@ export default function TrackerSolverPanel() {
             </div>
           )}
 
-          {complete && stale && (
+          {answer && stale && (
             <p className="mt-1 text-warning" data-testid="tracker-solver-stale">
               This answer describes the position before the last tracker change.
             </p>
           )}
-          {complete && (
+          {answer && (
             <AnswerBody
-              answer={complete}
+              answer={answer}
               previous={previousComplete}
               seed={started?.seed ?? null}
             />

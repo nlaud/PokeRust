@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
 import type {
+  AnalysisCheckpoint,
   BattleCommand,
   BattleView,
   BotProfileView,
@@ -58,12 +59,10 @@ interface BattleStore {
   /** The command that the server drew for P2 on the last resolved turn.
    * `null` in a hotseat battle, and at team preview. */
   p2Reveal: P2Reveal | null
-  /** The strategy that the last complete search found for the current position.
-   *
-   * `null` unless the profile holds `revealStrategy`. The server sends no row
-   * without that setting, and it sends none while the answer is stale. The
-   * value is therefore the newest answer for the position on screen. */
+  /** The newest bot strategy for the position on screen. */
   p2Strategy: P2Strategy | null
+  /** The newest solver checkpoint for the position on screen. */
+  botAnalysis: AnalysisCheckpoint | null
   /** True while the client waits for the analysis job of the P2 bot. */
   waitingForBot: boolean
   /** The live simulation count while the client waits for P2. */
@@ -99,8 +98,7 @@ interface BattleStore {
   finishBotSearch: () => Promise<void>
   /** Reads P2's strategy for the current position.
    *
-   * Does nothing without a battle, and nothing without `revealStrategy`. The
-   * reveal panel calls it on a timer while Player 1 chooses a command. */
+   * The solver panel calls it while Player 1 chooses a command. */
   refreshP2Strategy: () => Promise<void>
   togglePreviewPick: (index: number) => void
   submitPreview: () => Promise<void>
@@ -131,7 +129,10 @@ const BOT_NO_ANSWER =
 async function waitForBotAnalysis(
   battleId: string,
   shouldStop: () => boolean,
-  onProgress: (progress: { turnsSimulated: number; simulationTurnBudget: number } | null) => void,
+  onProgress: (
+    progress: { turnsSimulated: number; simulationTurnBudget: number } | null,
+    checkpoint: AnalysisCheckpoint | null,
+  ) => void,
 ): Promise<BotWaitResult> {
   for (;;) {
     if (shouldStop()) return 'cancelled'
@@ -141,6 +142,7 @@ async function waitForBotAnalysis(
       progress.checkpoint.generation === progress.generation &&
       !progress.checkpoint.stale
     if (progress.phase !== 'running') {
+      onProgress(null, progress.checkpoint)
       if (!current) {
         // The server console holds the reason. This line holds the position
         // that asked for it, so the two logs line up.
@@ -161,6 +163,7 @@ async function waitForBotAnalysis(
             turnsSimulated: progress.turnsSimulated,
             simulationTurnBudget: progress.simulationTurnBudget,
           },
+      progress.checkpoint,
     )
     await new Promise((resolve) => window.setTimeout(resolve, ANALYSIS_POLL_MS))
   }
@@ -224,6 +227,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           p2Reveal: response.p2Reveal ?? null,
           // The new position has no answer yet. The poll reads the next one.
           p2Strategy: null,
+          botAnalysis: null,
         }
       })
       if (response.state.phase !== 'gameOver') {
@@ -277,7 +281,12 @@ export const useBattle = create<BattleStore>((set, get) => {
         const outcome = await waitForBotAnalysis(
           battleId,
           () => get().botWaitCancelled,
-          (progress) => set({ botTurnProgress: progress }),
+          (progress, checkpoint) =>
+            set({
+              botTurnProgress: progress,
+              botAnalysis: checkpoint,
+              p2Strategy: checkpoint?.p2Strategy ?? null,
+            }),
         ).catch((): BotWaitResult => 'noAnswer')
         set({ waitingForBot: false, botTurnProgress: null })
         if (outcome === 'cancelled') {
@@ -367,6 +376,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     botP2: null,
     p2Reveal: null,
     p2Strategy: null,
+    botAnalysis: null,
     waitingForBot: false,
     botTurnProgress: null,
     botWaitCancelled: false,
@@ -399,6 +409,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           botP2: response.botP2,
           p2Reveal: null,
           p2Strategy: null,
+          botAnalysis: null,
           waitingForBot: false,
           botTurnProgress: null,
           botWaitCancelled: false,
@@ -434,6 +445,7 @@ export const useBattle = create<BattleStore>((set, get) => {
           // A restore reads the session, and the session keeps no past reveal.
           p2Reveal: null,
           p2Strategy: null,
+          botAnalysis: null,
           waitingForBot: false,
           botTurnProgress: null,
           botWaitCancelled: false,
@@ -468,6 +480,7 @@ export const useBattle = create<BattleStore>((set, get) => {
         botP2: null,
         p2Reveal: null,
         p2Strategy: null,
+        botAnalysis: null,
         waitingForBot: false,
         botTurnProgress: null,
         botWaitCancelled: false,
@@ -547,9 +560,7 @@ export const useBattle = create<BattleStore>((set, get) => {
 
     refreshP2Strategy: async () => {
       const { battleId, botP2 } = get()
-      // The server hides every row without the setting, so a read would only
-      // cost a request.
-      if (!battleId || !botP2?.revealStrategy) return
+      if (!battleId || !botP2) return
       const request = ++p2StrategyRequest
       try {
         const progress = await api.getAnalysis(battleId)
@@ -557,11 +568,14 @@ export const useBattle = create<BattleStore>((set, get) => {
         if (
           request !== p2StrategyRequest ||
           current.battleId !== battleId ||
-          !current.botP2?.revealStrategy
+          !current.botP2
         ) {
           return
         }
-        set({ p2Strategy: progress.checkpoint?.p2Strategy ?? null })
+        set({
+          botAnalysis: progress.checkpoint,
+          p2Strategy: progress.checkpoint?.p2Strategy ?? null,
+        })
       } catch {
         // A failed read leaves the last answer in place. The next tick retries.
       }
@@ -631,7 +645,12 @@ export const useBattle = create<BattleStore>((set, get) => {
         const outcome = await waitForBotAnalysis(
           battleId,
           () => get().botWaitCancelled,
-          (progress) => set({ botTurnProgress: progress }),
+          (progress, checkpoint) =>
+            set({
+              botTurnProgress: progress,
+              botAnalysis: checkpoint,
+              p2Strategy: checkpoint?.p2Strategy ?? null,
+            }),
         ).catch((): BotWaitResult => 'noAnswer')
         set({ waitingForBot: false, botTurnProgress: null })
         if (outcome === 'cancelled') {
@@ -672,6 +691,7 @@ export const useBattle = create<BattleStore>((set, get) => {
             // and the panel shows it.
             p2Reveal: response.p2Reveal ?? null,
             p2Strategy: null,
+            botAnalysis: null,
           }
         })
         await get().fetchCommands()

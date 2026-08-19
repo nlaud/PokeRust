@@ -1,9 +1,16 @@
 import { create } from 'zustand'
 import { computeReadableTextColor } from '../lib/color'
+import {
+  DEFAULT_SOLVER_SETTINGS,
+  SOLVER_PRESETS,
+  type SolverPreset,
+  type SolverSettings,
+} from '../components/solver/solverSettings'
 
 export type Theme = 'light' | 'dark' | 'custom'
 
-const SETTINGS_KEY = 'pokerust.settings.v1'
+const SETTINGS_KEY = 'pokerust.settings.v2'
+const OLD_SETTINGS_KEY = 'pokerust.settings.v1'
 
 // Defaults match the old `.custom` colors in `index.css`.
 // Existing users see no change before they select new colors.
@@ -14,11 +21,13 @@ interface Settings {
   theme: Theme
   customBackground: string
   customAccent: string
+  solverPreset: SolverPreset
+  solverSettings: SolverSettings
 }
 
 function loadSettings(): Settings {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY)
+    const raw = localStorage.getItem(SETTINGS_KEY) ?? localStorage.getItem(OLD_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>
       // Add custom color fields to old stored settings.
@@ -26,12 +35,24 @@ function loadSettings(): Settings {
         theme: parsed.theme ?? 'light',
         customBackground: parsed.customBackground ?? DEFAULT_CUSTOM_BACKGROUND,
         customAccent: parsed.customAccent ?? DEFAULT_CUSTOM_ACCENT,
+        solverPreset: parsed.solverPreset ?? 'balanced',
+        solverSettings: {
+          ...DEFAULT_SOLVER_SETTINGS,
+          ...parsed.solverSettings,
+          particles: Math.min(32, Math.max(1, parsed.solverSettings?.particles ?? 16)),
+        },
       }
     }
   } catch {
     // Use the defaults after an invalid stored value.
   }
-  return { theme: 'light', customBackground: DEFAULT_CUSTOM_BACKGROUND, customAccent: DEFAULT_CUSTOM_ACCENT }
+  return {
+    theme: 'light',
+    customBackground: DEFAULT_CUSTOM_BACKGROUND,
+    customAccent: DEFAULT_CUSTOM_ACCENT,
+    solverPreset: 'balanced',
+    solverSettings: DEFAULT_SOLVER_SETTINGS,
+  }
 }
 
 // Lists each property that `applyCustomColors` changes.
@@ -81,6 +102,8 @@ interface SettingsStore extends Settings {
   sidebarOpen: boolean
   setTheme: (theme: Theme) => void
   setCustomColors: (background: string, accent: string) => void
+  setSolverPreset: (preset: SolverPreset) => void
+  setSolverSettings: (settings: SolverSettings) => void
   setSidebarOpen: (open: boolean) => void
 }
 
@@ -98,13 +121,24 @@ export const useSettings = create<SettingsStore>((set, get) => ({
   setTheme: (theme) => {
     applyTheme(theme)
     if (theme === 'custom') applyCustomColors(get().customBackground, get().customAccent)
-    persist({ theme, customBackground: get().customBackground, customAccent: get().customAccent })
+    persist({ ...get(), theme })
     set({ theme })
   },
   setCustomColors: (customBackground, customAccent) => {
     if (get().theme === 'custom') applyCustomColors(customBackground, customAccent)
-    persist({ theme: get().theme, customBackground, customAccent })
+    persist({ ...get(), customBackground, customAccent })
     set({ customBackground, customAccent })
+  },
+  setSolverPreset: (solverPreset) => {
+    const solverSettings =
+      solverPreset === 'custom' ? get().solverSettings : { ...SOLVER_PRESETS[solverPreset] }
+    persist({ ...get(), solverPreset, solverSettings })
+    set({ solverPreset, solverSettings })
+  },
+  setSolverSettings: (solverSettings) => {
+    const safe = { ...solverSettings, particles: Math.min(32, Math.max(1, solverSettings.particles)) }
+    persist({ ...get(), solverPreset: 'custom', solverSettings: safe })
+    set({ solverPreset: 'custom', solverSettings: safe })
   },
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
 }))

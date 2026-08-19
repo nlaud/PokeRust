@@ -1,15 +1,11 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
-import SolverControls from '../../components/solver/SolverControls'
-import {
-  DEFAULT_SOLVER_SETTINGS,
-  solverProfile,
-  type SolverSettings,
-} from '../../components/solver/solverSettings'
+import { solverProfile } from '../../components/solver/solverSettings'
 import type { BotAlgorithm, InformationMode } from '../../api/types'
 import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
+import { useSettings } from '../../store/settingsStore'
 
 /** Returns all catalog items that the format permits. */
 function legalItemsFor(format: StoredFormat): string[] {
@@ -106,13 +102,6 @@ function algorithmLimitNote(mode: InformationMode): string {
     : 'Perfect Information holds no belief, so only a search of the true position can control P2. Pick another information mode for a belief search.'
 }
 
-/** Names what the reveal setting opens.
- *
- * The setting removes the fog of war over Player 2's plan, so the battle stops
- * being a fair game. It suits study and debugging. */
-const REVEAL_STRATEGY_NOTE =
-  'Reads P2 strategy for the current position while you choose, and the whole strategy that each played command came from. This shows you what P2 plans, so keep it off for a fair battle.'
-
 type TeamSource = 'saved' | 'meta'
 
 const TEAM_SOURCE_OPTIONS: { value: TeamSource; label: string }[] = [
@@ -124,6 +113,7 @@ export default function SetupPanel() {
   const [teams] = useState(loadTeams)
   const [formats] = useState(loadFormats)
   const { createBattle, busy, error, clearError } = useBattle()
+  const { solverPreset, solverSettings } = useSettings()
 
   // Restore valid values from the last configuration.
   // Otherwise, select Doubles and the first favorite teams.
@@ -145,16 +135,6 @@ export default function SetupPanel() {
   const defaultInformationMode = saved?.informationMode ?? 'closedSheet'
   const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
   const [botEnabled, setBotEnabled] = useState(saved?.botEnabled ?? false)
-  const [solverSettings, setSolverSettings] = useState<SolverSettings>({
-    simulationTurnBudget:
-      saved?.botSimulationTurnBudget ?? DEFAULT_SOLVER_SETTINGS.simulationTurnBudget,
-    depth: saved?.botDepth ?? DEFAULT_SOLVER_SETTINGS.depth,
-    replacementDepth: saved?.botReplacementDepth ?? DEFAULT_SOLVER_SETTINGS.replacementDepth,
-    damageRolls: saved?.botDamageRolls ?? DEFAULT_SOLVER_SETTINGS.damageRolls,
-    considerCrit: saved?.botConsiderCrit ?? DEFAULT_SOLVER_SETTINGS.considerCrit,
-    particles: saved?.botParticles ?? DEFAULT_SOLVER_SETTINGS.particles,
-  })
-  const [revealStrategy, setRevealStrategy] = useState(saved?.botRevealStrategy ?? false)
   const savedAlgorithm = saved?.botAlgorithm
   // A stored algorithm that cannot play under the stored mode creates a bot
   // that never answers, so the load path replaces it. A setup from an older
@@ -181,13 +161,6 @@ export default function SetupPanel() {
       informationMode,
       botEnabled,
       botAlgorithm,
-      botSimulationTurnBudget: solverSettings.simulationTurnBudget,
-      botDepth: solverSettings.depth,
-      botReplacementDepth: solverSettings.replacementDepth,
-      botDamageRolls: solverSettings.damageRolls,
-      botConsiderCrit: solverSettings.considerCrit,
-      botParticles: solverSettings.particles,
-      botRevealStrategy: revealStrategy,
     })
   }, [
     formatId,
@@ -198,8 +171,6 @@ export default function SetupPanel() {
     informationMode,
     botEnabled,
     botAlgorithm,
-    solverSettings,
-    revealStrategy,
   ])
 
   const format = formats.find((f) => f.id === formatId)
@@ -234,7 +205,7 @@ export default function SetupPanel() {
       botP2:
         !botEnabled
           ? undefined
-          : { ...solverProfile(botAlgorithm, solverSettings), revealStrategy },
+          : solverProfile(botAlgorithm, solverSettings, solverPreset),
     })
   }
 
@@ -321,26 +292,8 @@ export default function SetupPanel() {
                 {algorithmLimitNote(informationMode)}
               </p>
               <p className="mt-1 text-xs text-ink-muted">
-                P2 uses this solver profile after Player 1 locks a command.
+                P2 uses the {solverPreset === 'competitive' ? 'high' : solverPreset} limits from Settings. Its live strategy stays visible.
               </p>
-              <SolverControls
-                algorithm={botAlgorithm}
-                settings={solverSettings}
-                onChange={setSolverSettings}
-              />
-              <label className="mt-2 flex items-start gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={revealStrategy}
-                  onChange={(e) => setRevealStrategy(e.target.checked)}
-                  data-testid="bot-reveal-strategy"
-                  className="mt-0.5"
-                />
-                <span>
-                  <span className="font-medium">Show the opponent strategy</span>
-                  <span className="block text-ink-muted">{REVEAL_STRATEGY_NOTE}</span>
-                </span>
-              </label>
             </>
           )}
         </div>

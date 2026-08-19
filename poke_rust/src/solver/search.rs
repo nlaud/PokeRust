@@ -131,6 +131,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -209,6 +210,13 @@ pub(super) fn run(
     let mut reached = first;
     let mut solved: Option<Position> = None;
     let mut returned_pass_is_partial = false;
+    let latest_round: RefCell<Option<super::RootRound>> = RefCell::new(None);
+    let capture_round = |round: super::RootRound| {
+        *latest_round.borrow_mut() = Some(round.clone());
+        if let Some(hook) = progress {
+            hook(round);
+        }
+    };
 
     for depth in first..=target {
         // The first pass must produce a strategy. Later passes must not exceed
@@ -237,7 +245,10 @@ pub(super) fn run(
             LOSS,
             WIN,
             seed.as_ref(),
-            progress.map(|hook| RootReport { hook, depth }),
+            Some(RootReport {
+                hook: &capture_round,
+                depth,
+            }),
             &mut helpers,
         );
 
@@ -245,10 +256,16 @@ pub(super) fn run(
         // stops at the first pass that sets one, so the flags describe this pass
         // alone.
         if ctx.stopped() {
-            // A complete shallower answer beats a partial deeper one. The
-            // partial pass is kept only when no pass ever finished, because
-            // something has to be returned.
-            if solved.is_none() {
+            let round = latest_round
+                .borrow()
+                .as_ref()
+                .filter(|round| round.depth == depth)
+                .cloned();
+            if let Some(round) = round {
+                reached = depth;
+                solved = Some(position_of_round(round));
+                returned_pass_is_partial = true;
+            } else if solved.is_none() {
                 reached = depth;
                 solved = Some(pass);
                 returned_pass_is_partial = true;
@@ -291,6 +308,34 @@ pub(super) fn run(
         stats,
         warnings,
     })
+}
+
+fn position_of_round(round: super::RootRound) -> Position {
+    let row_strategy = round.p1_strategy.iter().map(|row| row.probability).collect();
+    let col_strategy = round.p2_strategy.iter().map(|row| row.probability).collect();
+    let p1_actions = round
+        .p1_strategy
+        .into_iter()
+        .map(|row| row.commands)
+        .collect::<Vec<_>>();
+    let p2_actions = round
+        .p2_strategy
+        .into_iter()
+        .map(|row| row.commands)
+        .collect::<Vec<_>>();
+    Position {
+        value: round.value,
+        p1: JointActions {
+            total: p1_actions.len(),
+            actions: p1_actions,
+        },
+        p2: JointActions {
+            total: p2_actions.len(),
+            actions: p2_actions,
+        },
+        row_strategy,
+        col_strategy,
+    }
 }
 
 /// The warnings that describe why a solve's answer is approximate.

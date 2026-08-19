@@ -1436,16 +1436,7 @@ mod tests {
                 "informationMode {name:?} resolved {}, which cannot control P2",
                 profile.view.algorithm
             );
-            // A mode that resolves a sampled search takes the derived budget,
-            // which reads the depth and the particle count.
-            let expected = match profile.view.particles {
-                Some(particles) => {
-                    crate::bot::DEFAULT_ROLLOUTS_PER_PARTICLE
-                        * particles as u64
-                        * profile.view.depth as u64
-                }
-                None => crate::bot::DEFAULT_SIMULATION_TURN_BUDGET,
-            };
+            let expected = crate::bot::DEFAULT_SIMULATION_TURN_BUDGET;
             assert_eq!(
                 profile.view.simulation_turn_budget, expected,
                 "informationMode {name:?}"

@@ -110,8 +110,8 @@ use super::belief::{BeliefError, ObservationKey, ParticleBelief};
 use super::eval::EvalContext;
 use super::infoset::{InfoKey, InfoNode, root_strategy};
 use super::mcts::{
-    LOSS, MIN_EXPLORATION, MctsConfig, MctsResult, MctsSamplingError, MctsStats, RunningStats, WIN,
-    draw_index, terminal_value,
+    LOSS, MIN_EXPLORATION, MctsConfig, MctsResult, MctsSamplingError, MctsStats, RunningStats,
+    SampledProgress, SampledRoot, WIN, draw_index, reports_iteration, terminal_value,
 };
 use super::{CancelFlag, JointActionProb, SolveError, SolveWarning, cancel_requested};
 
@@ -283,6 +283,23 @@ pub fn search_belief_cancellable(
     determinize: &DeterminizeConfig,
     cancel: Option<&CancelFlag>,
 ) -> Result<IsmctsResult, IsmctsError> {
+    search_belief_progress_cancellable(
+        seed, belief, meta_dex, pokemon_dex, move_dex, config, determinize, None, cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_belief_progress_cancellable(
+    seed: u64,
+    belief: &UnknownBattleState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &IsmctsConfig,
+    determinize: &DeterminizeConfig,
+    progress: Option<SampledProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<IsmctsResult, IsmctsError> {
     let particles = ParticleBelief::from_belief(
         seed,
         belief,
@@ -292,7 +309,7 @@ pub fn search_belief_cancellable(
         config.particles,
         determinize,
     )?;
-    search_cancellable(seed, &particles, pokemon_dex, move_dex, config, cancel)
+    search_progress_cancellable(seed, &particles, pokemon_dex, move_dex, config, progress, cancel)
 }
 
 /// Searches a particle set that the caller already holds.
@@ -335,6 +352,19 @@ pub fn search_cancellable(
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: &IsmctsConfig,
+    cancel: Option<&CancelFlag>,
+) -> Result<IsmctsResult, IsmctsError> {
+    search_progress_cancellable(seed, belief, pokemon_dex, move_dex, config, None, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_progress_cancellable(
+    seed: u64,
+    belief: &ParticleBelief,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &IsmctsConfig,
+    progress: Option<SampledProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<IsmctsResult, IsmctsError> {
     if belief.is_empty() {
@@ -415,6 +445,19 @@ pub fn search_cancellable(
             }
         }
         values.push(ctx.iterate(&state, root_depth, root_chain, histories));
+        if reports_iteration(values.count)
+            && let Some(progress) = progress
+        {
+            let mut stats = ctx.stats.clone();
+            stats.iterations = values.count;
+            stats.elapsed = started.elapsed();
+            progress(SampledRoot {
+                value: values.mean().clamp(LOSS, WIN),
+                p1_strategy: root_strategy(&ctx.trees[0], &ctx.root_keys[0]),
+                p2_strategy: root_strategy(&ctx.trees[1], &ctx.root_keys[1]),
+                stats,
+            });
+        }
     }
 
     let p1_strategy = root_strategy(&ctx.trees[0], &ctx.root_keys[0]);
