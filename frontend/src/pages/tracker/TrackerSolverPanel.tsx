@@ -240,11 +240,11 @@ function AnswerBody({
  * a battle, and the answer is one command for each active slot.
  *
  * The tracker holds a belief, so the server draws worlds from it and searches
- * them. The panel shows the win odds and the complete strategy of both players,
+ * them. The panel shows the newest win odds and strategy of both players,
  * because the tracker user typed both rosters.
  *
  * `POST /api/solve` registers one job, and its event stream sends each answer.
- * The panel shows the newest completed strategy checkpoint while search runs.
+ * The panel shows each newer strategy checkpoint while the search runs.
  *
  * The panel writes no command to the input bar. Every row is text, and the user
  * types the command they choose.

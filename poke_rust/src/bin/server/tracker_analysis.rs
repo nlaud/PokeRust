@@ -59,7 +59,7 @@ use poke_rust::solver::preview::{
 use poke_rust::solver::{self, CancelFlag, JointActionProb, SolveConfig};
 use poke_rust::state::battle::{BattleState, MatchState, Player};
 
-use crate::bot::{BotProfile, BotSearchConfig, MAX_SAFE_INTEGER};
+use crate::bot::{BotProfile, BotSearchConfig, MAX_PARTICLES, MAX_SAFE_INTEGER};
 use crate::dto::{
     PreviewChoiceDto, StrategyRowDto, TrackerAnalysisCheckpointDto, TrackerAnalysisDto,
     TrackerAnalysisRungDto,
@@ -78,9 +78,9 @@ const MAX_STRATEGY_ROWS: usize = 8;
 /// The largest number of worlds that one team-preview rung draws.
 ///
 /// Each world repeats the cell work of the whole preview matrix, so the cost
-/// grows with this count. A doubles preview holds 32,400 cells, and the time
-/// limit already stops the run.
-const MAX_PREVIEW_WORLDS: usize = 8;
+/// grows with this count. A doubles preview holds 32,400 cells. The shared
+/// simulation-turn budget stops the run.
+const MAX_PREVIEW_WORLDS: usize = MAX_PARTICLES;
 
 /// One bring-and-lead choice, rendered from the roster of one side.
 #[derive(Debug, Clone)]
@@ -187,8 +187,8 @@ pub struct TrackerAnalysisState {
 impl TrackerAnalysisState {
     /// Raises the generation and cancels the running job.
     ///
-    /// Keeps the checkpoint, so the panel shows the last complete answer until
-    /// a newer rung arrives. The `stale` flag of the view marks it.
+    /// Keeps the checkpoint, so the panel shows the last answer until a newer
+    /// rung arrives. The `stale` flag marks the old answer.
     ///
     /// A checkpoint of the position that is ending supplies the comparison win
     /// odds of the next position.
@@ -345,9 +345,10 @@ impl TrackerAnalysisState {
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
             target_depth: profile.map(|p| p.view.depth),
-            rung: self.running.as_ref().and_then(|job| {
-                job.rung.map(|rung| rung_dto(rung, &job.cancel))
-            }),
+            rung: self
+                .running
+                .as_ref()
+                .and_then(|job| job.rung.map(|rung| rung_dto(rung, &job.cancel))),
             checkpoint: self
                 .checkpoint
                 .as_ref()
@@ -660,6 +661,8 @@ pub(crate) struct RungSampling {
 
 /// The result of one rung, before the job renders it.
 pub(crate) struct RungResult {
+    /// True when the solver completed the configured work.
+    pub complete: bool,
     pub depth_reached: u8,
     pub p1_win_odds: f64,
     pub p2_win_odds: f64,
@@ -693,9 +696,25 @@ fn evaluator_name(eval: poke_rust::solver::eval::LeafEvaluator) -> &'static str 
     }
 }
 
+/// True when no warning says that configured work stopped early.
+fn warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
+    !warnings.iter().any(|warning| {
+        matches!(
+            warning,
+            solver::SolveWarning::BudgetExhausted { .. }
+                | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
+                | solver::SolveWarning::DeadlineExceeded { .. }
+                | solver::SolveWarning::DepthNotReached { .. }
+                | solver::SolveWarning::Cancelled
+        )
+    })
+}
+
 /// Converts an exact solver result without changing its completed depth.
 fn exact_rung(result: solver::SolveResult) -> RungResult {
+    let complete = warnings_are_complete(&result.warnings);
     RungResult {
+        complete,
         depth_reached: result.depth_reached,
         p1_win_odds: result.p1_win_odds,
         p2_win_odds: result.p2_win_odds,
@@ -784,6 +803,7 @@ pub(crate) fn one_search(
             )
             .map_err(engine_error)?;
             Ok(RungResult {
+                complete: true,
                 depth_reached: config.depth,
                 p1_win_odds: result.p1_win_odds,
                 p2_win_odds: result.p2_win_odds,
@@ -815,6 +835,7 @@ pub(crate) fn one_search(
             )
             .map_err(engine_error)?;
             Ok(RungResult {
+                complete: true,
                 depth_reached: config.search.depth,
                 p1_win_odds: result.p1_win_odds,
                 p2_win_odds: result.p2_win_odds,
@@ -849,6 +870,7 @@ pub(crate) fn one_search(
             )
             .map_err(engine_error)?;
             Ok(RungResult {
+                complete: true,
                 depth_reached: result.depth_reached,
                 p1_win_odds: result.p1_win_odds,
                 p2_win_odds: result.p2_win_odds,
@@ -882,6 +904,7 @@ pub(crate) fn one_search(
             )
             .map_err(engine_error)?;
             Ok(RungResult {
+                complete: true,
                 depth_reached: config.search.depth,
                 p1_win_odds: result.p1_win_odds,
                 p2_win_odds: result.p2_win_odds,
@@ -961,7 +984,11 @@ fn preview_position(inputs: &LadderInputs) -> Option<&UnknownTeamPreviewState> {
 /// True when the position is the team preview.
 ///
 /// Both sides must have no active Pokemon, and no turn can have run.
-pub(crate) fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, turn_number: u16) -> bool {
+pub(crate) fn position_is_team_preview(
+    p1_is_empty: bool,
+    p2_is_empty: bool,
+    turn_number: u16,
+) -> bool {
     p1_is_empty && p2_is_empty && turn_number == 0
 }
 
@@ -976,6 +1003,7 @@ pub(crate) fn position_is_team_preview(p1_is_empty: bool, p2_is_empty: bool, tur
 pub(crate) fn preview_battle_config(search: BotSearchConfig) -> SolveConfig {
     let sampled = |mcts: poke_rust::solver::mcts::MctsConfig| SolveConfig {
         depth: mcts.depth,
+        iterative_deepening: true,
         damage_rolls: mcts.damage_rolls,
         consider_crit: mcts.consider_crit,
         max_actions_per_player: None,
@@ -1049,7 +1077,7 @@ fn run_preview_rung(
                 generation: inputs.generation,
                 turn_number: inputs.turn_number,
                 position: PositionKind::TeamPreview,
-                depth_reached: depth,
+                depth_reached: round.depth,
                 p1_win_odds: round.value,
                 p2_win_odds: 1.0 - round.value,
                 p1_strategy: preview_rows(&belief.p1_mons, &round.p1_strategy),
@@ -1102,7 +1130,7 @@ fn run_preview_rung(
         generation: inputs.generation,
         turn_number: inputs.turn_number,
         position: PositionKind::TeamPreview,
-        depth_reached: depth,
+        depth_reached: result.depth_reached,
         p1_win_odds: result.p1_win_odds,
         p2_win_odds: result.p2_win_odds,
         p1_strategy: preview_rows(&belief.p1_mons, &result.p1_strategy),
@@ -1777,6 +1805,7 @@ mod tests {
             let config = preview_battle_config(resolved.search);
 
             assert_eq!(config.depth, 1, "{name}");
+            assert!(config.iterative_deepening, "{name}");
             assert_eq!(config.damage_rolls, 16, "{name}");
             assert!(config.consider_crit, "{name}");
             assert_eq!(config.deadline, None, "{name}");
@@ -1791,7 +1820,7 @@ mod tests {
             ("doubleOracle", None, 1),
             ("mcts", None, 1),
             ("ismcts", Some(8), 8),
-            ("mccfr", Some(MAX_PREVIEW_WORLDS + 4), MAX_PREVIEW_WORLDS),
+            ("mccfr", Some(MAX_PREVIEW_WORLDS), MAX_PREVIEW_WORLDS),
         ] {
             let request = crate::bot::BotProfileRequest {
                 algorithm: Some(name.to_string()),
@@ -1984,11 +2013,7 @@ Level: 50
         assert!(rungs.iter().all(|rung| rung.turn_number == 0));
         assert_eq!(noted, vec![inputs.target_depth]);
         let final_rung = rungs.last().expect("a final preview answer");
-        for row in final_rung
-            .p1_strategy
-            .iter()
-            .chain(&final_rung.p2_strategy)
-        {
+        for row in final_rung.p1_strategy.iter().chain(&final_rung.p2_strategy) {
             let choice = row.preview.as_ref().expect("a preview row");
             assert_eq!(choice.leads.len(), 1, "{choice:?}");
             assert!(choice.back.is_empty(), "{choice:?}");
@@ -2013,7 +2038,7 @@ Level: 50
     /// this line its answer names no guess at all.
     #[test]
     fn a_preview_rung_discloses_its_drawn_worlds() {
-        for (algorithm, worlds) in [("doubleOracle", 1usize), ("ismcts", 8)] {
+        for (algorithm, worlds) in [("doubleOracle", 1usize), ("ismcts", 16)] {
             let Some(inputs) = preview_inputs(algorithm, 8_000) else {
                 return;
             };
@@ -2034,9 +2059,9 @@ Level: 50
         }
     }
 
-    /// A cancelled preview search keeps every strategy that it completed.
+    /// A preview search that starts cancelled publishes no strategy.
     #[test]
-    fn a_cancelled_preview_ladder_keeps_a_partial_strategy() {
+    fn a_cancelled_preview_ladder_publishes_no_strategy() {
         let Some(inputs) = preview_inputs("doubleOracle", 8_000) else {
             return;
         };
@@ -2046,11 +2071,9 @@ Level: 50
         let (outcome, rungs, _) = run_and_collect(&inputs, &cancel);
 
         assert!(outcome.is_ok(), "{outcome:?}");
-        assert!(!rungs.is_empty(), "the cancelled ladder lost its strategy");
         assert!(
-            rungs.iter().all(|rung| !rung.p1_strategy.is_empty()
-                && !rung.p2_strategy.is_empty()),
-            "the cancelled ladder published an empty strategy"
+            rungs.is_empty(),
+            "the cancelled ladder published a strategy"
         );
     }
 
@@ -2126,7 +2149,19 @@ Level: 50
         });
 
         assert_eq!(rung.depth_reached, 1);
+        assert!(!rung.complete);
         assert!(rung.warnings[0].contains("depth 1 of the 3"));
+    }
+
+    /// An exact search that spends the shared budget is partial.
+    #[test]
+    fn a_budget_warning_marks_an_exact_rung_partial() {
+        assert!(!warnings_are_complete(&[
+            solver::SolveWarning::SimulationTurnBudgetExhausted { budget: 10 }
+        ]));
+        assert!(warnings_are_complete(&[
+            solver::SolveWarning::ChanceMassDiscarded { max_fraction: 0.1 }
+        ]));
     }
 
     /// A repeated warning appears one time, and a distinct one survives.

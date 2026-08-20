@@ -44,10 +44,10 @@
 //! `analysis.rs` applies to the battle endpoints.
 
 use std::cell::Cell;
-use std::convert::Infallible;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -57,8 +57,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use poke_rust::information::determinize::{DeterminizeConfig, determinize_seeded};
@@ -162,7 +162,10 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 ///
 /// Returns 404 for an unknown session, and 422 for an invalid profile. A second
 /// call for the same session cancels the earlier job, so one job runs at a time.
-pub async fn start_solve(State(app): State<AppState>, Json(req): Json<SolveRequestDto>) -> Response {
+pub async fn start_solve(
+    State(app): State<AppState>,
+    Json(req): Json<SolveRequestDto>,
+) -> Response {
     let source = match SolveSource::from_wire(&req.source) {
         Ok(source) => source,
         Err(message) => return error(StatusCode::UNPROCESSABLE_ENTITY, message),
@@ -259,10 +262,13 @@ pub async fn solve_events(State(app): State<AppState>, Path(id): Path<String>) -
         Err(message) => {
             // The stream still opens, so the client reads the reason on the
             // stream rather than as a status code it cannot see.
-            let _ = tx.try_send(event("failed", SolveFailedDto {
-                job_id: id.clone(),
-                message,
-            }));
+            let _ = tx.try_send(event(
+                "failed",
+                SolveFailedDto {
+                    job_id: id.clone(),
+                    message,
+                },
+            ));
             lock_jobs(&app).remove(&id);
             return Sse::new(ReceiverStream::new(rx).map(Ok::<Event, Infallible>))
                 .keep_alive(KeepAlive::default())
@@ -345,7 +351,9 @@ pub async fn solve_events(State(app): State<AppState>, Path(id): Path<String>) -
             }
         };
         let _ = tx.blocking_send(ended);
-        jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&job_id);
+        jobs.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job_id);
     });
 
     Sse::new(ReceiverStream::new(rx).map(Ok::<Event, Infallible>))
@@ -397,32 +405,29 @@ fn collect_inputs(
     profile: &BotProfile,
 ) -> Result<JobInputs, String> {
     let seed = profile.view.seed.unwrap_or_else(random_seed);
-    let common = |position,
-                  generation,
-                  inference,
-                  belief,
-                  state,
-                  preview_belief,
-                  active_per_side| JobInputs {
-        search: profile.search,
-        reveal_p2: match source {
-            // The tracker user typed both rosters, so both strategies are
-            // theirs to read.
-            SolveSource::Tracker => true,
-            SolveSource::Battle => profile.view.reveal_strategy,
-        },
-        seed,
-        target_depth: profile.view.depth.max(1),
-        generation,
-        position,
-        dexes: Arc::clone(&app.dexes),
-        meta: Arc::clone(&app.meta),
-        format: MetaFormat::from_active_per_side(active_per_side),
-        inference,
-        belief,
-        state,
-        preview_belief,
-    };
+    let common =
+        |position, generation, inference, belief, state, preview_belief, active_per_side| {
+            JobInputs {
+                search: profile.search,
+                reveal_p2: match source {
+                    // The tracker user typed both rosters, so both strategies are
+                    // theirs to read.
+                    SolveSource::Tracker => true,
+                    SolveSource::Battle => profile.view.reveal_strategy,
+                },
+                seed,
+                target_depth: profile.view.depth.max(1),
+                generation,
+                position,
+                dexes: Arc::clone(&app.dexes),
+                meta: Arc::clone(&app.meta),
+                format: MetaFormat::from_active_per_side(active_per_side),
+                inference,
+                belief,
+                state,
+                preview_belief,
+            }
+        };
 
     match source {
         SolveSource::Tracker => {
@@ -468,9 +473,11 @@ fn collect_inputs(
             let session = sessions.get(session_id).ok_or_else(session_gone)?;
             match &session.state {
                 MatchState::TeamPreviewState(_) => {
-                    return Err("This endpoint answers a battle position. Resolve team preview \
+                    return Err(
+                        "This endpoint answers a battle position. Resolve team preview \
                                 first."
-                        .to_string());
+                            .to_string(),
+                    );
                 }
                 MatchState::GameOverState { .. } => {
                     return Err("The battle is over, so there is nothing to choose.".to_string());
@@ -656,11 +663,9 @@ fn run_job(
 
     // A solver panic must not end the whole task without a reason, so catch it
     // here and report it as an ordinary job failure.
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match inputs.position {
-            PositionKind::TeamPreview => run_preview(inputs, meta, &publisher, cancel),
-            PositionKind::Battle => run_battle_ladder(inputs, meta, &publisher, cancel),
-        }
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match inputs.position {
+        PositionKind::TeamPreview => run_preview(inputs, meta, &publisher, cancel),
+        PositionKind::Battle => run_battle_ladder(inputs, meta, &publisher, cancel),
     }));
     match caught {
         Ok(Ok(())) => Ok(publisher.updates()),
@@ -779,12 +784,7 @@ fn run_battle_ladder(
 
         let mut warnings = rung.warnings.clone();
         warnings.extend(notes.iter().cloned());
-        publisher.send(complete_answer(
-            &rung,
-            &battle,
-            p2_is_playable,
-            warnings,
-        ));
+        publisher.send(complete_answer(&rung, &battle, p2_is_playable, warnings));
         // The search stopped short of the depth it was asked for, so a deeper
         // rung would stop in the same place.
         if rung.depth_reached < depth || cancel.simulation_budget_hit() {
@@ -825,7 +825,7 @@ fn complete_answer(
 ) -> Answer {
     Answer {
         depth: rung.depth_reached,
-        complete: true,
+        complete: rung.complete,
         value: rung.p1_win_odds,
         p1_win_odds: rung.p1_win_odds,
         p2_win_odds: rung.p2_win_odds,
@@ -840,9 +840,9 @@ fn complete_answer(
 
 /// Searches the team preview and publishes each completed strategy.
 ///
-/// The preview search runs double oracle one time over the whole choice matrix,
-/// so it has no depth ladder. Each double-oracle round publishes a partial
-/// answer. The converged strategy publishes the final answer.
+/// The preview search completes a lower battle depth before it starts the next
+/// depth. Each completed double-oracle round publishes a partial answer. The
+/// final answer uses the deepest depth that completed a round.
 fn run_preview(
     inputs: &JobInputs,
     meta: &MetaDex,
@@ -867,7 +867,7 @@ fn run_preview(
 
     let round = |round: PreviewRound| {
         publisher.send(Answer {
-            depth,
+            depth: round.depth,
             complete: false,
             value: round.value,
             p1_win_odds: round.value,
@@ -924,8 +924,17 @@ fn run_preview(
     }
 
     publisher.send(Answer {
-        depth,
-        complete: true,
+        depth: result.depth_reached,
+        complete: result.depth_reached == depth
+            && !result.warnings.iter().any(|warning| {
+                matches!(
+                    warning,
+                    solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
+                        | solver::SolveWarning::DeadlineExceeded { .. }
+                        | solver::SolveWarning::Cancelled
+                        | solver::SolveWarning::DepthNotReached { .. }
+                )
+            }),
         value: result.p1_win_odds,
         p1_win_odds: result.p1_win_odds,
         p2_win_odds: result.p2_win_odds,

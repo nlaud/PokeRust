@@ -116,14 +116,8 @@ fn degenerate(a: &[Vec<f64>], m: usize, n: usize) -> Option<MatrixSolution> {
     }
     if n == 1 {
         // P1 maximizes down the only column.
-        let value = a
-            .iter()
-            .map(|row| row[0])
-            .fold(f64::NEG_INFINITY, f64::max);
-        let count = a
-            .iter()
-            .filter(|row| (row[0] - value).abs() <= EPS)
-            .count();
+        let value = a.iter().map(|row| row[0]).fold(f64::NEG_INFINITY, f64::max);
+        let count = a.iter().filter(|row| (row[0] - value).abs() <= EPS).count();
         return Some(MatrixSolution {
             value,
             row_strategy: a
@@ -218,9 +212,9 @@ fn undominated(a: &[Vec<f64>], m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
                 .iter()
                 .copied()
                 .filter(|&i| {
-                    !rows.iter().any(|&k| {
-                        k != i && cols.iter().all(|&j| a[k][j] > a[i][j] + EPS)
-                    })
+                    !rows
+                        .iter()
+                        .any(|&k| k != i && cols.iter().all(|&j| a[k][j] > a[i][j] + EPS))
                 })
                 .collect();
             if keep.len() < rows.len() && !keep.is_empty() {
@@ -234,9 +228,9 @@ fn undominated(a: &[Vec<f64>], m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
                 .iter()
                 .copied()
                 .filter(|&j| {
-                    !cols.iter().any(|&l| {
-                        l != j && rows.iter().all(|&i| a[i][l] < a[i][j] - EPS)
-                    })
+                    !cols
+                        .iter()
+                        .any(|&l| l != j && rows.iter().all(|&i| a[i][l] < a[i][j] - EPS))
                 })
                 .collect();
             if keep.len() < cols.len() && !keep.is_empty() {
@@ -496,6 +490,8 @@ pub struct OracleStats {
     pub lps_solved: u64,
     /// Best-response rows and columns that a bound test abandoned.
     pub cutoffs: u64,
+    /// Rounds that completed both best-response checks.
+    pub rounds_completed: u64,
 }
 
 /// The value window and the payoff range of one [`double_oracle`] run.
@@ -592,6 +588,14 @@ pub trait CellOracle {
         1
     }
 
+    /// True after the caller can no longer compute an exact cell.
+    ///
+    /// The run then returns the last round that completed before the stop.
+    /// The default keeps an unbounded matrix solve unchanged.
+    fn stop_requested(&mut self) -> bool {
+        false
+    }
+
     /// The restricted equilibrium after both best-response checks of one round.
     ///
     /// `stats` holds the counters of this run so far. The caller adds them to
@@ -666,6 +670,8 @@ where
         return (best, stats);
     }
     best.value = 0.5 * (limits.low + limits.high);
+    best.row_strategy.fill(1.0 / rows as f64);
+    best.col_strategy.fill(1.0 / cols as f64);
 
     let mut alpha = limits.alpha;
     let mut beta = limits.beta;
@@ -678,7 +684,10 @@ where
 
     // Each round adds at least one action to at least one side or stops. This
     // limit is therefore only reachable if something is badly wrong.
-    for round in 0..(rows + cols + 2) {
+    'rounds: for round in 0..(rows + cols + 2) {
+        if oracle.stop_requested() {
+            break;
+        }
         // The round needs every restricted cell, so the whole list goes to the
         // oracle in one call. A serial oracle answers the jobs in this order,
         // which is the order that a one-cell-at-a-time run used.
@@ -712,33 +721,62 @@ where
 
         let row_strategy = lift(&solution.row_strategy, &restricted_rows, rows);
         let col_strategy = lift(&solution.col_strategy, &restricted_cols, cols);
-        best = MatrixSolution {
+        let candidate = MatrixSolution {
             value: solution.value,
             row_strategy: row_strategy.clone(),
             col_strategy: col_strategy.clone(),
             used_lp: solution.used_lp,
         };
+        if oracle.stop_requested() {
+            break;
+        }
 
         let limit = oracle.batch_limit();
-        prefetch_rows(&mut cells, &col_strategy, round, limit, &mut stats, &mut oracle);
-        let (row_br_value, row_br) = best_response_row(
+        prefetch_rows(
+            &mut cells,
+            &col_strategy,
+            round,
+            limit,
+            &mut stats,
+            &mut oracle,
+        );
+        if oracle.stop_requested() {
+            break;
+        }
+        let Some((row_br_value, row_br)) = best_response_row(
             &mut cells,
             &col_strategy,
             limits.high,
             &mut stats,
             &mut oracle,
+        ) else {
+            break 'rounds;
+        };
+        prefetch_cols(
+            &mut cells,
+            &row_strategy,
+            round,
+            limit,
+            &mut stats,
+            &mut oracle,
         );
-        prefetch_cols(&mut cells, &row_strategy, round, limit, &mut stats, &mut oracle);
-        let (col_br_value, col_br) = best_response_col(
+        if oracle.stop_requested() {
+            break;
+        }
+        let Some((col_br_value, col_br)) = best_response_col(
             &mut cells,
             &row_strategy,
             limits.low,
             &mut stats,
             &mut oracle,
-        );
+        ) else {
+            break 'rounds;
+        };
 
         // Both best-response checks are complete, so this round has an answer.
         // A reporter can publish it now. The loop reads nothing back.
+        best = candidate;
+        stats.rounds_completed += 1;
         oracle.round(&best, &stats);
 
         // P2 can hold P1 to `row_br_value` by playing `col_strategy`, and P1 can
@@ -902,7 +940,7 @@ fn best_response_row<O>(
     high: f64,
     stats: &mut OracleStats,
     oracle: &mut O,
-) -> (f64, usize)
+) -> Option<(f64, usize)>
 where
     O: CellOracle,
 {
@@ -935,6 +973,9 @@ where
                     stats.cells_requested += 1;
                     let value = oracle.cell(i, j);
                     row[j] = Some(value);
+                    if oracle.stop_requested() {
+                        return None;
+                    }
                     value
                 }
             };
@@ -947,7 +988,7 @@ where
         }
     }
 
-    (best_value, best_row)
+    Some((best_value, best_row))
 }
 
 /// P2's best pure response to `row_strategy`, and its value in P1's terms.
@@ -960,7 +1001,7 @@ fn best_response_col<O>(
     low: f64,
     stats: &mut OracleStats,
     oracle: &mut O,
-) -> (f64, usize)
+) -> Option<(f64, usize)>
 where
     O: CellOracle,
 {
@@ -996,6 +1037,9 @@ where
                     stats.cells_requested += 1;
                     let value = oracle.cell(i, j);
                     cells[i][j] = Some(value);
+                    if oracle.stop_requested() {
+                        return None;
+                    }
                     value
                 }
             };
@@ -1008,7 +1052,7 @@ where
         }
     }
 
-    (best_value, best_col)
+    Some((best_value, best_col))
 }
 
 /// The action indices that the restricted game opens with.
@@ -1051,8 +1095,14 @@ mod tests {
 
         let row_sum: f64 = solution.row_strategy.iter().sum();
         let col_sum: f64 = solution.col_strategy.iter().sum();
-        assert!((row_sum - 1.0).abs() < tol, "row strategy sums to {row_sum}");
-        assert!((col_sum - 1.0).abs() < tol, "col strategy sums to {col_sum}");
+        assert!(
+            (row_sum - 1.0).abs() < tol,
+            "row strategy sums to {row_sum}"
+        );
+        assert!(
+            (col_sum - 1.0).abs() < tol,
+            "col strategy sums to {col_sum}"
+        );
         assert!(solution.row_strategy.iter().all(|&p| p >= -tol));
         assert!(solution.col_strategy.iter().all(|&p| p >= -tol));
 
@@ -1382,5 +1432,94 @@ mod tests {
         // The hook must not change the answer.
         assert!((solution.value - 0.5).abs() < 1e-7);
         assert_equilibrium(&payoffs, &solution, 1e-7);
+    }
+
+    /// A stopped round must not replace the last complete strategy.
+    #[test]
+    fn a_stopped_round_keeps_the_last_complete_strategy() {
+        struct StoppingOracle<'a> {
+            payoffs: &'a [Vec<f64>],
+            calls: std::rc::Rc<std::cell::Cell<usize>>,
+            rounds: std::rc::Rc<std::cell::RefCell<Vec<MatrixSolution>>>,
+        }
+
+        impl CellOracle for StoppingOracle<'_> {
+            fn cell(&mut self, row: usize, col: usize) -> f64 {
+                self.calls.set(self.calls.get() + 1);
+                self.payoffs[row][col]
+            }
+
+            fn stop_requested(&mut self) -> bool {
+                self.calls.get() >= 9
+            }
+
+            fn round(&mut self, solution: &MatrixSolution, _stats: &OracleStats) {
+                self.rounds.borrow_mut().push(solution.clone());
+            }
+        }
+
+        // The seeded 2-by-2 game has a mixed equilibrium. The first round adds
+        // row 2 and column 2. The stop occurs on their missing cross cell.
+        let payoffs = vec![
+            vec![1.0, 0.0, 0.2],
+            vec![0.0, 1.0, 0.2],
+            vec![0.8, 0.8, 1.0],
+        ];
+        let seed = [0, 1];
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let rounds = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (solution, _) = double_oracle_with(
+            3,
+            3,
+            OracleSeed {
+                rows: Some(&seed),
+                cols: Some(&seed),
+            },
+            OracleLimits::default(),
+            StoppingOracle {
+                payoffs: &payoffs,
+                calls: std::rc::Rc::clone(&calls),
+                rounds: std::rc::Rc::clone(&rounds),
+            },
+        );
+
+        let rounds = rounds.borrow();
+        assert_eq!(calls.get(), 9);
+        assert_eq!(rounds.len(), 1, "the stopped round reached the reporter");
+        assert_eq!(solution, rounds[0]);
+        assert_eq!(solution.row_strategy, vec![0.5, 0.5, 0.0]);
+        assert_eq!(solution.col_strategy, vec![0.5, 0.5, 0.0]);
+    }
+
+    /// A stop before the first complete round must not select action zero.
+    #[test]
+    fn a_stop_before_the_first_round_returns_a_uniform_fallback() {
+        struct FirstCellStop {
+            calls: usize,
+        }
+
+        impl CellOracle for FirstCellStop {
+            fn cell(&mut self, _row: usize, _col: usize) -> f64 {
+                self.calls += 1;
+                0.9
+            }
+
+            fn stop_requested(&mut self) -> bool {
+                self.calls > 0
+            }
+        }
+
+        let (solution, stats) = double_oracle_with(
+            3,
+            2,
+            OracleSeed::default(),
+            OracleLimits::default(),
+            FirstCellStop { calls: 0 },
+        );
+
+        assert_eq!(stats.rounds_completed, 0);
+        assert_eq!(solution.row_strategy, vec![1.0 / 3.0; 3]);
+        assert_eq!(solution.col_strategy, vec![0.5; 2]);
+        assert_eq!(solution.value, 0.5);
     }
 }

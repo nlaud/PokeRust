@@ -129,9 +129,9 @@
 //! The search does not charge these decisions as another depth.
 //! [`SolveConfig::max_forced_chain`](super::SolveConfig::max_forced_chain) limits the decision chain.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -205,7 +205,11 @@ pub(super) fn run(
     // matrix would be constant and the "equilibrium" arbitrary. One ply is the
     // minimum that means anything.
     let target = config.depth.max(1);
-    let first = if config.iterative_deepening { 1 } else { target };
+    let first = if config.iterative_deepening {
+        1
+    } else {
+        target
+    };
 
     let mut reached = first;
     let mut solved: Option<Position> = None;
@@ -311,8 +315,16 @@ pub(super) fn run(
 }
 
 fn position_of_round(round: super::RootRound) -> Position {
-    let row_strategy = round.p1_strategy.iter().map(|row| row.probability).collect();
-    let col_strategy = round.p2_strategy.iter().map(|row| row.probability).collect();
+    let row_strategy = round
+        .p1_strategy
+        .iter()
+        .map(|row| row.probability)
+        .collect();
+    let col_strategy = round
+        .p2_strategy
+        .iter()
+        .map(|row| row.probability)
+        .collect();
     let p1_actions = round
         .p1_strategy
         .into_iter()
@@ -633,6 +645,10 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
         (self.helpers.len() + 1) * PREFETCH_JOBS_PER_WORKER
     }
 
+    fn stop_requested(&mut self) -> bool {
+        self.ctx.stopped() || self.helpers.iter().flatten().any(SearchContext::stopped)
+    }
+
     fn round(&mut self, solution: &MatrixSolution, oracle: &matrix::OracleStats) {
         let Some(report) = self.report else {
             return;
@@ -881,9 +897,7 @@ impl<'a> SearchContext<'a> {
         };
         let deadline_hit = self.deadline_expired();
         let cancel_hit = self.cancel_requested();
-        let simulation_budget_hit = self
-            .cancel
-            .is_some_and(CancelFlag::simulation_budget_hit);
+        let simulation_budget_hit = self.cancel.is_some_and(CancelFlag::simulation_budget_hit);
         budget_hit || simulation_budget_hit || deadline_hit || cancel_hit
     }
 
@@ -917,9 +931,7 @@ impl<'a> SearchContext<'a> {
     /// Whether a stop reason has latched.
     pub(super) fn stopped(&self) -> bool {
         self.budget_hit
-            || self
-                .cancel
-                .is_some_and(CancelFlag::simulation_budget_hit)
+            || self.cancel.is_some_and(CancelFlag::simulation_budget_hit)
             || self.deadline_hit
             || self.cancel_hit
     }
@@ -1266,7 +1278,14 @@ impl<'a> SearchContext<'a> {
                 let mut answer_beta = beta;
                 for p2_action in &p2.actions {
                     let value = self.serial_cell(
-                        state, p1_action, p2_action, depth, chain, alpha, answer_beta, second,
+                        state,
+                        p1_action,
+                        p2_action,
+                        depth,
+                        chain,
+                        alpha,
+                        answer_beta,
+                        second,
                     );
                     answer = answer.min(value);
                     answer_beta = answer_beta.min(answer);
@@ -1291,7 +1310,14 @@ impl<'a> SearchContext<'a> {
                 let mut answer_alpha = alpha;
                 for p1_action in &p1.actions {
                     let value = self.serial_cell(
-                        state, p1_action, p2_action, depth, chain, answer_alpha, beta, second,
+                        state,
+                        p1_action,
+                        p2_action,
+                        depth,
+                        chain,
+                        answer_alpha,
+                        beta,
+                        second,
                     );
                     answer = answer.max(value);
                     answer_alpha = answer_alpha.max(answer);
@@ -1617,10 +1643,7 @@ impl<'a> RootCells<'a> {
             .ctx
             .cancel
             .is_some_and(CancelFlag::simulation_budget_hit)
-            && let Some(budget) = self
-                .ctx
-                .cancel
-                .and_then(CancelFlag::simulation_turn_budget)
+            && let Some(budget) = self.ctx.cancel.and_then(CancelFlag::simulation_turn_budget)
         {
             warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
         }

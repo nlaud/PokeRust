@@ -79,9 +79,7 @@ use crate::state::battle::{
 use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::chance::ChanceMode;
-use super::matrix::{
-    self, CellOracle, EPS, MatrixSolution, OracleLimits, OracleSeed, OracleStats,
-};
+use super::matrix::{self, CellOracle, EPS, MatrixSolution, OracleLimits, OracleSeed, OracleStats};
 use super::search;
 use super::{CancelFlag, SolveConfig, SolveWarning};
 
@@ -263,6 +261,8 @@ pub struct PreviewResult {
     pub p1_strategy: Vec<PreviewChoiceProb>,
     /// P2's optimal mixed strategy, likewise.
     pub p2_strategy: Vec<PreviewChoiceProb>,
+    /// The battle depth of the returned preview strategy.
+    pub depth_reached: u8,
     pub stats: PreviewStats,
     /// Why the answer is approximate. Holds the preview deadline warning and
     /// every distinct warning that a battle solve reported.
@@ -272,6 +272,7 @@ pub struct PreviewResult {
 /// One completed double-oracle round of a preview search.
 #[derive(Debug, Clone)]
 pub struct PreviewRound {
+    pub depth: u8,
     pub value: f64,
     pub p1_strategy: Vec<PreviewChoiceProb>,
     pub p2_strategy: Vec<PreviewChoiceProb>,
@@ -463,14 +464,7 @@ pub fn solve_team_preview_cancellable(
     config: &PreviewConfig,
     cancel: Option<&CancelFlag>,
 ) -> Result<PreviewResult, PreviewError> {
-    solve_team_preview_progress_cancellable(
-        state,
-        pokemon_dex,
-        move_dex,
-        config,
-        None,
-        cancel,
-    )
+    solve_team_preview_progress_cancellable(state, pokemon_dex, move_dex, config, None, cancel)
 }
 
 /// [`solve_team_preview_cancellable`], with completed-round reports.
@@ -509,7 +503,7 @@ pub fn solve_team_preview_cached(
     solve_preview_with_cancel(state, pokemon_dex, move_dex, config, cache, None, None)
 }
 
-/// The body of every single-world preview solve.
+/// Runs the requested preview depths under one shared work budget.
 fn solve_preview_with_cancel(
     state: &TeamPreviewState,
     pokemon_dex: &HashMap<Species, PokemonData>,
@@ -519,6 +513,125 @@ fn solve_preview_with_cancel(
     progress: Option<PreviewProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<PreviewResult, PreviewError> {
+    if !config.battle.iterative_deepening || config.battle.depth <= 1 {
+        return Ok(solve_preview_pass(
+            state,
+            pokemon_dex,
+            move_dex,
+            config,
+            cache,
+            progress,
+            cancel,
+            OracleSeed::default(),
+        )?
+        .result);
+    }
+
+    let started = Instant::now();
+    let mut total_stats = PreviewStats::default();
+    let mut total_warnings = Vec::new();
+    let mut best: Option<PreviewResult> = None;
+    let mut seed_rows = Vec::new();
+    let mut seed_cols = Vec::new();
+
+    for depth in 1..=config.battle.depth {
+        if best.is_some()
+            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit())
+        {
+            break;
+        }
+        let remaining_deadline = config
+            .deadline
+            .map(|deadline| deadline.saturating_sub(started.elapsed()));
+        if best.is_some() && remaining_deadline.is_some_and(|duration| duration.is_zero()) {
+            break;
+        }
+        let pass_config = PreviewConfig {
+            battle: SolveConfig {
+                depth,
+                iterative_deepening: false,
+                ..config.battle
+            },
+            deadline: remaining_deadline,
+        };
+        let prior_stats = total_stats.clone();
+        let report = |mut round: PreviewRound| {
+            add_preview_stats(&mut round.stats, &prior_stats);
+            round.stats.elapsed = started.elapsed();
+            if let Some(progress) = progress {
+                progress(round);
+            }
+        };
+        let seed = OracleSeed {
+            rows: (!seed_rows.is_empty()).then_some(seed_rows.as_slice()),
+            cols: (!seed_cols.is_empty()).then_some(seed_cols.as_slice()),
+        };
+        let mut pass = solve_preview_pass(
+            state,
+            pokemon_dex,
+            move_dex,
+            &pass_config,
+            cache,
+            progress.map(|_| &report as PreviewProgress<'_>),
+            cancel,
+            seed,
+        )?;
+
+        let stopped = preview_warnings_stopped(&pass.result.warnings)
+            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit());
+        add_preview_stats(&mut total_stats, &pass.result.stats);
+        for warning in pass.result.warnings.drain(..) {
+            merge_warning(&mut total_warnings, warning);
+        }
+
+        if pass.oracle.rounds_completed > 0 || best.is_none() {
+            seed_rows = support_indices(&pass.solution.row_strategy);
+            seed_cols = support_indices(&pass.solution.col_strategy);
+            pass.result.stats = total_stats.clone();
+            pass.result.stats.elapsed = started.elapsed();
+            pass.result.warnings = total_warnings.clone();
+            best = Some(pass.result);
+        }
+
+        if stopped {
+            break;
+        }
+    }
+
+    let mut result = best.expect("depth 1 always runs when preview choices exist");
+    result.stats = total_stats;
+    result.stats.elapsed = started.elapsed();
+    result.warnings = total_warnings;
+    if result.depth_reached < config.battle.depth {
+        merge_warning(
+            &mut result.warnings,
+            SolveWarning::DepthNotReached {
+                target: config.battle.depth,
+                reached: result.depth_reached,
+            },
+        );
+    }
+    Ok(result)
+}
+
+struct PreviewPass {
+    result: PreviewResult,
+    solution: MatrixSolution,
+    oracle: OracleStats,
+}
+
+/// Solves one battle depth of one concrete preview state.
+#[allow(clippy::too_many_arguments)]
+fn solve_preview_pass(
+    state: &TeamPreviewState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &PreviewConfig,
+    cache: &mut PreviewCellCache,
+    progress: Option<PreviewProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+    seed: OracleSeed<'_>,
+) -> Result<PreviewPass, PreviewError> {
     let battle_config = battle_config_of(config);
     let mut ctx = PreviewContext::new(
         state,
@@ -535,7 +648,7 @@ fn solve_preview_with_cancel(
     let (solution, oracle) = matrix::double_oracle_with(
         rows,
         cols,
-        OracleSeed::default(),
+        seed,
         OracleLimits {
             alpha: LOSS,
             beta: WIN,
@@ -566,14 +679,20 @@ fn solve_preview_with_cancel(
         merge_warning(&mut warnings, SolveWarning::Cancelled);
     }
 
-    Ok(PreviewResult {
+    let result = PreviewResult {
         value,
         p1_win_odds: value,
         p2_win_odds: WIN - value,
         p1_strategy: strategy_of(&ctx.p1, &solution.row_strategy),
         p2_strategy: strategy_of(&ctx.p2, &solution.col_strategy),
+        depth_reached: config.battle.depth,
         stats: ctx.stats,
         warnings,
+    };
+    Ok(PreviewPass {
+        result,
+        solution,
+        oracle,
     })
 }
 
@@ -727,6 +846,8 @@ pub struct OpenListResult {
     pub p1_strategy: Vec<PreviewChoiceProb>,
     /// P2's mixed strategy, likewise.
     pub p2_strategy: Vec<PreviewChoiceProb>,
+    /// The battle depth of the returned preview strategy.
+    pub depth_reached: u8,
     /// The sampling error of `value`.
     pub sampling: PreviewSamplingError,
     /// The summed cost of every world. `cells_total` counts the preview matrix
@@ -906,6 +1027,140 @@ pub fn solve_open_list_preview_progress_cancellable(
     progress: Option<PreviewProgress<'_>>,
     cancel: Option<&CancelFlag>,
 ) -> Result<OpenListResult, OpenListError> {
+    if !config.preview.battle.iterative_deepening || config.preview.battle.depth <= 1 {
+        return Ok(solve_open_list_preview_pass(
+            belief,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            config,
+            determinize,
+            progress,
+            cancel,
+            OracleSeed::default(),
+        )?
+        .result);
+    }
+
+    let started = Instant::now();
+    let mut total_stats = PreviewStats::default();
+    let mut total_warnings = Vec::new();
+    let mut draw_warnings = Vec::new();
+    let mut best: Option<OpenListResult> = None;
+    let mut seed_rows = Vec::new();
+    let mut seed_cols = Vec::new();
+
+    for depth in 1..=config.preview.battle.depth {
+        if best.is_some()
+            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit())
+        {
+            break;
+        }
+        let remaining_deadline = config
+            .preview
+            .deadline
+            .map(|deadline| deadline.saturating_sub(started.elapsed()));
+        if best.is_some() && remaining_deadline.is_some_and(|duration| duration.is_zero()) {
+            break;
+        }
+        let pass_config = OpenListConfig {
+            preview: PreviewConfig {
+                battle: SolveConfig {
+                    depth,
+                    iterative_deepening: false,
+                    ..config.preview.battle
+                },
+                deadline: remaining_deadline,
+            },
+            ..*config
+        };
+        let prior_stats = total_stats.clone();
+        let report = |mut round: PreviewRound| {
+            add_preview_stats(&mut round.stats, &prior_stats);
+            round.stats.elapsed = started.elapsed();
+            if let Some(progress) = progress {
+                progress(round);
+            }
+        };
+        let seed = OracleSeed {
+            rows: (!seed_rows.is_empty()).then_some(seed_rows.as_slice()),
+            cols: (!seed_cols.is_empty()).then_some(seed_cols.as_slice()),
+        };
+        let mut pass = solve_open_list_preview_pass(
+            belief,
+            meta_dex,
+            pokemon_dex,
+            move_dex,
+            &pass_config,
+            determinize,
+            progress.map(|_| &report as PreviewProgress<'_>),
+            cancel,
+            seed,
+        )?;
+
+        let stopped = preview_warnings_stopped(&pass.result.warnings)
+            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit());
+        add_preview_stats(&mut total_stats, &pass.result.stats);
+        for warning in pass.result.warnings.drain(..) {
+            merge_warning(&mut total_warnings, warning);
+        }
+        for warning in pass.result.draw_warnings.drain(..) {
+            if !draw_warnings.contains(&warning) {
+                draw_warnings.push(warning);
+            }
+        }
+
+        if pass.oracle.rounds_completed > 0 || best.is_none() {
+            seed_rows = support_indices(&pass.solution.row_strategy);
+            seed_cols = support_indices(&pass.solution.col_strategy);
+            pass.result.stats = total_stats.clone();
+            pass.result.stats.elapsed = started.elapsed();
+            pass.result.warnings = total_warnings.clone();
+            pass.result.draw_warnings = draw_warnings.clone();
+            best = Some(pass.result);
+        }
+
+        if stopped {
+            break;
+        }
+    }
+
+    let mut result = best.expect("depth 1 always runs when preview choices exist");
+    result.stats = total_stats;
+    result.stats.elapsed = started.elapsed();
+    result.warnings = total_warnings;
+    result.draw_warnings = draw_warnings;
+    if result.depth_reached < config.preview.battle.depth {
+        merge_warning(
+            &mut result.warnings,
+            SolveWarning::DepthNotReached {
+                target: config.preview.battle.depth,
+                reached: result.depth_reached,
+            },
+        );
+    }
+    Ok(result)
+}
+
+struct OpenListPass {
+    result: OpenListResult,
+    solution: MatrixSolution,
+    oracle: OracleStats,
+}
+
+/// Solves one battle depth across one set of sampled preview worlds.
+#[allow(clippy::too_many_arguments)]
+fn solve_open_list_preview_pass(
+    belief: &UnknownTeamPreviewState,
+    meta_dex: &MetaDex,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &OpenListConfig,
+    determinize: &DeterminizeConfig,
+    progress: Option<PreviewProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+    seed: OracleSeed<'_>,
+) -> Result<OpenListPass, OpenListError> {
     let started = Instant::now();
     let drawn = open_list_worlds(belief, meta_dex, pokemon_dex, move_dex, config, determinize)?;
 
@@ -962,7 +1217,7 @@ pub fn solve_open_list_preview_progress_cancellable(
     let (solution, oracle) = matrix::double_oracle_with(
         rows,
         cols,
-        OracleSeed::default(),
+        seed,
         OracleLimits {
             alpha: LOSS,
             beta: WIN,
@@ -1039,16 +1294,22 @@ pub fn solve_open_list_preview_progress_cancellable(
     }
 
     let value = solution.value.clamp(LOSS, WIN);
-    Ok(OpenListResult {
+    let result = OpenListResult {
         value,
         p1_win_odds: value,
         p2_win_odds: WIN - value,
         p1_strategy: strategy_of(&contexts[0].p1, &solution.row_strategy),
         p2_strategy: strategy_of(&contexts[0].p2, &solution.col_strategy),
+        depth_reached: config.preview.battle.depth,
         sampling: sampling_error(per_world_values),
         stats,
         warnings,
         draw_warnings,
+    };
+    Ok(OpenListPass {
+        result,
+        solution,
+        oracle,
     })
 }
 
@@ -1209,18 +1470,26 @@ impl<'a> PreviewContext<'a> {
         self.stats.lps_solved += ctx.stats.lps_solved;
         self.stats.battles_solved += ctx.stats.nodes_expanded;
 
-        let cell_warnings =
-            search::stop_warnings(&ctx, self.battle_config, ctx.stopped(), self.depth, self.depth);
+        let cell_warnings = search::stop_warnings(
+            &ctx,
+            self.battle_config,
+            ctx.stopped(),
+            self.depth,
+            self.depth,
+        );
         for warning in cell_warnings.iter().cloned() {
             merge_warning(&mut self.warnings, warning);
         }
 
-        // A cell that ran past the deadline (a wall clock, not reproducible
-        // between two solves) must not enter the cache. A node-budget or
-        // simulation-turn-budget stop is deterministic — the same position
-        // always exhausts it the same way — so it is as cacheable as a
-        // complete cell, just with `BudgetExhausted` attached.
-        if self.cacheable && !ctx.deadline_hit {
+        // A shared stop depends on work outside this cell. Do not cache its
+        // fallback value. A node budget belongs to the cell and stays stable.
+        let external_stop = ctx.deadline_hit
+            || ctx.cancel_hit
+            || super::cancel_requested(self.cancel)
+            || self
+                .cancel
+                .is_some_and(super::CancelFlag::simulation_budget_hit);
+        if self.cacheable && !external_stop {
             self.cache.values.insert(
                 key,
                 CachedCell {
@@ -1248,6 +1517,10 @@ impl CellOracle for SinglePreviewOracle<'_, '_, '_> {
         self.ctx.cell_value(row, col)
     }
 
+    fn stop_requested(&mut self) -> bool {
+        preview_stop_requested(self.ctx)
+    }
+
     fn round(&mut self, solution: &MatrixSolution, oracle: &OracleStats) {
         let Some(progress) = self.progress else {
             return;
@@ -1257,6 +1530,7 @@ impl CellOracle for SinglePreviewOracle<'_, '_, '_> {
         stats.lps_solved += oracle.lps_solved;
         stats.elapsed = self.ctx.started.elapsed();
         progress(PreviewRound {
+            depth: self.ctx.depth,
             value: solution.value.clamp(LOSS, WIN),
             p1_strategy: strategy_of(&self.ctx.p1, &solution.row_strategy),
             p2_strategy: strategy_of(&self.ctx.p2, &solution.col_strategy),
@@ -1287,23 +1561,43 @@ impl CellOracle for OpenListPreviewOracle<'_, '_, '_> {
         mean
     }
 
+    fn stop_requested(&mut self) -> bool {
+        self.contexts.iter_mut().any(preview_stop_requested)
+    }
+
     fn round(&mut self, solution: &MatrixSolution, oracle: &OracleStats) {
         let Some(progress) = self.progress else {
             return;
         };
         progress(PreviewRound {
+            depth: self.contexts[0].depth,
             value: solution.value.clamp(LOSS, WIN),
             p1_strategy: strategy_of(&self.contexts[0].p1, &solution.row_strategy),
             p2_strategy: strategy_of(&self.contexts[0].p2, &solution.col_strategy),
-            stats: open_list_stats(
-                self.contexts,
-                oracle,
-                self.rows,
-                self.cols,
-                self.started,
-            ),
+            stats: open_list_stats(self.contexts, oracle, self.rows, self.cols, self.started),
         });
     }
+}
+
+/// True after a preview search cannot compute another exact cell.
+fn preview_stop_requested(ctx: &mut PreviewContext<'_>) -> bool {
+    if super::cancel_requested(ctx.cancel) {
+        ctx.cancel_hit = true;
+        return true;
+    }
+    if ctx
+        .cancel
+        .is_some_and(super::CancelFlag::simulation_budget_hit)
+    {
+        return true;
+    }
+    if let Some(deadline) = ctx.deadline
+        && ctx.started.elapsed() >= deadline
+    {
+        ctx.deadline_hit = true;
+        return true;
+    }
+    false
 }
 
 /// Adds the work of all drawn worlds to one preview progress record.
@@ -1328,6 +1622,37 @@ fn open_list_stats(
     stats.lps_solved += oracle.lps_solved;
     stats.elapsed = started.elapsed();
     stats
+}
+
+/// Adds completed work while keeping the size of one preview matrix.
+fn add_preview_stats(total: &mut PreviewStats, pass: &PreviewStats) {
+    total.cells_total = total.cells_total.max(pass.cells_total);
+    total.cells_evaluated += pass.cells_evaluated;
+    total.cell_cache_hits += pass.cell_cache_hits;
+    total.battles_solved += pass.battles_solved;
+    total.turns_simulated += pass.turns_simulated;
+    total.lps_solved += pass.lps_solved;
+}
+
+/// Returns the actions that can seed the next depth.
+fn support_indices(strategy: &[f64]) -> Vec<usize> {
+    strategy
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &probability)| (probability > EPS).then_some(index))
+        .collect()
+}
+
+/// True when a shared limit stopped a preview depth.
+fn preview_warnings_stopped(warnings: &[SolveWarning]) -> bool {
+    warnings.iter().any(|warning| {
+        matches!(
+            warning,
+            SolveWarning::SimulationTurnBudgetExhausted { .. }
+                | SolveWarning::DeadlineExceeded { .. }
+                | SolveWarning::Cancelled
+        )
+    })
 }
 
 /// Adds one warning without repeating it.

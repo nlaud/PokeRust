@@ -193,7 +193,7 @@ pub struct AnalysisState {
     /// The ID for the next job in this session.
     next_job_id: u64,
     running: Option<RunningJob>,
-    /// The newest complete answer.
+    /// The newest strategy checkpoint.
     /// A failure and a cancellation both keep it.
     checkpoint: Option<AnalysisCheckpoint>,
     /// Why the last job produced no checkpoint.
@@ -203,8 +203,8 @@ pub struct AnalysisState {
 impl AnalysisState {
     /// Raises the generation and cancels the running job.
     ///
-    /// Keeps the checkpoint. The client reads the last complete answer until a
-    /// newer job finishes, and the `stale` flag of the view marks it.
+    /// Keeps the checkpoint. The client reads the last answer until a newer
+    /// checkpoint arrives. The `stale` flag marks the old answer.
     pub fn invalidate(&mut self) {
         self.generation += 1;
         if let Some(job) = self.running.take() {
@@ -264,7 +264,7 @@ impl AnalysisState {
     /// Stores the result of one job.
     ///
     /// Drops a result from an old or replaced job. A failure keeps the last
-    /// complete checkpoint.
+    /// checkpoint.
     ///
     /// Returns the console line of the exit that ran. The caller writes that
     /// line after it releases the session lock. A job that leaves no checkpoint
@@ -356,7 +356,10 @@ impl AnalysisState {
                 .running
                 .as_ref()
                 .map(|job| job.started.elapsed().as_millis() as u64),
-            turns_simulated: self.running.as_ref().map(|job| job.cancel.simulation_turns()),
+            turns_simulated: self
+                .running
+                .as_ref()
+                .map(|job| job.cancel.simulation_turns()),
             simulation_turn_budget: self
                 .running
                 .as_ref()
@@ -648,11 +651,7 @@ pub fn start_job(
     let battle_id = battle_id.to_string();
     eprintln!(
         "analysis job {} (generation {}): start, algorithm {}, depth {}, simulation-turn budget {}",
-        job.id,
-        job.generation,
-        replay.algorithm,
-        replay.depth,
-        replay.simulation_turn_budget
+        job.id, job.generation, replay.algorithm, replay.depth, replay.simulation_turn_budget
     );
 
     tokio::task::spawn_blocking(move || {
@@ -984,17 +983,8 @@ fn one_search(
                 &result.warnings,
                 &[],
             );
-            checkpoint.complete = result.depth_reached == config.depth
-                && !result.warnings.iter().any(|warning| {
-                    matches!(
-                        warning,
-                        solver::SolveWarning::BudgetExhausted { .. }
-                            | solver::SolveWarning::DeadlineExceeded { .. }
-                            | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
-                            | solver::SolveWarning::Cancelled
-                            | solver::SolveWarning::DepthNotReached { .. }
-                    )
-                });
+            checkpoint.complete =
+                result.depth_reached == config.depth && warnings_are_complete(&result.warnings);
             Ok(checkpoint)
         }
         BotSearchConfig::Mcts(config) => {
@@ -1230,7 +1220,7 @@ fn one_preview_search(
             let mut checkpoint = partial_checkpoint(
                 1.0 - round.value,
                 P2Strategy::Preview(round.p2_strategy),
-                depth,
+                round.depth,
                 round.stats.turns_simulated,
                 round.stats.cells_evaluated,
                 round.stats.elapsed,
@@ -1261,13 +1251,15 @@ fn one_preview_search(
         let mut checkpoint = partial_checkpoint(
             result.p2_win_odds,
             P2Strategy::Preview(result.p2_strategy),
-            depth,
+            result.depth_reached,
             result.stats.turns_simulated,
             result.stats.cells_evaluated,
             result.stats.elapsed,
             &result.warnings,
             &result.draw_warnings,
         );
+        checkpoint.complete =
+            preview_answer_is_complete(depth, result.depth_reached, &result.warnings);
         checkpoint.warnings.push(if worlds == 1 {
             PREVIEW_ONE_WORLD_NOTE.to_string()
         } else {
@@ -1280,7 +1272,7 @@ fn one_preview_search(
         let mut checkpoint = partial_checkpoint(
             1.0 - round.value,
             P2Strategy::Preview(round.p2_strategy),
-            depth,
+            round.depth,
             round.stats.turns_simulated,
             round.stats.cells_evaluated,
             round.stats.elapsed,
@@ -1301,16 +1293,54 @@ fn one_preview_search(
         Some(cancel),
     )
     .map_err(engine_error)?;
-    Ok(partial_checkpoint(
+    let mut checkpoint = partial_checkpoint(
         result.p2_win_odds,
         P2Strategy::Preview(result.p2_strategy),
-        depth,
+        result.depth_reached,
         result.stats.turns_simulated,
         result.stats.cells_evaluated,
         result.stats.elapsed,
         &result.warnings,
         &[],
-    ))
+    );
+    checkpoint.complete = preview_answer_is_complete(depth, result.depth_reached, &result.warnings);
+    Ok(checkpoint)
+}
+
+/// True when a preview answer completed the requested battle depth.
+fn preview_answer_is_complete(
+    target_depth: u8,
+    depth_reached: u8,
+    warnings: &[solver::SolveWarning],
+) -> bool {
+    depth_reached == target_depth && warnings_are_complete(warnings)
+}
+
+/// True when no warning says that configured work stopped early.
+fn warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
+    !warnings.iter().any(|warning| {
+        matches!(
+            warning,
+            solver::SolveWarning::BudgetExhausted { .. }
+                | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
+                | solver::SolveWarning::DeadlineExceeded { .. }
+                | solver::SolveWarning::DepthNotReached { .. }
+                | solver::SolveWarning::Cancelled
+        )
+    })
+}
+
+/// True when a sampling rung reached its configured terminal limit.
+fn sampling_warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
+    !warnings.iter().any(|warning| {
+        matches!(
+            warning,
+            solver::SolveWarning::BudgetExhausted { .. }
+                | solver::SolveWarning::DeadlineExceeded { .. }
+                | solver::SolveWarning::DepthNotReached { .. }
+                | solver::SolveWarning::Cancelled
+        )
+    })
 }
 
 /// Reports a search that read more than the fog of war allows.
@@ -1491,7 +1521,7 @@ fn partial_checkpoint(
         generation: 0,
         turn_number: 0,
         p2_win_odds,
-        complete: true,
+        complete: sampling_warnings_are_complete(warnings),
         p2_strategy,
         depth_reached,
         turns_simulated,
@@ -2400,6 +2430,38 @@ mod tests {
             joined.contains("determinizer reported 1 warning"),
             "{joined}"
         );
+        assert!(
+            !checkpoint.complete,
+            "the depth warning marks a partial answer"
+        );
+    }
+
+    /// A sampling budget is terminal, but manual cancellation is partial.
+    #[test]
+    fn a_sampling_checkpoint_distinguishes_budget_and_cancellation() {
+        let budget = partial_checkpoint(
+            0.5,
+            P2Strategy::Battle(Vec::new()),
+            1,
+            10,
+            10,
+            Duration::ZERO,
+            &[solver::SolveWarning::SimulationTurnBudgetExhausted { budget: 10 }],
+            &[],
+        );
+        let cancelled = partial_checkpoint(
+            0.5,
+            P2Strategy::Battle(Vec::new()),
+            1,
+            10,
+            10,
+            Duration::ZERO,
+            &[solver::SolveWarning::Cancelled],
+            &[],
+        );
+
+        assert!(budget.complete);
+        assert!(!cancelled.complete);
     }
 
     /// The solver raises `ActionsTruncated` once per player, and the scrub makes

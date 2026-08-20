@@ -7,8 +7,8 @@
 //! Debug builds make `simulate_turn` about ten times slower.
 //! Tests therefore use few moves, short benches, and one damage roll.
 
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
@@ -50,12 +50,13 @@ use crate::solver::{
     solve_seeded_cancellable, solve_seeded_progress_cancellable,
 };
 use crate::state::battle::{
-    BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
+    AttackCommand, BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
     TeamPreviewState,
 };
 use crate::state::dex_data::{MoveData, PokemonData, VolatileStatus, parse_move_dex};
 use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
 use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+use crate::user::battle_command_description;
 
 fn dexes() -> (
     &'static HashMap<Species, PokemonData>,
@@ -106,18 +107,49 @@ fn base_config() -> SolveConfig {
 /// small enough to search repeatedly in a debug build.
 fn contested_position() -> MatchState {
     MatchState::BattleState(battle_state_from_lists(
-        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack])],
-        vec![mon(Species::Gyarados, &[PokemonMove::Waterfall, PokemonMove::IceFang])],
-        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam, PokemonMove::Crunch])],
-        vec![mon(Species::Gengar, &[PokemonMove::ShadowBall, PokemonMove::SludgeBomb])],
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack],
+        )],
+        vec![mon(
+            Species::Gyarados,
+            &[PokemonMove::Waterfall, PokemonMove::IceFang],
+        )],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::BodySlam, PokemonMove::Crunch],
+        )],
+        vec![mon(
+            Species::Gengar,
+            &[PokemonMove::ShadowBall, PokemonMove::SludgeBomb],
+        )],
     ))
 }
 
+/// An automatic-target move must not display a missing target as an error.
+#[test]
+fn automatic_target_move_description_omits_the_target_arrow() {
+    let state = battle_state_from_lists(
+        vec![mon(Species::Aerodactyl, &[PokemonMove::RockSlide])],
+        Vec::new(),
+        vec![mon(Species::Garchomp, &[PokemonMove::DragonClaw])],
+        Vec::new(),
+    );
+    let command = BattleCommand::Attack(AttackCommand {
+        move_slot: 0,
+        target: None,
+        terastallize: false,
+        mega_evolve: false,
+    });
+
+    assert_eq!(
+        battle_command_description(&state, Player::P1, 0, &command),
+        "Use Rock Slide"
+    );
+}
+
 fn assert_valid_strategies(result: &SolveResult) {
-    for (label, strategy) in [
-        ("P1", &result.p1_strategy),
-        ("P2", &result.p2_strategy),
-    ] {
+    for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
         let total: f64 = strategy.iter().map(|a| a.probability).sum();
         assert!(
             (total - 1.0).abs() < 1e-6,
@@ -366,11 +398,26 @@ fn double_oracle_evaluates_fewer_cells() {
 fn varied_matchups_solve_without_panicking() {
     let (pokemon_dex, move_dex) = dexes();
     let roster = [
-        (Species::Pikachu, [PokemonMove::Thunderbolt, PokemonMove::QuickAttack]),
-        (Species::Snorlax, [PokemonMove::BodySlam, PokemonMove::Crunch]),
-        (Species::Gengar, [PokemonMove::ShadowBall, PokemonMove::SludgeBomb]),
-        (Species::Gyarados, [PokemonMove::Waterfall, PokemonMove::IceFang]),
-        (Species::Machamp, [PokemonMove::CloseCombat, PokemonMove::Earthquake]),
+        (
+            Species::Pikachu,
+            [PokemonMove::Thunderbolt, PokemonMove::QuickAttack],
+        ),
+        (
+            Species::Snorlax,
+            [PokemonMove::BodySlam, PokemonMove::Crunch],
+        ),
+        (
+            Species::Gengar,
+            [PokemonMove::ShadowBall, PokemonMove::SludgeBomb],
+        ),
+        (
+            Species::Gyarados,
+            [PokemonMove::Waterfall, PokemonMove::IceFang],
+        ),
+        (
+            Species::Machamp,
+            [PokemonMove::CloseCombat, PokemonMove::Earthquake],
+        ),
     ];
 
     let config = SolveConfig {
@@ -410,7 +457,10 @@ fn a_forced_win_is_reported_as_certain() {
             &[PokemonMove::CloseCombat, PokemonMove::Splash],
         )],
         vec![],
-        vec![mon(Species::Snorlax, &[PokemonMove::Splash, PokemonMove::Rest])],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::Splash, PokemonMove::Rest],
+        )],
         vec![],
     );
     battle.p2_active_mons[0].hp = 1;
@@ -446,15 +496,27 @@ fn mirrored_positions_give_complementary_odds() {
     let (pokemon_dex, move_dex) = dexes();
 
     let p1_favoured = MatchState::BattleState(battle_state_from_lists(
-        vec![mon(Species::Machamp, &[PokemonMove::CloseCombat, PokemonMove::Splash])],
+        vec![mon(
+            Species::Machamp,
+            &[PokemonMove::CloseCombat, PokemonMove::Splash],
+        )],
         vec![],
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
     ));
     let p2_favoured = MatchState::BattleState(battle_state_from_lists(
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
-        vec![mon(Species::Machamp, &[PokemonMove::CloseCombat, PokemonMove::Splash])],
+        vec![mon(
+            Species::Machamp,
+            &[PokemonMove::CloseCombat, PokemonMove::Splash],
+        )],
         vec![],
     ));
 
@@ -650,9 +712,15 @@ fn the_turn_cache_does_not_change_the_value() {
 fn a_constant_evaluator_yields_an_even_value() {
     let (pokemon_dex, move_dex) = dexes();
     let state = MatchState::BattleState(battle_state_from_lists(
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
     ));
 
@@ -758,12 +826,18 @@ fn a_pending_replacement_is_searched_without_consuming_depth() {
 
 fn pending_replacement_position() -> MatchState {
     let mut battle = battle_state_from_lists(
-        vec![mon(Species::Pikachu, &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack])],
+        vec![mon(
+            Species::Pikachu,
+            &[PokemonMove::Thunderbolt, PokemonMove::QuickAttack],
+        )],
         vec![
             mon(Species::Gyarados, &[PokemonMove::Waterfall]),
             mon(Species::Gengar, &[PokemonMove::ShadowBall]),
         ],
-        vec![mon(Species::Snorlax, &[PokemonMove::BodySlam, PokemonMove::Crunch])],
+        vec![mon(
+            Species::Snorlax,
+            &[PokemonMove::BodySlam, PokemonMove::Crunch],
+        )],
         vec![],
     );
     battle.p1_active_mons[0].hp = 0;
@@ -953,9 +1027,15 @@ fn iterative_deepening_matches_every_algorithm() {
 /// Its successors return a static value before they check the node budget.
 fn quiet_position() -> MatchState {
     MatchState::BattleState(battle_state_from_lists(
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
-        vec![mon(Species::Abra, &[PokemonMove::Splash, PokemonMove::Teleport])],
+        vec![mon(
+            Species::Abra,
+            &[PokemonMove::Splash, PokemonMove::Teleport],
+        )],
         vec![],
     ))
 }
@@ -1355,9 +1435,7 @@ fn a_finished_battle_cannot_be_solved() {
 
     assert!(matches!(
         solve(&over, pokemon_dex, move_dex, &base_config()),
-        Err(SolveError::GameAlreadyOver {
-            winner: Player::P1
-        })
+        Err(SolveError::GameAlreadyOver { winner: Player::P1 })
     ));
 }
 
@@ -1492,9 +1570,7 @@ fn preview_double_oracle_matches_full_matrix() {
             p2_choices
                 .iter()
                 .map(|p2_choice| {
-                    preview_cell_value(
-                        &state, pokemon_dex, move_dex, &config, p1_choice, p2_choice,
-                    )
+                    preview_cell_value(&state, pokemon_dex, move_dex, &config, p1_choice, p2_choice)
                 })
                 .collect()
         })
@@ -1514,12 +1590,12 @@ fn preview_double_oracle_matches_full_matrix() {
     assert!(result.stats.cells_evaluated > 0);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
-    for (label, strategy) in [
-        ("P1", &result.p1_strategy),
-        ("P2", &result.p2_strategy),
-    ] {
+    for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
         let total: f64 = strategy.iter().map(|choice| choice.probability).sum();
-        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "{label} strategy sums to {total}"
+        );
         assert!(!strategy.is_empty(), "{label} strategy is empty");
     }
     assert!((result.p1_win_odds + result.p2_win_odds - 1.0).abs() < 1e-9);
@@ -1547,6 +1623,71 @@ fn team_preview_publishes_completed_rounds() {
     assert_eq!(last.p1_strategy.len(), result.p1_strategy.len());
     assert_eq!(last.p2_strategy.len(), result.p2_strategy.len());
     assert_eq!(last.stats.turns_simulated, result.stats.turns_simulated);
+}
+
+/// Preview deepening must finish the outer depth-1 game before it spends work
+/// on depth 2. If the shared turn budget then stops depth 2, the result must
+/// keep the complete depth-1 strategy.
+#[test]
+fn team_preview_budget_keeps_the_complete_lower_depth() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = small_preview();
+    let shallow = solve_team_preview(&state, pokemon_dex, move_dex, &preview_config())
+        .expect("the preview state is well formed");
+    let budget = CancelFlag::with_simulation_turn_budget(shallow.stats.turns_simulated + 1);
+    let rounds = RefCell::new(Vec::new());
+    let progress = |round| rounds.borrow_mut().push(round);
+    let config = PreviewConfig {
+        battle: SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            ..base_config()
+        },
+        deadline: None,
+    };
+
+    let result = solve_team_preview_progress_cancellable(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&progress),
+        Some(&budget),
+    )
+    .expect("the preview state is well formed");
+
+    assert_eq!(result.depth_reached, 1);
+    assert!((result.value - shallow.value).abs() < 1e-12);
+    assert_eq!(result.p1_strategy.len(), shallow.p1_strategy.len());
+    assert_eq!(result.p2_strategy.len(), shallow.p2_strategy.len());
+    for (actual, expected) in result.p1_strategy.iter().zip(&shallow.p1_strategy) {
+        assert_eq!(actual.choice.active_indices, expected.choice.active_indices);
+        assert_eq!(actual.choice.back_indices, expected.choice.back_indices);
+        assert!((actual.probability - expected.probability).abs() < 1e-12);
+    }
+    for (actual, expected) in result.p2_strategy.iter().zip(&shallow.p2_strategy) {
+        assert_eq!(actual.choice.active_indices, expected.choice.active_indices);
+        assert_eq!(actual.choice.back_indices, expected.choice.back_indices);
+        assert!((actual.probability - expected.probability).abs() < 1e-12);
+    }
+    assert!(
+        result
+            .warnings
+            .contains(&SolveWarning::SimulationTurnBudgetExhausted {
+                budget: shallow.stats.turns_simulated + 1
+            }),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        result.warnings.contains(&SolveWarning::DepthNotReached {
+            target: 2,
+            reached: 1
+        }),
+        "{:?}",
+        result.warnings
+    );
+    assert!(rounds.borrow().iter().all(|round| round.depth == 1));
 }
 
 /// A shared cache must remove the cell work of a repeated solve. Double oracle
@@ -1596,14 +1737,9 @@ fn preview_cache_separates_move_dex_contents() {
         .get_mut(&PokemonMove::Thunderbolt)
         .expect("Thunderbolt exists")
         .base_power = 0;
-    let changed = solve_team_preview_cached(
-        &state,
-        pokemon_dex,
-        &changed_move_dex,
-        &config,
-        &mut cache,
-    )
-    .expect("the preview state is well formed");
+    let changed =
+        solve_team_preview_cached(&state, pokemon_dex, &changed_move_dex, &config, &mut cache)
+            .expect("the preview state is well formed");
     let reference = solve_team_preview(&state, pokemon_dex, &changed_move_dex, &config)
         .expect("the preview state is well formed");
 
@@ -1775,8 +1911,9 @@ fn doubles_meta() -> Option<&'static MetaDex> {
 }
 
 fn learnset_dex() -> &'static HashMap<Species, HashSet<PokemonMove>> {
-    LEARNSETS
-        .get_or_init(|| crate::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt"))
+    LEARNSETS.get_or_init(|| {
+        crate::state::dex_data::parse_learnset_dex("../pokemon_info/showdownLearnsets.txt")
+    })
 }
 
 /// Skip the body unless the cache is present.
@@ -1826,6 +1963,20 @@ fn open_list_belief_1v1() -> UnknownTeamPreviewState {
     )
 }
 
+/// Two choices per side, for open-list matrix and budget tests.
+fn open_list_belief_2v2() -> UnknownTeamPreviewState {
+    open_list_belief(
+        vec![
+            mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
+            mon(Species::Gengar, &[PokemonMove::ShadowBall]),
+        ],
+        vec![
+            mon(Species::Snorlax, &[PokemonMove::BodySlam]),
+            mon(Species::Gyarados, &[PokemonMove::Waterfall]),
+        ],
+    )
+}
+
 fn open_list_config(worlds: usize) -> OpenListConfig {
     OpenListConfig {
         preview: preview_config(),
@@ -1862,7 +2013,10 @@ fn open_list_preview_draws_distinct_worlds() {
             "world {index} changed the observer's own team"
         );
         assert_eq!(world.state.p2_mons[0].species, Species::Snorlax);
-        assert!(world.probability > 0.0, "world {index} has zero probability");
+        assert!(
+            world.probability > 0.0,
+            "world {index} has zero probability"
+        );
     }
 
     let opponent_stats: HashSet<[u16; 6]> =
@@ -1917,15 +2071,8 @@ fn open_list_preview_matches_mean_matrix() {
     let determinize = open_list_determinize_config();
     let config = open_list_config(2);
 
-    let worlds = open_list_worlds(
-        &belief,
-        meta,
-        pokemon_dex,
-        move_dex,
-        &config,
-        &determinize,
-    )
-    .expect("the belief is well formed");
+    let worlds = open_list_worlds(&belief, meta, pokemon_dex, move_dex, &config, &determinize)
+        .expect("the belief is well formed");
 
     let p1_choices = preview_choices(&worlds[0].state, Player::P1);
     let p2_choices = preview_choices(&worlds[0].state, Player::P2);
@@ -1946,15 +2093,9 @@ fn open_list_preview_matches_mean_matrix() {
     }
     let reference = solve_matrix_game(&mean_matrix);
 
-    let result = solve_open_list_preview(
-        &belief,
-        meta,
-        pokemon_dex,
-        move_dex,
-        &config,
-        &determinize,
-    )
-    .expect("the belief is well formed");
+    let result =
+        solve_open_list_preview(&belief, meta, pokemon_dex, move_dex, &config, &determinize)
+            .expect("the belief is well formed");
 
     assert!(
         (result.value - reference.value).abs() < 1e-6,
@@ -1962,7 +2103,10 @@ fn open_list_preview_matches_mean_matrix() {
         result.value,
         reference.value
     );
-    assert_eq!(result.stats.cells_total, (p1_choices.len() * p2_choices.len()) as u64);
+    assert_eq!(
+        result.stats.cells_total,
+        (p1_choices.len() * p2_choices.len()) as u64
+    );
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 
@@ -2016,6 +2160,66 @@ fn open_list_preview_publishes_completed_rounds() {
     assert_eq!(last.p1_strategy.len(), result.p1_strategy.len());
     assert_eq!(last.p2_strategy.len(), result.p2_strategy.len());
     assert_eq!(last.stats.turns_simulated, result.stats.turns_simulated);
+}
+
+/// Open-list preview must keep its completed lower-depth mean-matrix strategy
+/// when the shared turn budget stops the next depth.
+#[test]
+fn open_list_preview_budget_keeps_the_complete_lower_depth() {
+    with_meta!(meta);
+    let (pokemon_dex, move_dex) = dexes();
+    let belief = open_list_belief_2v2();
+    let shallow_config = open_list_config(2);
+    let determinize = open_list_determinize_config();
+    let shallow = solve_open_list_preview(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &shallow_config,
+        &determinize,
+    )
+    .expect("the belief is well formed");
+    let budget = CancelFlag::with_simulation_turn_budget(shallow.stats.turns_simulated + 1);
+    let rounds = RefCell::new(Vec::new());
+    let progress = |round| rounds.borrow_mut().push(round);
+    let config = OpenListConfig {
+        preview: PreviewConfig {
+            battle: SolveConfig {
+                depth: 2,
+                iterative_deepening: true,
+                ..base_config()
+            },
+            deadline: None,
+        },
+        ..shallow_config
+    };
+
+    let result = solve_open_list_preview_progress_cancellable(
+        &belief,
+        meta,
+        pokemon_dex,
+        move_dex,
+        &config,
+        &determinize,
+        Some(&progress),
+        Some(&budget),
+    )
+    .expect("the belief is well formed");
+
+    assert_eq!(result.depth_reached, 1);
+    assert!((result.value - shallow.value).abs() < 1e-12);
+    assert_eq!(result.p1_strategy.len(), shallow.p1_strategy.len());
+    assert_eq!(result.p2_strategy.len(), shallow.p2_strategy.len());
+    assert!(
+        result.warnings.contains(&SolveWarning::DepthNotReached {
+            target: 2,
+            reached: 1
+        }),
+        "{:?}",
+        result.warnings
+    );
+    assert!(rounds.borrow().iter().all(|round| round.depth == 1));
 }
 
 /// Several worlds must report a finite, non-negative standard error. The mean of
@@ -2101,7 +2305,10 @@ fn open_list_preview_returns_one_strategy() {
 
     for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
         let total: f64 = strategy.iter().map(|choice| choice.probability).sum();
-        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "{label} strategy sums to {total}"
+        );
         assert!(!strategy.is_empty(), "{label} strategy is empty");
         assert!(
             strategy.len() <= choice_count,
@@ -2421,7 +2628,10 @@ fn mcts_strategy_is_a_distribution() {
 
     for (label, strategy) in [("P1", &result.p1_strategy), ("P2", &result.p2_strategy)] {
         let total: f64 = strategy.iter().map(|action| action.probability).sum();
-        assert!((total - 1.0).abs() < 1e-6, "{label} strategy sums to {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "{label} strategy sums to {total}"
+        );
         assert!(!strategy.is_empty(), "{label} strategy is empty");
         assert!(
             strategy.iter().all(|action| action.probability > 0.0),
@@ -2456,9 +2666,7 @@ fn mcts_refuses_a_preview_and_a_finished_battle() {
     };
     assert_eq!(
         mcts::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
-        SolveError::GameAlreadyOver {
-            winner: Player::P1
-        }
+        SolveError::GameAlreadyOver { winner: Player::P1 }
     );
 }
 
@@ -2481,7 +2689,6 @@ fn open_list_preview_rejects_zero_worlds() {
     assert_eq!(result.unwrap_err(), OpenListError::NoWorlds);
 }
 
-
 // ── Progressive widening and exploitability ─────────────────────────────────
 
 /// Four moves and two bench Pokemon a side. Each player then holds ten joint
@@ -2498,8 +2705,14 @@ fn wide_position() -> MatchState {
             ],
         )],
         vec![
-            mon(Species::Gyarados, &[PokemonMove::Waterfall, PokemonMove::IceFang]),
-            mon(Species::Blastoise, &[PokemonMove::Surf, PokemonMove::IceBeam]),
+            mon(
+                Species::Gyarados,
+                &[PokemonMove::Waterfall, PokemonMove::IceFang],
+            ),
+            mon(
+                Species::Blastoise,
+                &[PokemonMove::Surf, PokemonMove::IceBeam],
+            ),
         ],
         vec![mon(
             Species::Snorlax,
@@ -2511,8 +2724,14 @@ fn wide_position() -> MatchState {
             ],
         )],
         vec![
-            mon(Species::Gengar, &[PokemonMove::ShadowBall, PokemonMove::SludgeBomb]),
-            mon(Species::Alakazam, &[PokemonMove::Psychic, PokemonMove::Recover]),
+            mon(
+                Species::Gengar,
+                &[PokemonMove::ShadowBall, PokemonMove::SludgeBomb],
+            ),
+            mon(
+                Species::Alakazam,
+                &[PokemonMove::Psychic, PokemonMove::Recover],
+            ),
         ],
     ))
 }
@@ -2671,7 +2890,11 @@ fn widening_grows_with_the_visit_count() {
     let total = 10;
 
     assert_eq!(widening.allowed(0, total), 3);
-    assert_eq!(widening.allowed(0, 2), 2, "the count never exceeds the total");
+    assert_eq!(
+        widening.allowed(0, 2),
+        2,
+        "the count never exceeds the total"
+    );
     assert_eq!(widening.allowed(1_000, 0), 0, "an empty set stays empty");
 
     let mut previous = widening.allowed(0, total);
@@ -3504,7 +3727,10 @@ fn control_variates_lower_the_matrix_error() {
     let plain = matrix_rmse(&seeds, 400, SelectionPolicy::RegretMatching, false, exact);
     let corrected = matrix_rmse(&seeds, 400, SelectionPolicy::RegretMatching, true, exact);
 
-    assert!(plain > 0.0, "the plain estimate hit the value on every seed");
+    assert!(
+        plain > 0.0,
+        "the plain estimate hit the value on every seed"
+    );
     assert!(
         corrected < plain,
         "the baseline scored {corrected}, the plain estimate scored {plain}"
@@ -4013,7 +4239,11 @@ fn protect_pressure_decays_with_the_stall_counter() {
         )],
         vec![],
     );
-    assert_eq!(feature(&state, "protect"), 0.0, "both sides can still stall");
+    assert_eq!(
+        feature(&state, "protect"),
+        0.0,
+        "both sides can still stall"
+    );
 
     state.p1_active_mons[0].stall_counter = 2;
     let expected = 1.0 / 9.0 - 1.0;
@@ -4375,7 +4605,6 @@ fn policy_agreement_with_the_exact_search() {
     );
 }
 
-
 // ── Fog-of-war ISMCTS ───────────────────────────────────────────────────────
 
 /// One Pokemon a side, one move each, and no bench.
@@ -4666,9 +4895,7 @@ fn ismcts_refuses_a_preview_and_a_finished_battle() {
     .expect("one particle is a belief");
     assert_eq!(
         ismcts::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
-        ismcts::IsmctsError::Position(SolveError::GameAlreadyOver {
-            winner: Player::P1
-        })
+        ismcts::IsmctsError::Position(SolveError::GameAlreadyOver { winner: Player::P1 })
     );
 }
 
@@ -4730,8 +4957,7 @@ fn a_posterior_update_keeps_the_world_that_explains_the_turn() {
         panic!("the successor is a battle state");
     };
     assert_eq!(
-        battle.p2_active_mons[0].stats[5],
-        200,
+        battle.p2_active_mons[0].stats[5], 200,
         "the update kept the wrong world"
     );
 }
@@ -4830,16 +5056,9 @@ fn determinized_particles_have_equal_empirical_weights() {
         "the fixture needs unequal draw probabilities: {raw:?}"
     );
 
-    let particles = ParticleBelief::from_belief(
-        seed,
-        &belief,
-        meta,
-        pokemon_dex,
-        move_dex,
-        4,
-        &determinize,
-    )
-    .expect("the belief is valid");
+    let particles =
+        ParticleBelief::from_belief(seed, &belief, meta, pokemon_dex, move_dex, 4, &determinize)
+            .expect("the belief is valid");
     for particle in particles.particles() {
         assert!((particle.weight - 0.25).abs() < 1e-12, "{particle:?}");
     }
@@ -5151,15 +5370,9 @@ fn mccfr_reads_a_supplied_leaf_value() {
     }
     assert!(!leaves.is_empty(), "the search reached no public belief");
 
-    let oracle = mccfr::search_with_leaves(
-        41,
-        &belief,
-        pokemon_dex,
-        move_dex,
-        &config,
-        Some(&leaves),
-    )
-    .expect("the position is playable");
+    let oracle =
+        mccfr::search_with_leaves(41, &belief, pokemon_dex, move_dex, &config, Some(&leaves))
+            .expect("the position is playable");
 
     assert_eq!(oracle.leaf_lookups.misses, 0, "a public belief was missing");
     assert_eq!(
@@ -5283,8 +5496,8 @@ fn mccfr_horizon_values_support_a_continual_solve() {
         },
         ..mccfr_config(3_000, 1)
     };
-    let one_shot = mccfr::search(53, &belief, pokemon_dex, move_dex, &deep)
-        .expect("the position is playable");
+    let one_shot =
+        mccfr::search(53, &belief, pokemon_dex, move_dex, &deep).expect("the position is playable");
 
     assert!(
         (result.composed.value - one_shot.value).abs() < 0.1,
@@ -5399,9 +5612,7 @@ fn mccfr_refuses_a_preview_and_a_finished_battle() {
     .expect("one particle is a belief");
     assert_eq!(
         mccfr::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
-        mccfr::MccfrError::Position(SolveError::GameAlreadyOver {
-            winner: Player::P1
-        })
+        mccfr::MccfrError::Position(SolveError::GameAlreadyOver { winner: Player::P1 })
     );
 }
 
@@ -5458,9 +5669,8 @@ fn an_untouched_cancel_flag_does_not_change_the_value() {
     let flag = CancelFlag::new();
 
     let plain = solve(&state, pokemon_dex, move_dex, &config).expect("solvable");
-    let watched =
-        solve_seeded_cancellable(1, &state, pokemon_dex, move_dex, &config, Some(&flag))
-            .expect("solvable");
+    let watched = solve_seeded_cancellable(1, &state, pokemon_dex, move_dex, &config, Some(&flag))
+        .expect("solvable");
 
     assert_valid_strategies(&watched);
     assert_eq!(watched.value, plain.value);
@@ -5563,18 +5773,16 @@ fn an_expired_deadline_does_not_hide_a_cancel() {
         result.warnings
     );
     assert!(
-        result
-            .warnings
-            .contains(&SolveWarning::DeadlineExceeded {
-                budget: Duration::ZERO
-            }),
+        result.warnings.contains(&SolveWarning::DeadlineExceeded {
+            budget: Duration::ZERO
+        }),
         "{:?}",
         result.warnings
     );
 }
 
-/// The point of the flag: a cancel part way through a deepening solve must hand
-/// back the last depth that finished, exactly as a spent node budget does.
+/// A cancel part way through a deepening solve must return the last depth that
+/// finished before the cancel.
 ///
 /// The trigger fires on the first leaf of pass 2, so pass 1 is complete and pass
 /// 2 is not. `BudgetExhausted` must not appear, because the returned answer is a
@@ -5624,10 +5832,10 @@ fn a_cancel_returns_the_newest_completed_round() {
 
     assert_valid_strategies(&result);
     assert!(flag.is_cancelled());
-    assert_eq!(result.depth_reached, 2);
+    assert_eq!(result.depth_reached, 1);
     let rounds = rounds.into_inner();
     let newest = rounds.last().expect("the search completed one root round");
-    assert_eq!(newest.depth, 2);
+    assert_eq!(newest.depth, 1);
     assert!(
         (result.value - newest.value).abs() < 1e-12,
         "the cancel returned {}, the newest round returns {}",
@@ -5642,7 +5850,7 @@ fn a_cancel_returns_the_newest_completed_round() {
     assert!(
         result.warnings.contains(&SolveWarning::DepthNotReached {
             target: 3,
-            reached: 2
+            reached: 1
         }),
         "{:?}",
         result.warnings
@@ -5828,8 +6036,9 @@ fn a_cancelled_sampling_search_returns_its_finished_iterations() {
     );
 
     let config = ismcts_config(5_000, 2);
-    let result = ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
-        .expect("a cancel returns an answer, never an error");
+    let result =
+        ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("a cancel returns an answer, never an error");
     assert_eq!(result.stats.iterations, 1);
     assert_eq!(result.sampling.iterations, 1);
     assert_cancelled_sampling_answer(
@@ -5895,8 +6104,9 @@ fn a_cancel_during_a_sampling_search_stops_the_iteration_loop() {
         },
         ..base
     };
-    let ismcts = ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
-        .expect("a cancel returns an answer, never an error");
+    let ismcts =
+        ismcts::search_cancellable(6, &belief, pokemon_dex, move_dex, &config, Some(&flag))
+            .expect("a cancel returns an answer, never an error");
 
     let flag = CancelFlag::new();
     arm_probe(Some(&flag), Some(trigger));
@@ -5991,8 +6201,14 @@ fn a_plain_sampling_entry_point_never_reports_a_cancel() {
     let (pokemon_dex, move_dex) = dexes();
     let belief = belief_of_worlds(vec![certain_world()]);
 
-    let mcts = mcts::search(2, &contested_position(), pokemon_dex, move_dex, &mcts_config())
-        .expect("playable");
+    let mcts = mcts::search(
+        2,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &mcts_config(),
+    )
+    .expect("playable");
     let ismcts =
         ismcts::search(2, &belief, pokemon_dex, move_dex, &ismcts_config(16, 1)).expect("playable");
     let mccfr =
@@ -6072,7 +6288,9 @@ fn a_deadline_stops_a_turn_simulation_that_already_runs() {
 
     assert_valid_strategies(&limited);
     assert!(
-        limited.warnings.contains(&SolveWarning::DeadlineExceeded { budget }),
+        limited
+            .warnings
+            .contains(&SolveWarning::DeadlineExceeded { budget }),
         "the deadlined solve did not report the limit: {:?}",
         limited.warnings
     );
@@ -6184,12 +6402,20 @@ fn a_cancelled_preview_solve_reports_the_cancel() {
     let (pokemon_dex, move_dex) = dexes();
     let flag = CancelFlag::new();
     flag.cancel();
+    let config = PreviewConfig {
+        battle: SolveConfig {
+            depth: 2,
+            iterative_deepening: true,
+            ..base_config()
+        },
+        deadline: None,
+    };
 
     let result = solve_team_preview_cancellable(
         &small_preview(),
         pokemon_dex,
         move_dex,
-        &preview_config(),
+        &config,
         Some(&flag),
     )
     .expect("a cancel returns an answer, never an error");
@@ -6234,9 +6460,14 @@ fn a_preview_solve_stops_inside_a_running_battle_solve() {
         deadline: None,
     };
 
-    let result =
-        solve_team_preview_cancellable(&small_preview(), pokemon_dex, move_dex, &config, Some(&flag))
-            .expect("a cancel returns an answer, never an error");
+    let result = solve_team_preview_cancellable(
+        &small_preview(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
 
     assert!(flag.is_cancelled(), "the evaluator never ran");
     assert!(
@@ -6284,13 +6515,24 @@ fn a_cancelled_open_list_preview_reports_the_cancel() {
     let (pokemon_dex, move_dex) = dexes();
     let flag = CancelFlag::new();
     flag.cancel();
+    let config = OpenListConfig {
+        preview: PreviewConfig {
+            battle: SolveConfig {
+                depth: 2,
+                iterative_deepening: true,
+                ..base_config()
+            },
+            deadline: None,
+        },
+        ..open_list_config(2)
+    };
 
     let result = solve_open_list_preview_cancellable(
         &open_list_belief_1v1(),
         meta,
         pokemon_dex,
         move_dex,
-        &open_list_config(2),
+        &config,
         &open_list_determinize_config(),
         Some(&flag),
     )
@@ -6312,11 +6554,23 @@ fn a_cancelled_open_list_preview_reports_the_cancel() {
 /// and everything else spends one turn and clears the chain.
 #[test]
 fn an_unset_replacement_depth_keeps_the_old_descent() {
-    assert_eq!(forced_descent(solver_actions::Phase::Normal, 3, 2, 8, None), (2, 0));
-    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 3, 2, 8, None), (3, 3));
-    assert_eq!(forced_descent(solver_actions::Phase::SelfSwitch, 3, 0, 8, None), (3, 1));
+    assert_eq!(
+        forced_descent(solver_actions::Phase::Normal, 3, 2, 8, None),
+        (2, 0)
+    );
+    assert_eq!(
+        forced_descent(solver_actions::Phase::Replacement, 3, 2, 8, None),
+        (3, 3)
+    );
+    assert_eq!(
+        forced_descent(solver_actions::Phase::SelfSwitch, 3, 0, 8, None),
+        (3, 1)
+    );
     // A chain at its limit spends a turn instead.
-    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 3, 8, 8, None), (2, 0));
+    assert_eq!(
+        forced_descent(solver_actions::Phase::Replacement, 3, 8, 8, None),
+        (2, 0)
+    );
 }
 
 /// A search can start while a replacement is pending. The replacement depth
@@ -6452,10 +6706,19 @@ fn sampling_searches_use_the_root_replacement_depth() {
 /// A value below the remaining depth makes the forced subtree smaller.
 #[test]
 fn a_low_replacement_depth_lowers_the_child_depth() {
-    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(1)), (1, 1));
-    assert_eq!(forced_descent(solver_actions::Phase::SelfSwitch, 4, 0, 8, Some(2)), (2, 1));
+    assert_eq!(
+        forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(1)),
+        (1, 1)
+    );
+    assert_eq!(
+        forced_descent(solver_actions::Phase::SelfSwitch, 4, 0, 8, Some(2)),
+        (2, 1)
+    );
     // Zero would score a forced position with no decision at all.
-    assert_eq!(forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(0)), (1, 1));
+    assert_eq!(
+        forced_descent(solver_actions::Phase::Replacement, 4, 0, 8, Some(0)),
+        (1, 1)
+    );
 }
 
 /// A value above the remaining depth searches past the turn budget of the root.
@@ -6485,13 +6748,24 @@ fn a_high_replacement_depth_extends_the_horizon_one_time() {
 fn the_forced_chain_counter_stays_inside_its_mask() {
     let mut chain = 0;
     for expected in 1..=CHAIN_MASK {
-        let (_, next) =
-            forced_descent(solver_actions::Phase::Replacement, 4, chain, u8::MAX, Some(2));
+        let (_, next) = forced_descent(
+            solver_actions::Phase::Replacement,
+            4,
+            chain,
+            u8::MAX,
+            Some(2),
+        );
         assert_eq!(next, expected, "the counter left its mask");
         chain = next;
     }
     // The counter is at its limit, so the next forced child spends a turn.
-    let pair = forced_descent(solver_actions::Phase::Replacement, 4, chain, u8::MAX, Some(2));
+    let pair = forced_descent(
+        solver_actions::Phase::Replacement,
+        4,
+        chain,
+        u8::MAX,
+        Some(2),
+    );
     assert_eq!(pair, (3, 0));
 }
 
@@ -6784,7 +7058,11 @@ fn pool_permits_bound_the_worker_count() {
     assert_eq!(pool.free(), 0);
 
     let empty = pool.acquire(1);
-    assert_eq!(empty.count(), 0, "an empty pool must not block, and must lend nothing");
+    assert_eq!(
+        empty.count(),
+        0,
+        "an empty pool must not block, and must lend nothing"
+    );
     drop(empty);
 
     drop(held);
@@ -6818,8 +7096,6 @@ fn job_seed_is_stable() {
         assert_ne!(*seed, base, "field {index} did not reach the seed");
     }
 }
-
-
 
 // ── Perfect-information Monte Carlo ─────────────────────────────────────────
 //
@@ -7191,9 +7467,7 @@ fn pimc_refuses_a_preview_world_and_a_finished_world() {
     .expect("one particle is a belief");
     assert_eq!(
         pimc::search(1, &finished, pokemon_dex, move_dex, &config).unwrap_err(),
-        pimc::PimcError::Position(SolveError::GameAlreadyOver {
-            winner: Player::P1
-        })
+        pimc::PimcError::Position(SolveError::GameAlreadyOver { winner: Player::P1 })
     );
 }
 

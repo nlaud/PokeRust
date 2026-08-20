@@ -261,18 +261,15 @@ pub fn battle_command_description(
                 .map(move_name)
                 .unwrap_or_else(|| format!("Move {}", attack.move_slot + 1));
 
-            let target_label = attack
-                .target
-                .map(|slot| {
-                    format!(
-                        "{}'s {}",
-                        player_name(slot.player),
-                        active_mon_name(state, slot)
-                    )
-                })
-                .unwrap_or_else(|| "no target".to_string());
-
-            let mut label = format!("Use {} -> {}", move_label, target_label);
+            let mut label = match attack.target {
+                Some(slot) => format!(
+                    "Use {} -> {}'s {}",
+                    move_label,
+                    player_name(slot.player),
+                    active_mon_name(state, slot)
+                ),
+                None => format!("Use {}", move_label),
+            };
             if attack.terastallize {
                 label.push_str(" [Tera]");
             }
@@ -281,18 +278,14 @@ pub fn battle_command_description(
             }
             label
         }
-        BattleCommand::Struggle { target } => {
-            let target_label = target
-                .map(|slot| {
-                    format!(
-                        "{}'s {}",
-                        player_name(slot.player),
-                        active_mon_name(state, slot)
-                    )
-                })
-                .unwrap_or_else(|| "no target".to_string());
-            format!("Struggle -> {}", target_label)
-        }
+        BattleCommand::Struggle { target } => match target {
+            Some(slot) => format!(
+                "Struggle -> {}'s {}",
+                player_name(slot.player),
+                active_mon_name(state, *slot)
+            ),
+            None => "Struggle".to_string(),
+        },
         BattleCommand::Pass => "Pass".to_string(),
     }
 }
