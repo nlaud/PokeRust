@@ -11,7 +11,7 @@
 //! `simulate_turn` sorts outcomes by decreasing probability.
 //! `TopK` takes the first outcomes without another sort.
 
-use crate::simulator::helpers::sample_one_weighted;
+use crate::simulator::helpers::sample_indices_weighted;
 
 /// How much of a chance node's successor distribution to keep.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,12 +86,12 @@ impl ChanceMode {
 fn sample_with_replacement<T>(branches: Vec<(T, f64)>, draws: usize) -> Vec<(T, f64)> {
     let weights: Vec<f64> = branches.iter().map(|(_, p)| *p).collect();
 
+    // One distribution for the whole batch. Drawing one index at a time built
+    // an index vector and a fresh distribution for each draw, which is
+    // `O(draws * branches)` of work for the same index sequence.
     let mut counts = vec![0usize; branches.len()];
-    for _ in 0..draws {
-        let indices: Vec<usize> = (0..weights.len()).collect();
-        if let Some(picked) = sample_one_weighted(indices, |&i| weights[i]).pop() {
-            counts[picked] += 1;
-        }
+    for picked in sample_indices_weighted(&weights, draws) {
+        counts[picked] += 1;
     }
 
     let share = 1.0 / draws as f64;

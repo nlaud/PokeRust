@@ -984,7 +984,7 @@ fn one_search(
                 &[],
             );
             checkpoint.complete =
-                result.depth_reached == config.depth && warnings_are_complete(&result.warnings);
+                result.depth_reached == config.depth && solver::warnings_are_complete(&result.warnings);
             Ok(checkpoint)
         }
         BotSearchConfig::Mcts(config) => {
@@ -1313,34 +1313,7 @@ fn preview_answer_is_complete(
     depth_reached: u8,
     warnings: &[solver::SolveWarning],
 ) -> bool {
-    depth_reached == target_depth && warnings_are_complete(warnings)
-}
-
-/// True when no warning says that configured work stopped early.
-fn warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
-    !warnings.iter().any(|warning| {
-        matches!(
-            warning,
-            solver::SolveWarning::BudgetExhausted { .. }
-                | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
-                | solver::SolveWarning::DeadlineExceeded { .. }
-                | solver::SolveWarning::DepthNotReached { .. }
-                | solver::SolveWarning::Cancelled
-        )
-    })
-}
-
-/// True when a sampling rung reached its configured terminal limit.
-fn sampling_warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
-    !warnings.iter().any(|warning| {
-        matches!(
-            warning,
-            solver::SolveWarning::BudgetExhausted { .. }
-                | solver::SolveWarning::DeadlineExceeded { .. }
-                | solver::SolveWarning::DepthNotReached { .. }
-                | solver::SolveWarning::Cancelled
-        )
-    })
+    depth_reached == target_depth && solver::warnings_are_complete(warnings)
 }
 
 /// Reports a search that read more than the fog of war allows.
@@ -1470,6 +1443,8 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::ActionsTruncated { .. } => {
             "The action cap removed at least one action, so the search can miss it.".to_string()
         }
+        solver::SolveWarning::NoCompletedRound => "The search completed no equilibrium round, so both strategies are an even split over the actions rather than a calculated mixture."
+            .to_string(),
         // A cancelled job reports no checkpoint, so this line reaches the client
         // only through a search that a caller inside the process cancelled. The
         // line names no state of either side.
@@ -1521,7 +1496,7 @@ fn partial_checkpoint(
         generation: 0,
         turn_number: 0,
         p2_win_odds,
-        complete: sampling_warnings_are_complete(warnings),
+        complete: solver::sampling_warnings_are_complete(warnings),
         p2_strategy,
         depth_reached,
         turns_simulated,

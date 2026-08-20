@@ -243,10 +243,25 @@ An open panel grows upward, and it scrolls only when it passes the window.
 Approximation notes appear only while the user points to or focuses the
 `Approx.` control.
 
-Open the panel, select an algorithm, and start the search.
-Set the solver limits in the Settings sidebar.
+Open the panel and start the search.
+The Settings sidebar holds the search and the solver limits.
+The panel names the selected search and shows what that search reads.
 
-Both panels expose these limits:
+The `Search` control picks between an imperfect-information search and a
+perfect-information search:
+
+- ISMCTS, MCCFR, and PIMC read the belief, so they respect the fog of war.
+- Double oracle is exact for its depth, but it reads one drawn opponent.
+
+The panel keeps the last complete answer while a deeper depth runs.
+A double-oracle round inside that depth is an equilibrium of a restricted
+action set, not of the whole game.
+The progress line reports that round, and the strategy list does not.
+
+A strategy list shows the eight highest-rate actions.
+An `Other actions` row holds the rest of the probability.
+
+The Settings sidebar holds these limits:
 
 - Simulation-turn budget.
 - Main depth and replacement depth.

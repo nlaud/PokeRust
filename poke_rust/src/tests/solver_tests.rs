@@ -5708,6 +5708,100 @@ fn a_flag_set_before_the_solve_stops_the_first_pass() {
     );
 }
 
+/// A stop that arrives before the first double-oracle round leaves the uniform
+/// strategy that the run started from. That answer says only that the search
+/// learned nothing, and a uniform mixture is also a real equilibrium of some
+/// positions, so the warning is the only thing that tells the two apart.
+#[test]
+fn a_solve_that_completes_no_round_names_its_uniform_fallback() {
+    let (pokemon_dex, move_dex) = dexes();
+    let flag = CancelFlag::new();
+    flag.cancel();
+
+    let result = solve_seeded_cancellable(
+        1,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &base_config(),
+        Some(&flag),
+    )
+    .expect("a cancel returns an answer, never an error");
+
+    assert!(
+        result.warnings.contains(&SolveWarning::NoCompletedRound),
+        "{:?}",
+        result.warnings
+    );
+    assert!(!crate::solver::warnings_are_complete(&result.warnings));
+    // The placeholder is a real distribution, so a caller can still draw from it.
+    for strategy in [&result.p1_strategy, &result.p2_strategy] {
+        let total: f64 = strategy.iter().map(|action| action.probability).sum();
+        assert!((total - 1.0).abs() < 1e-9, "strategy sums to {total}");
+    }
+}
+
+/// The mirror: an equilibrium that the search really computed must not carry
+/// the warning, whatever its shape.
+#[test]
+fn a_finished_solve_names_no_uniform_fallback() {
+    let (pokemon_dex, move_dex) = dexes();
+    let config = SolveConfig {
+        depth: 2,
+        ..base_config()
+    };
+
+    let result = solve(&contested_position(), pokemon_dex, move_dex, &config).expect("solvable");
+
+    assert!(
+        !result.warnings.contains(&SolveWarning::NoCompletedRound),
+        "{:?}",
+        result.warnings
+    );
+    assert!(crate::solver::warnings_are_complete(&result.warnings));
+}
+
+/// A `pimc` world runs under a child flag that holds its own share of the job
+/// budget. A spent job budget refuses every claim the child passes upward, so
+/// no later turn can be simulated. The world search must read that and stop,
+/// rather than run its whole depth on static scores and call the answer
+/// complete.
+#[test]
+fn a_world_under_a_spent_job_budget_reports_a_stop() {
+    let (pokemon_dex, move_dex) = dexes();
+    let job = CancelFlag::with_simulation_turn_budget(1);
+    assert!(job.claim_simulation_turn());
+    assert!(!job.claim_simulation_turn());
+    // A share far larger than anything the world can spend, so only the parent
+    // can stop this search.
+    let world = job.child_with_budget(1_000_000);
+    let config = SolveConfig {
+        depth: 2,
+        iterative_deepening: true,
+        ..base_config()
+    };
+
+    let result = solve_seeded_cancellable(
+        1,
+        &contested_position(),
+        pokemon_dex,
+        move_dex,
+        &config,
+        Some(&world),
+    )
+    .expect("a spent budget returns an answer, never an error");
+
+    assert_eq!(
+        result.stats.turns_simulated, 0,
+        "the parent refuses every claim, so no turn resolves"
+    );
+    assert!(
+        !crate::solver::warnings_are_complete(&result.warnings),
+        "a static answer must never read as complete: {:?}",
+        result.warnings
+    );
+}
+
 /// A sampled search uses the simulation-turn budget as its work limit.
 #[test]
 fn an_unbounded_sampled_search_stops_at_the_simulation_turn_budget() {

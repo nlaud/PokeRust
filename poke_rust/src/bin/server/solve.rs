@@ -925,16 +925,11 @@ fn run_preview(
 
     publisher.send(Answer {
         depth: result.depth_reached,
+        // One rule for every endpoint. This test used to omit
+        // `BudgetExhausted`, so a preview answer that the node budget cut short
+        // reached the client marked complete.
         complete: result.depth_reached == depth
-            && !result.warnings.iter().any(|warning| {
-                matches!(
-                    warning,
-                    solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
-                        | solver::SolveWarning::DeadlineExceeded { .. }
-                        | solver::SolveWarning::Cancelled
-                        | solver::SolveWarning::DepthNotReached { .. }
-                )
-            }),
+            && solver::warnings_are_complete(&result.warnings),
         value: result.p1_win_odds,
         p1_win_odds: result.p1_win_odds,
         p2_win_odds: result.p2_win_odds,

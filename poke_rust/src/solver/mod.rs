@@ -361,6 +361,10 @@ impl CancelFlag {
     /// the child claims first. No simulation runs on that claim, so the figure
     /// only describes a child that already stopped.
     ///
+    /// A search must not read that method, because it answers for one flag
+    /// alone. [`CancelFlag::simulation_budget_exhausted`] walks the chain, and
+    /// that is the question a search asks: whether any later claim can succeed.
+    ///
     /// [`pimc`] uses this to give each drawn world an equal share of one job
     /// budget.
     pub(crate) fn child_with_budget(&self, budget: u64) -> CancelFlag {
@@ -383,9 +387,39 @@ impl CancelFlag {
         self.0.claim()
     }
 
-    /// Returns true after a search tries to pass the simulation-turn budget.
+    /// Returns true after a search tries to pass the simulation-turn budget of
+    /// this flag alone.
+    ///
+    /// A child flag reports its own share here, and it reports `false` while
+    /// the share holds and an ancestor is spent. A search reads
+    /// [`CancelFlag::simulation_budget_exhausted`] instead, because a refused
+    /// claim stops the search whichever flag refused it.
     pub fn simulation_budget_hit(&self) -> bool {
         self.0.simulation_budget_hit.load(Ordering::Relaxed)
+    }
+
+    /// Returns true after this flag or any flag above it refused a claim.
+    ///
+    /// [`CancelFlag::claim_simulation_turn`] claims from this flag and then from
+    /// every flag above it, so an ancestor can refuse a claim that this flag
+    /// permitted. The refusal stops the search either way: no later claim can
+    /// succeed, so every later turn would take a static score.
+    ///
+    /// A search therefore reads this method rather than
+    /// [`CancelFlag::simulation_budget_hit`]. Without it a `pimc` world whose
+    /// job budget ran out would run its whole depth on static scores and then
+    /// report the answer as complete.
+    pub fn simulation_budget_exhausted(&self) -> bool {
+        let mut control = &self.0;
+        loop {
+            if control.simulation_budget_hit.load(Ordering::Relaxed) {
+                return true;
+            }
+            match &control.parent {
+                Some(parent) => control = parent,
+                None => return false,
+            }
+        }
     }
 
     /// Returns the simulation turns that this flag claimed.
@@ -683,6 +717,18 @@ pub enum SolveWarning {
     /// strategy of its finished iterations. This warning describes the whole
     /// search, so it does not depend on which pass the search returned.
     Cancelled,
+    /// The root double-oracle run completed no round, so both strategies are
+    /// the uniform placeholder rather than an equilibrium.
+    ///
+    /// Double oracle publishes an answer only after both best-response checks
+    /// of a round. A stop reason that arrives before the first round leaves the
+    /// run with nothing to publish, and it returns the uniform strategy that it
+    /// started from. That answer says only that the search learned nothing.
+    ///
+    /// A uniform strategy is also a legitimate equilibrium of some positions,
+    /// and the two look identical on the wire. This warning is what tells them
+    /// apart.
+    NoCompletedRound,
     /// The answer mixed one strategy for each drawn world.
     ///
     /// [`pimc::search`] solves each world as a perfect-information game, so each
@@ -690,6 +736,52 @@ pub enum SolveWarning {
     /// knowledge that no player holds. This defect is strategy fusion, and every
     /// answer of that search carries this warning.
     StrategyFusion { worlds: usize },
+}
+
+impl SolveWarning {
+    /// True when this warning says that the search stopped short of the work it
+    /// was configured to do.
+    ///
+    /// The three stop limits and a short depth all say the same thing: part of
+    /// the returned answer is a static score rather than a searched value.
+    /// [`SolveWarning::ChanceMassDiscarded`], [`SolveWarning::ActionsTruncated`],
+    /// and [`SolveWarning::StrategyFusion`] describe the configured method
+    /// instead, so they leave a finished search finished.
+    pub fn stopped_configured_work(&self) -> bool {
+        matches!(
+            self,
+            SolveWarning::BudgetExhausted { .. }
+                | SolveWarning::SimulationTurnBudgetExhausted { .. }
+                | SolveWarning::DeadlineExceeded { .. }
+                | SolveWarning::DepthNotReached { .. }
+                | SolveWarning::Cancelled
+                | SolveWarning::NoCompletedRound
+        )
+    }
+}
+
+/// True when no warning says that configured work stopped early.
+///
+/// One authority for the whole project. The simulate, tracker, and streaming
+/// endpoints each used to hold their own copy of this rule, and the copies
+/// disagreed about [`SolveWarning::BudgetExhausted`].
+pub fn warnings_are_complete(warnings: &[SolveWarning]) -> bool {
+    !warnings.iter().any(SolveWarning::stopped_configured_work)
+}
+
+/// [`warnings_are_complete`], for a search that samples.
+///
+/// The simulation-turn budget is the terminal limit of a sampling search rather
+/// than an interruption of it, so a spent budget leaves such an answer complete.
+/// Every other stop reason still cuts the answer short.
+pub fn sampling_warnings_are_complete(warnings: &[SolveWarning]) -> bool {
+    !warnings.iter().any(|warning| {
+        warning.stopped_configured_work()
+            && !matches!(
+                warning,
+                SolveWarning::SimulationTurnBudgetExhausted { .. }
+            )
+    })
 }
 
 impl fmt::Display for SolveWarning {
@@ -722,6 +814,10 @@ impl fmt::Display for SolveWarning {
                 kept,
                 total,
             } => write!(f, "{player:?}'s action set was limited to {kept} of {total}"),
+            SolveWarning::NoCompletedRound => write!(
+                f,
+                "the search completed no double-oracle round, so both strategies are the uniform placeholder rather than an equilibrium"
+            ),
             SolveWarning::Cancelled => write!(
                 f,
                 "the search was cancelled; the answer holds the work that finished"
@@ -967,6 +1063,20 @@ mod budget_tests {
         // The child claims first, so its counter holds the refused claim too.
         assert!(!world.simulation_budget_hit());
         assert_eq!(world.simulation_turns(), 3);
+        // The child's own share still holds, but no later claim can succeed, so
+        // the search that reads this flag must stop.
+        assert!(world.simulation_budget_exhausted());
+    }
+
+    /// A child with room left, under a job with room left, stops for nothing.
+    #[test]
+    fn a_child_with_room_left_reports_no_exhausted_budget() {
+        let job = CancelFlag::with_simulation_turn_budget(10);
+        let world = job.child_with_budget(5);
+
+        assert!(world.claim_simulation_turn());
+        assert!(!world.simulation_budget_exhausted());
+        assert!(!job.simulation_budget_exhausted());
     }
 
     /// One cancel must stop the parent and every child.

@@ -536,7 +536,7 @@ fn solve_preview_with_cancel(
 
     for depth in 1..=config.battle.depth {
         if best.is_some()
-            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit())
+            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_exhausted())
         {
             break;
         }
@@ -578,7 +578,7 @@ fn solve_preview_with_cancel(
         )?;
 
         let stopped = preview_warnings_stopped(&pass.result.warnings)
-            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit());
+            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_exhausted());
         add_preview_stats(&mut total_stats, &pass.result.stats);
         for warning in pass.result.warnings.drain(..) {
             merge_warning(&mut total_warnings, warning);
@@ -1052,7 +1052,7 @@ pub fn solve_open_list_preview_progress_cancellable(
 
     for depth in 1..=config.preview.battle.depth {
         if best.is_some()
-            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit())
+            && cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_exhausted())
         {
             break;
         }
@@ -1099,7 +1099,7 @@ pub fn solve_open_list_preview_progress_cancellable(
         )?;
 
         let stopped = preview_warnings_stopped(&pass.result.warnings)
-            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_hit());
+            || cancel.is_some_and(|flag| flag.is_cancelled() || flag.simulation_budget_exhausted());
         add_preview_stats(&mut total_stats, &pass.result.stats);
         for warning in pass.result.warnings.drain(..) {
             merge_warning(&mut total_warnings, warning);
@@ -1426,7 +1426,7 @@ impl<'a> PreviewContext<'a> {
         }
         if self
             .cancel
-            .is_some_and(super::CancelFlag::simulation_budget_hit)
+            .is_some_and(super::CancelFlag::simulation_budget_exhausted)
         {
             return EVEN;
         }
@@ -1488,7 +1488,7 @@ impl<'a> PreviewContext<'a> {
             || super::cancel_requested(self.cancel)
             || self
                 .cancel
-                .is_some_and(super::CancelFlag::simulation_budget_hit);
+                .is_some_and(super::CancelFlag::simulation_budget_exhausted);
         if self.cacheable && !external_stop {
             self.cache.values.insert(
                 key,
@@ -1550,12 +1550,31 @@ struct OpenListPreviewOracle<'context, 'data, 'progress> {
 }
 
 impl CellOracle for OpenListPreviewOracle<'_, '_, '_> {
+    /// The mean of this cell over every world, or [`EVEN`] when a stop reason
+    /// reached the cell part way.
+    ///
+    /// A stopped world returns [`EVEN`] from
+    /// [`PreviewContext::cell_value`] rather than a searched value. Averaging
+    /// that placeholder beside the searched values of the earlier worlds would
+    /// make one cell part real and part filler, and
+    /// [`OpenListPass`]'s per-world report reads `cell_worlds` as if every entry
+    /// were searched. A partial cell therefore writes nothing there.
+    ///
+    /// Discarding the cell costs no completed answer. The run reads
+    /// [`CellOracle::stop_requested`] right after this call and returns its last
+    /// complete round, so a partial cell only fills the table of a round that
+    /// the run throws away.
     fn cell(&mut self, row: usize, col: usize) -> f64 {
-        let values: Vec<f64> = self
-            .contexts
-            .iter_mut()
-            .map(|ctx| ctx.cell_value(row, col))
-            .collect();
+        let mut values = Vec::with_capacity(self.contexts.len());
+        for index in 0..self.contexts.len() {
+            if preview_stop_requested(&mut self.contexts[index]) {
+                return EVEN;
+            }
+            values.push(self.contexts[index].cell_value(row, col));
+        }
+        if values.is_empty() {
+            return EVEN;
+        }
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         self.cell_worlds.insert((row, col), values);
         mean
@@ -1587,7 +1606,7 @@ fn preview_stop_requested(ctx: &mut PreviewContext<'_>) -> bool {
     }
     if ctx
         .cancel
-        .is_some_and(super::CancelFlag::simulation_budget_hit)
+        .is_some_and(super::CancelFlag::simulation_budget_exhausted)
     {
         return true;
     }

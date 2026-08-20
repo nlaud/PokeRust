@@ -352,7 +352,7 @@ pub fn search_progress_cancellable(
         if let Some(hook) = progress {
             hook(RootRound {
                 depth: result.depth_reached,
-                value: weighted_value / weight_solved,
+                value: mean_value(weighted_value, weight_solved),
                 p1_strategy: mix[0].strategy(),
                 p2_strategy: mix[1].strategy(),
                 stats: stats.clone(),
@@ -362,7 +362,7 @@ pub fn search_progress_cancellable(
 
     // Every world of a `from_belief` set carries the same weight, so this is the
     // plain mean there. A caller-supplied set can weight its worlds instead.
-    let value = weighted_value / weight_solved;
+    let value = mean_value(weighted_value, weight_solved);
     stats.elapsed = started.elapsed();
 
     warnings.push(SolveWarning::StrategyFusion {
@@ -401,6 +401,21 @@ pub fn search_progress_cancellable(
         warnings,
         draw_warnings: worlds.warnings().to_vec(),
     })
+}
+
+/// The weighted mean of the world values.
+///
+/// A caller-supplied set can weight a world at zero, and
+/// [`PimcConfig::resample_threshold`] of zero never normalizes such a set. The
+/// division would then be `0.0 / 0.0`, and the NaN would reach the reported win
+/// odds and every displayed percentage. An even value is the only neutral
+/// answer for a set that carries no weight at all.
+fn mean_value(weighted_value: f64, weight_solved: f64) -> f64 {
+    if weight_solved > 0.0 {
+        weighted_value / weight_solved
+    } else {
+        0.5
+    }
 }
 
 /// Refuses a set that holds a position with no decision.

@@ -204,10 +204,23 @@ That search averages the payoff matrix and solves one time, so one strategy
 covers every world.
 It has no strategy fusion.
 
+A stopped world returns an even placeholder instead of a searched value.
+The mean of one cell must not hold a placeholder beside searched values.
+A cell that a stop reached part way therefore writes nothing to the per-world
+table, and the run discards the round that asked for it.
+
 One job budget covers a whole PIMC search.
 Each world takes an equal share through `CancelFlag::child_with_budget`.
 Without the share, the first world spends the budget of the job.
 The answer would then rest on one world.
+
+A child flag claims one turn from itself and then from the job above it.
+The job can refuse a claim that the share permitted.
+A search must therefore read `CancelFlag::simulation_budget_exhausted`, which
+walks the chain.
+`CancelFlag::simulation_budget_hit` answers for one flag alone.
+A search that read the child flag alone would run its whole depth on static
+scores and then report the answer as complete.
 
 The search publishes one answer for each world that it finishes.
 It sends that answer through the root progress hook, which the exact search
@@ -344,6 +357,20 @@ round. MCTS and ISMCTS publish after a completed iteration checkpoint. MCCFR
 publishes after a complete pair of player traversals. These checkpoints use
 work counts. They do not use elapsed time.
 A partial answer carries `complete: false`.
+
+`solver::warnings_are_complete` holds the completion rule of the project.
+An answer is complete when no warning says that configured work stopped early.
+`solver::sampling_warnings_are_complete` is the same rule for a sampling
+search, which treats a spent simulation-turn budget as its terminal limit.
+The simulate, tracker, and streaming endpoints all read these two functions.
+Each endpoint held its own copy before, and the copies disagreed.
+
+Double oracle publishes an answer only after both best-response checks of a
+round.
+A stop that arrives before the first round leaves the uniform strategy that the
+run started from.
+That answer carries `SolveWarning::NoCompletedRound`, because a uniform mixture
+is also a real equilibrium of some positions.
 
 `matrix::CellOracle` carries the round hook into the matrix solver.
 `solve_seeded_progress_cancellable` supplies that hook at the root position

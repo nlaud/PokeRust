@@ -1,8 +1,14 @@
 import { useState, type ReactNode } from 'react'
 import MusicPlayer from './MusicPlayer'
 import { useSettings, type Theme } from '../../store/settingsStore'
+import Select from '../common/Select'
 import SolverControls from '../solver/SolverControls'
-import type { SolverPreset } from '../solver/solverSettings'
+import {
+  SOLVER_ALGORITHMS,
+  solverAlgorithmHint,
+  type SolverPreset,
+} from '../solver/solverSettings'
+import type { BotAlgorithm } from '../../api/types'
 
 const sunIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -41,8 +47,10 @@ export default function SettingsSidebar() {
     setCustomColors,
     solverPreset,
     solverSettings,
+    solverAlgorithm,
     setSolverPreset,
     setSolverSettings,
+    setSolverAlgorithm,
   } = useSettings()
   const [advanced, setAdvanced] = useState(false)
   const presets: { value: SolverPreset; label: string; detail: string }[] = [
@@ -128,6 +136,17 @@ export default function SettingsSidebar() {
 
         <section className="mt-6 border-t border-subtle pt-5">
           <h3 className="mb-2 text-sm font-medium text-ink-muted">Solver</h3>
+          <label className="mb-3 block text-sm">
+            <span className="mb-1 block text-ink-muted">Search</span>
+            <Select
+              value={solverAlgorithm}
+              options={SOLVER_ALGORITHMS}
+              onChange={(value) => setSolverAlgorithm(value as BotAlgorithm)}
+            />
+            <span className="mt-1 block text-xs text-ink-muted">
+              {solverAlgorithmHint(solverAlgorithm)}
+            </span>
+          </label>
           <div className="grid grid-cols-3 gap-2">
             {presets.map((preset) => (
               <button
@@ -159,7 +178,11 @@ export default function SettingsSidebar() {
           </button>
           {advanced && (
             <div className="text-xs">
-              <SolverControls settings={solverSettings} onChange={setSolverSettings} />
+              <SolverControls
+                algorithm={solverAlgorithm}
+                settings={solverSettings}
+                onChange={setSolverSettings}
+              />
             </div>
           )}
         </section>

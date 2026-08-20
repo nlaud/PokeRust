@@ -537,6 +537,31 @@ fn sample_one_of<T>(
     vec![items.swap_remove(index)]
 }
 
+/// Draws `draws` indices of `weights`, with replacement.
+///
+/// Each draw reads the ambient generator exactly as one
+/// [`sample_one_weighted`] call over the same weights does, so a seeded caller
+/// gets the same index sequence from either route. The one difference is that
+/// the distribution is built one time rather than once for each draw.
+///
+/// A set of one has no decision, so every draw names index 0 and the generator
+/// stays untouched. This matches [`sample_one_of`], which returns a single item
+/// without reading the generator.
+pub(crate) fn sample_indices_weighted(weights: &[f64], draws: usize) -> Vec<usize> {
+    use rand::distributions::{Distribution, WeightedIndex};
+    if weights.len() <= 1 {
+        return vec![0; draws];
+    }
+    let clamped: Vec<f64> = weights.iter().map(|weight| weight.max(0.0)).collect();
+    // All-zero or non-finite weights: a degenerate set, so keep the first entry.
+    let Ok(distribution) = WeightedIndex::new(&clamped) else {
+        return vec![0; draws];
+    };
+    (0..draws)
+        .map(|_| crate::simulator::with_sample_rng(|rng| distribution.sample(rng)))
+        .collect()
+}
+
 /// `sample_one_weighted` for the ubiquitous `(state, probability)` branch shape,
 /// recorded as a turn-resolution chokepoint that keeps its own weight.
 pub(crate) fn sample_one_branch<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {

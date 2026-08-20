@@ -1,35 +1,13 @@
 import { useState } from 'react'
-import Select from '../../components/common/Select'
-import { solverProfile } from '../../components/solver/solverSettings'
-import type { BotAlgorithm, SolveUpdate, StrategyRow } from '../../api/types'
+import {
+  SOLVER_ALGORITHMS,
+  solverAlgorithmHint,
+  solverProfile,
+} from '../../components/solver/solverSettings'
+import type { SolveUpdate, StrategyRow } from '../../api/types'
 import { useSolve } from '../../store/solveStore'
 import { useTracker } from '../../store/trackerStore'
 import { useSettings } from '../../store/settingsStore'
-
-// These hints describe how each search reads the tracker belief.
-
-const ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
-  {
-    value: 'ismcts',
-    label: 'ISMCTS (sampled belief)',
-    hint: 'Sampled: it draws several possible opponents from the belief, then searches all of them.',
-  },
-  {
-    value: 'mccfr',
-    label: 'MCCFR (sampled belief)',
-    hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief.',
-  },
-  {
-    value: 'pimc',
-    label: 'PIMC (averaged worlds)',
-    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if the hidden data were known, so the answer claims more than a real player can do.',
-  },
-  {
-    value: 'doubleOracle',
-    label: 'Double oracle (exact, one world)',
-    hint: 'Exact for its depth, but it reads one drawn opponent. It reports each round while it runs.',
-  },
-]
 
 /** Renders one probability as a whole-percent label. */
 function percent(odds: number): string {
@@ -93,6 +71,20 @@ function NotesTooltip({ label, lines }: { label: string; lines: string[] }) {
   )
 }
 
+/** The probability mass that the shown rows leave out.
+ *
+ * The server keeps the eight highest-rate rows and sends each one at its true
+ * probability, so a strategy with more rows than that arrives summing to less
+ * than one. Without this figure the shown percentages read as the whole plan.
+ *
+ * The threshold covers floating-point dust alone. Anything a reader would
+ * notice is above it. */
+function omittedMass(rows: StrategyRow[]): number {
+  const shown = rows.reduce((total, row) => total + row.probability, 0)
+  const rest = 1 - shown
+  return rest > 0.0005 ? rest : 0
+}
+
 /** Shows the complete mixed strategy of one player, highest rate first.
  *
  * Every row is text. The panel submits no command, so a suggestion never
@@ -119,6 +111,17 @@ function StrategyList({
               <span className="shrink-0 font-mono">{percent(row.probability)}</span>
             </div>
           ))}
+          {omittedMass(rows) > 0 && (
+            <div
+              className="flex items-baseline justify-between gap-2 italic"
+              data-testid={`${testId}-other`}
+            >
+              <span className="truncate text-ink-muted">Other actions</span>
+              <span className="shrink-0 font-mono text-ink-muted">
+                {percent(omittedMass(rows))}
+              </span>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -254,10 +257,14 @@ export default function TrackerSolverPanel() {
   const { phase, started, progress, complete, previousComplete, live, stale, error, start, stop } =
     useSolve()
   const [open, setOpen] = useState(false)
-  // A sampling belief search is the default. It respects the fog of war.
-  const [algorithm, setAlgorithm] = useState<BotAlgorithm>('ismcts')
-  const { solverPreset, solverSettings } = useSettings()
-  const answer = live ?? complete
+  // The picker lives in the settings sidebar, beside the other solver limits.
+  const { solverPreset, solverSettings, solverAlgorithm } = useSettings()
+  // The complete answer wins while a deeper depth runs. A double-oracle round
+  // inside that depth is an equilibrium of a restricted action set, not of the
+  // whole game, so replacing a finished depth with one would swap a real answer
+  // for a provisional one. The live update still drives the progress line
+  // below, and it is the only answer on screen before the first depth finishes.
+  const answer = complete ?? live
 
   const running = phase === 'starting' || phase === 'running'
   const on = phase !== 'off'
@@ -300,22 +307,20 @@ export default function TrackerSolverPanel() {
       {open && (
         <div className="max-h-[calc(100vh-11rem)] overflow-y-auto border-t border-subtle px-2 py-2">
           <div className="flex flex-wrap items-end gap-2">
-            <label className="min-w-[11rem] flex-1">
-              <span className="mb-0.5 block text-ink-muted">Algorithm</span>
-              <Select
-                value={algorithm}
-                options={ALGORITHM_OPTIONS}
-                onChange={(v) => setAlgorithm(v as BotAlgorithm)}
-                disabled={running}
-              />
-            </label>
+            <span className="min-w-[11rem] flex-1" data-testid="tracker-solver-algorithm">
+              <span className="mb-0.5 block text-ink-muted">Search</span>
+              <span className="font-semibold">
+                {SOLVER_ALGORITHMS.find((o) => o.value === solverAlgorithm)?.label ??
+                  solverAlgorithm}
+              </span>
+            </span>
             <button
               onClick={() => {
                 if (trackerId === null) return
                 void start({
                   source: 'tracker',
                   sessionId: trackerId,
-                  profile: solverProfile(algorithm, solverSettings, solverPreset),
+                  profile: solverProfile(solverAlgorithm, solverSettings, solverPreset),
                 })
               }}
               data-testid="tracker-solver-start"
@@ -334,11 +339,10 @@ export default function TrackerSolverPanel() {
             )}
           </div>
 
+          <p className="mt-1 text-ink-muted">{solverAlgorithmHint(solverAlgorithm)}</p>
           <p className="mt-1 text-ink-muted">
-            {ALGORITHM_OPTIONS.find((o) => o.value === algorithm)?.hint}
-          </p>
-          <p className="mt-1 text-ink-muted">
-            Search limits use the {solverPreset === 'competitive' ? 'high' : solverPreset} preset in Settings.
+            The search and its limits live in Settings. The limits use the{' '}
+            {solverPreset === 'competitive' ? 'high' : solverPreset} preset.
           </p>
           <p className="mt-1 text-ink-muted" data-testid="tracker-solver-no-submit">
             The panel shows each suggested command as text. It never writes one to the input bar.

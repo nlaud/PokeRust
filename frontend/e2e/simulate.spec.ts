@@ -124,7 +124,7 @@ test.describe('Simulate mode', () => {
     // The default information mode hides data, so the default algorithm is the
     // belief search that plays under that mode.
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
-    await expect(picker).toContainText('P2 uses this solver profile')
+    await expect(picker).toContainText('P2 uses the balanced limits from Settings')
 
     // The picker explains what the chosen algorithm does, on the page and in a
     // tooltip on the list-box trigger.
@@ -158,30 +158,21 @@ test.describe('Simulate mode', () => {
       picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
     ).toHaveAttribute('aria-expanded', 'false')
 
-    // The simulation-turn budget scales itself until the user takes it over.
-    // A locked budget makes a deeper search a noisier one, so the derived value
-    // must follow the depth and the particle count.
-    const budgetField = picker.locator('label').filter({ hasText: 'Simulation turns' })
-    const budget = budgetField.locator('input[type=number]')
-    const budgetAuto = budgetField.locator('input[type=checkbox]')
-    const depth = picker
-      .locator('label')
-      .filter({ has: page.getByText('Depth', { exact: true }) })
-      .locator('input[type=number]')
-    await expect(budgetAuto).toBeChecked()
-    await expect(budget).toBeDisabled()
-    await expect(budget).toHaveValue('8000')
-    await depth.fill('4')
-    await expect(budget).toHaveValue('16000')
+    // The picker holds no limit of its own. The Settings sidebar owns every
+    // limit, and the picker names the preset that P2 will use. A preset change
+    // must therefore reach this line.
+    await expect(picker.locator('input[type=number]')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Open settings' }).click()
+    await page.getByRole('button', { name: 'Fast 10K turns' }).click()
+    await page.getByRole('button', { name: 'Close settings' }).click()
+    await expect(picker).toContainText('P2 uses the fast limits from Settings')
 
-    // A cleared box seeds the field with the derived value and hands it over.
-    await budgetAuto.uncheck()
-    await expect(budget).toBeEnabled()
-    await budget.fill('2500')
-    await depth.fill('2')
-    await expect(budget).toHaveValue('2500')
-    await budgetAuto.check()
-    await expect(budget).toHaveValue('8000')
+    // Put the balanced preset back, so the badge below reports the limits that
+    // the rest of this test expects.
+    await page.getByRole('button', { name: 'Open settings' }).click()
+    await page.getByRole('button', { name: 'Balanced 100K turns' }).click()
+    await page.getByRole('button', { name: 'Close settings' }).click()
+    await expect(picker).toContainText('P2 uses the balanced limits from Settings')
     await page.screenshot({
       path: testInfo.outputPath('bot-picker.png'),
       fullPage: true,
@@ -312,8 +303,9 @@ test.describe('Simulate mode', () => {
     expect(turnRequests).toHaveLength(2)
     expect(turnRequests[1]).not.toHaveProperty('p2')
 
-    // The reveal names P2's one action. It must never show the odds of that
-    // action or P2's win probability.
+    // A bot session always reveals P2's strategy. `reveals_strategy` in
+    // `poke_rust/src/bin/server/analysis.rs` reads the profile alone, so the
+    // rows appear beside the drawn action.
     await badge.getByRole('button').first().click()
     const reveal = page.getByTestId('p2-reveal')
     await expect(reveal).toBeVisible()
@@ -322,7 +314,9 @@ test.describe('Simulate mode', () => {
     await expect(reveal).toContainText('Draw seed')
     await expect(reveal).toContainText('ismcts')
     await expect(reveal).toContainText('replacement depth 2')
-    await expect(reveal).not.toContainText('%')
+    await expect(reveal).toContainText('Strategy of the last draw')
+    // The rows carry action rates. They must never carry P2's win probability,
+    // which would tell P1 how the solver reads the position.
     await expect(reveal).not.toContainText(/win/i)
     await page.screenshot({
       path: testInfo.outputPath('bot-turn-resolved.png'),
@@ -343,7 +337,6 @@ test.describe('Simulate mode', () => {
           informationMode: 'closedSheet',
           botPreset: 'fast',
           botAlgorithm: 'doubleOracle',
-          botSimulationTurnBudget: 1000,
         }),
       )
     })
@@ -352,22 +345,12 @@ test.describe('Simulate mode', () => {
     const picker = page.getByTestId('bot-picker')
 
     // A stored exact algorithm cannot play under a fog-of-war mode, so the load
-    // path replaces it with the belief search.
+    // path replaces it with the belief search. A stored `botPreset` also turns
+    // the profile on, which is what makes the algorithm list visible at all.
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
 
-    // An older build always stored the flat budget, so the load path reads that
-    // number as "scale automatically". Otherwise every stored setup keeps the
-    // budget that makes a deeper search a noisier one.
-    const budgetField = picker.locator('label').filter({ hasText: 'Simulation turns' })
-    await expect(budgetField.locator('input[type=checkbox]')).toBeChecked()
-    await expect(budgetField.locator('input[type=number]')).toHaveValue('8000')
-
-    // A budget that the user chose is not the old default, so it survives.
-    await budgetField.locator('input[type=checkbox]').uncheck()
-    await budgetField.locator('input[type=number]').fill('2500')
-    await page.reload()
-    await expect(budgetField.locator('input[type=number]')).toHaveValue('2500')
-    await expect(budgetField.locator('input[type=checkbox]')).not.toBeChecked()
+    // The repair reaches storage, so no reload restores the pair that reported
+    // no answer on every turn.
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -376,11 +359,14 @@ test.describe('Simulate mode', () => {
         }),
       )
       .toBe('ismcts')
-
-    // The repaired selection survives a reload, so no reload restores the pair
-    // that reported no answer on every turn.
     await page.reload()
     await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
+
+    // A mode that holds no belief repairs the pair the other way.
+    await pickSelectOption(page, 'Information mode', 'Perfect Information')
+    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
+    await page.reload()
+    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
   })
 
   test('the reveal names the solver strategy under perfect information', async ({
@@ -423,9 +409,10 @@ test.describe('Simulate mode', () => {
     await expect(openOption('Double Oracle (exact)')).toBeEnabled()
     await page.keyboard.press('Escape')
 
-    const revealSetting = page.getByTestId('bot-reveal-strategy')
-    await revealSetting.check()
-    await expect(revealSetting).toBeChecked()
+    // The reveal takes no opt-in control. `reveals_strategy` in
+    // `poke_rust/src/bin/server/analysis.rs` reads the profile alone, so every
+    // bot session shows the rows and the picker says so.
+    await expect(picker).toContainText('Its live strategy stays visible')
     await page.screenshot({
       path: testInfo.outputPath('opponent-strategy-setting.png'),
       fullPage: true,
@@ -435,7 +422,7 @@ test.describe('Simulate mode', () => {
     await page.getByRole('button', { name: 'Start Battle' }).click()
     const previewMons = page.getByTestId('preview-mon')
     await expect(previewMons.first()).toBeVisible({ timeout: 10_000 })
-    await expect(page.getByTestId('bot-badge-reveal')).toHaveText('strategy shown')
+    await expect(page.getByTestId('bot-badge-reveal')).toHaveText('live strategy')
 
     // Expand the one solver card. The first analysis answer shows the full
     // preview strategy before P1 picks.

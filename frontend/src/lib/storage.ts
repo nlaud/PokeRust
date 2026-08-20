@@ -147,22 +147,13 @@ export interface BattleSetup {
    * The setup panel replaces a value that cannot play under
    * `informationMode`, because a stored setup can hold an old pair. */
   botAlgorithm?: BotAlgorithm
-  /** `null` leaves the budget to the server, which scales it with the depth. */
-  botSimulationTurnBudget?: number | null
-  botDepth?: number
-  botReplacementDepth?: number | null
-  botDamageRolls?: number
-  botConsiderCrit?: boolean
-  botParticles?: number
-  /** Shows Player 2's strategy during the battle.
-   * An absent value hides it, which is the server default. */
-  botRevealStrategy?: boolean
 }
 
-const SETUP_KEY = 'pokerust.battleSetup.v1'
+// This setup holds no solver limit. The Settings sidebar owns every limit, and
+// one choice there covers the simulator and the tracker. A stored limit from an
+// older build stays in the record and nothing reads it.
 
-/** The budget that the panel stored before the field could scale itself. */
-const LEGACY_FLAT_BUDGET = 1000
+const SETUP_KEY = 'pokerust.battleSetup.v1'
 
 export function loadBattleSetup(): BattleSetup | null {
   const stored = readJson<BattleSetup & { botPreset?: 'off' | 'fast' | 'balanced' | 'strong' }>(
@@ -170,13 +161,6 @@ export function loadBattleSetup(): BattleSetup | null {
   )
   if (stored === null) return null
   if (stored.botEnabled === undefined) stored.botEnabled = stored.botPreset !== undefined && stored.botPreset !== 'off'
-  // The panel always sent the budget, so every setup from an older build holds
-  // the flat default. That number is not a choice the user made, and it would
-  // hide the scaled budget from every stored setup. Read it as "scale
-  // automatically" instead. A user who wants the flat number types it again.
-  if (stored.botSimulationTurnBudget === LEGACY_FLAT_BUDGET) {
-    stored.botSimulationTurnBudget = null
-  }
   return stored
 }
 

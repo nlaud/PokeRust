@@ -236,6 +236,12 @@ pub(super) fn run(
         let seed = ctx.root_seed.take();
         let max_discarded = ctx.max_discarded;
         let action_truncations = ctx.action_truncations;
+        let root_fallback = ctx.root_fallback;
+        // Describes one pass, not the whole solve, so each pass starts clear.
+        // A root matrix with one action for each player answers without a
+        // double-oracle run at all, and that answer is exact rather than a
+        // placeholder.
+        ctx.root_fallback = false;
         let (root_depth, root_chain) =
             super::root_descent(actions::phase_of(state), depth, config.replacement_depth);
         // The first pass must return one strategy, including when the budget is
@@ -269,6 +275,9 @@ pub(super) fn run(
                 reached = depth;
                 solved = Some(position_of_round(round));
                 returned_pass_is_partial = true;
+                // This answer is a completed round by construction, whatever
+                // the pass as a whole managed.
+                ctx.root_fallback = false;
             } else if solved.is_none() {
                 reached = depth;
                 solved = Some(pass);
@@ -278,6 +287,7 @@ pub(super) fn run(
                 // approximation metadata from the incomplete pass.
                 ctx.max_discarded = max_discarded;
                 ctx.action_truncations = action_truncations;
+                ctx.root_fallback = root_fallback;
             }
             break;
         }
@@ -378,7 +388,7 @@ pub(super) fn stop_warnings(
             warnings.push(SolveWarning::DeadlineExceeded { budget });
         }
     }
-    if ctx.cancel.is_some_and(CancelFlag::simulation_budget_hit)
+    if ctx.cancel.is_some_and(CancelFlag::simulation_budget_exhausted)
         && let Some(budget) = ctx.cancel.and_then(CancelFlag::simulation_turn_budget)
     {
         warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });
@@ -388,6 +398,9 @@ pub(super) fn stop_warnings(
     // search, so it applies whether or not the returned pass is complete.
     if ctx.cancel_hit {
         warnings.push(SolveWarning::Cancelled);
+    }
+    if ctx.root_fallback {
+        warnings.push(SolveWarning::NoCompletedRound);
     }
     if reached < target {
         warnings.push(SolveWarning::DepthNotReached { target, reached });
@@ -502,6 +515,16 @@ pub(super) fn strategy_of(
             probability,
         })
         .collect();
+    // The floor removes mass, so the kept rows no longer total one. The removed
+    // mass is tiny, but a reader that adds the displayed percentages must still
+    // reach 100. Rescaling the survivors is also what the reader assumes: a row
+    // below the floor is not a play, so its share belongs to the rows that are.
+    let total: f64 = strategy.iter().map(|row| row.probability).sum();
+    if total > 0.0 {
+        for row in &mut strategy {
+            row.probability /= total;
+        }
+    }
     strategy.sort_by(|a, b| b.probability.total_cmp(&a.probability));
     strategy
 }
@@ -711,6 +734,7 @@ impl<'a> WorkerSeed<'a> {
             budget_hit: false,
             deadline_hit: false,
             cancel_hit: false,
+            root_fallback: false,
             cancel: self.cancel,
             started: self.started,
             root_seed: None,
@@ -746,6 +770,13 @@ pub(super) struct SearchContext<'a> {
     /// Set when the search read a raised [`CancelFlag`].
     /// It latches for the same reason the other two do.
     pub(super) cancel_hit: bool,
+    /// Set when the root double-oracle run of the current pass completed no
+    /// round, so its answer is the uniform placeholder rather than an
+    /// equilibrium.
+    ///
+    /// Unlike the three stop flags this one does not latch. It describes one
+    /// pass, and [`run`] keeps the value of the pass that it returns.
+    pub(super) root_fallback: bool,
     /// The stop signal of the caller, if the caller supplied one.
     pub(super) cancel: Option<&'a CancelFlag>,
     /// When the solve began. Every deepening pass shares it, so the deadline
@@ -781,6 +812,7 @@ impl<'a> SearchContext<'a> {
             budget_hit: false,
             deadline_hit: false,
             cancel_hit: false,
+            root_fallback: false,
             cancel,
             started,
             root_seed: None,
@@ -897,7 +929,7 @@ impl<'a> SearchContext<'a> {
         };
         let deadline_hit = self.deadline_expired();
         let cancel_hit = self.cancel_requested();
-        let simulation_budget_hit = self.cancel.is_some_and(CancelFlag::simulation_budget_hit);
+        let simulation_budget_hit = self.cancel.is_some_and(CancelFlag::simulation_budget_exhausted);
         budget_hit || simulation_budget_hit || deadline_hit || cancel_hit
     }
 
@@ -931,7 +963,7 @@ impl<'a> SearchContext<'a> {
     /// Whether a stop reason has latched.
     pub(super) fn stopped(&self) -> bool {
         self.budget_hit
-            || self.cancel.is_some_and(CancelFlag::simulation_budget_hit)
+            || self.cancel.is_some_and(CancelFlag::simulation_budget_exhausted)
             || self.deadline_hit
             || self.cancel_hit
     }
@@ -1189,6 +1221,13 @@ impl<'a> SearchContext<'a> {
         // would double count them.
         self.stats.lps_solved += oracle.lps_solved;
         self.stats.ab_cutoffs += oracle.cutoffs;
+        // Only the root call carries a report, so only the root call describes
+        // the answer that the caller sees. A run with no completed round
+        // returns the uniform strategy that it started from, and that answer is
+        // not an equilibrium of anything.
+        if report.is_some() {
+            self.root_fallback = oracle.rounds_completed == 0;
+        }
         solution
     }
 
@@ -1499,11 +1538,6 @@ impl<'a> SearchContext<'a> {
             return None;
         }
 
-        let mut raw: Vec<(MatchState, f64)> = simulated
-            .into_iter()
-            .map(|(child, _events, probability)| (child, probability))
-            .collect();
-
         // `simulate_turn` sorts its branches by descending probability, but it
         // builds them by draining a `HashMap` first, so successors that *tie* on
         // probability emerge in an order that varies from run to run. Sorting on
@@ -1518,12 +1552,17 @@ impl<'a> SearchContext<'a> {
         // grows, and move the reported work counts. One state hash per successor
         // is cheap next to having produced it, and buys a bit-stable value and
         // reproducible statistics.
-        let mut keyed: Vec<(u64, MatchState, f64)> = raw
+        //
+        // Keyed straight out of the simulator's own list rather than through an
+        // intermediate `(state, probability)` vector. One turn can return
+        // hundreds of successors, and a `MatchState` is large, so each extra
+        // vector is one more move of the whole set for nothing.
+        let mut keyed: Vec<(u64, MatchState, f64)> = simulated
             .into_iter()
-            .map(|(child, probability)| (hash_state(&child), child, probability))
+            .map(|(child, _events, probability)| (hash_state(&child), child, probability))
             .collect();
         keyed.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-        raw = keyed
+        let raw: Vec<(MatchState, f64)> = keyed
             .into_iter()
             .map(|(_, child, probability)| (child, probability))
             .collect();
@@ -1642,7 +1681,7 @@ impl<'a> RootCells<'a> {
         if self
             .ctx
             .cancel
-            .is_some_and(CancelFlag::simulation_budget_hit)
+            .is_some_and(CancelFlag::simulation_budget_exhausted)
             && let Some(budget) = self.ctx.cancel.and_then(CancelFlag::simulation_turn_budget)
         {
             warnings.push(SolveWarning::SimulationTurnBudgetExhausted { budget });

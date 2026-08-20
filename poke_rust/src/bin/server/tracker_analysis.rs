@@ -696,23 +696,9 @@ fn evaluator_name(eval: poke_rust::solver::eval::LeafEvaluator) -> &'static str 
     }
 }
 
-/// True when no warning says that configured work stopped early.
-fn warnings_are_complete(warnings: &[solver::SolveWarning]) -> bool {
-    !warnings.iter().any(|warning| {
-        matches!(
-            warning,
-            solver::SolveWarning::BudgetExhausted { .. }
-                | solver::SolveWarning::SimulationTurnBudgetExhausted { .. }
-                | solver::SolveWarning::DeadlineExceeded { .. }
-                | solver::SolveWarning::DepthNotReached { .. }
-                | solver::SolveWarning::Cancelled
-        )
-    })
-}
-
 /// Converts an exact solver result without changing its completed depth.
 fn exact_rung(result: solver::SolveResult) -> RungResult {
-    let complete = warnings_are_complete(&result.warnings);
+    let complete = solver::warnings_are_complete(&result.warnings);
     RungResult {
         complete,
         depth_reached: result.depth_reached,
@@ -1309,6 +1295,8 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
             "The action cap kept {kept} of {player:?}'s {total} actions, so the search can miss \
              an action."
         ),
+        solver::SolveWarning::NoCompletedRound => "The search completed no equilibrium round, so both strategies are an even split over the actions rather than a calculated mixture."
+            .to_string(),
         solver::SolveWarning::Cancelled => {
             "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
@@ -2156,10 +2144,10 @@ Level: 50
     /// An exact search that spends the shared budget is partial.
     #[test]
     fn a_budget_warning_marks_an_exact_rung_partial() {
-        assert!(!warnings_are_complete(&[
+        assert!(!solver::warnings_are_complete(&[
             solver::SolveWarning::SimulationTurnBudgetExhausted { budget: 10 }
         ]));
-        assert!(warnings_are_complete(&[
+        assert!(solver::warnings_are_complete(&[
             solver::SolveWarning::ChanceMassDiscarded { max_fraction: 0.1 }
         ]));
     }

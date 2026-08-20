@@ -206,6 +206,14 @@ Do not make it the main fog-of-war solver.
 - Search must remain depth first.
 - A node-budget failure must use static evaluation and return a warning.
 
+`solver::warnings_are_complete` is the one completion rule of the project.
+Do not write another copy of it in an endpoint.
+`solver::sampling_warnings_are_complete` is the rule for a sampling search.
+
+A search reads `CancelFlag::simulation_budget_exhausted` for its stop test.
+`CancelFlag::simulation_budget_hit` answers for one flag alone, and a `pimc`
+world runs under a child flag of the job.
+
 `solver::actions` also supplies legal commands to the HTTP server.
 Use `replacement_commands_are_valid` during replacement phases.
 

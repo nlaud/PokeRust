@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { pickSelectOption, seedTeam, startTrackerSession } from './helpers'
+import { pickSelectOption, pickSolverSearch, seedTeam, startTrackerSession } from './helpers'
 
 // Tests the tracker input against the real frontend and backend.
 // It covers completion, lead input, previews, turn commits, history, deletion, and cancellation.
@@ -111,6 +111,27 @@ async function mockSolveStream(page: Page, events: SolveEvent[]) {
   await page.route('**/api/solve/*/events', (route) =>
     route.fulfill({ status: 200, contentType: 'text/event-stream', body }),
   )
+}
+
+/** One update whose rows leave probability out, as a truncated strategy does.
+ *
+ * The server keeps the eight highest-rate actions and sends each one at its
+ * true probability, so a wider strategy arrives summing to less than one. */
+function truncatedUpdate(shown: number[]): SolveEvent {
+  const event = solveUpdate({
+    revision: 0,
+    depth: 2,
+    complete: true,
+    value: 0.5,
+    action: 'Thunderbolt',
+  })
+  const data = event.data as Record<string, unknown>
+  data.p1Strategy = shown.map((probability, index) => ({
+    commands: [{ command: { kind: 'move', moveIndex: index }, description: `Move ${index}` }],
+    preview: null,
+    probability,
+  }))
+  return event
 }
 
 /** Opens the panel, commits the leads, and starts one search. */
@@ -282,7 +303,8 @@ test.describe('Tracker solver panel', () => {
     await page.keyboard.press('Shift+Enter')
     await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
 
-    await pickSelectOption(page, 'Algorithm', 'ISMCTS (sampled belief)')
+    // The search picker lives in the settings sidebar, so the panel reads it.
+    await pickSolverSearch(page, 'ISMCTS (sampled belief)')
     const registered = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/solve'),
     )
@@ -328,6 +350,36 @@ test.describe('Tracker solver panel', () => {
     await expect(body).toContainText('Depth 1 of 2')
     await expect(page.getByTestId('tracker-solver-p1-strategy')).toContainText('Thunderbolt')
     await expect(page.getByTestId('tracker-solver-p1-strategy')).not.toContainText('Protect')
+  })
+
+  test('names the probability that the shown rows leave out', async ({ page }) => {
+    await seedTeam(page)
+    // Eight rows that hold 0.72 between them. The other actions hold 0.28.
+    await mockSolveStream(page, [
+      solveStarted(),
+      truncatedUpdate([0.2, 0.16, 0.12, 0.08, 0.06, 0.04, 0.03, 0.03]),
+      { name: 'done', data: { jobId: 'job-1', updates: 1 } },
+    ])
+    await startTrackerSession(page)
+    await openSolverAndSearch(page)
+
+    const other = page.getByTestId('tracker-solver-p1-strategy-other')
+    await expect(other).toContainText('Other actions')
+    await expect(other).toContainText('28.0%')
+  })
+
+  test('shows no leftover row when the strategy is whole', async ({ page }) => {
+    await seedTeam(page)
+    await mockSolveStream(page, [
+      solveStarted(),
+      truncatedUpdate([0.6, 0.4]),
+      { name: 'done', data: { jobId: 'job-1', updates: 1 } },
+    ])
+    await startTrackerSession(page)
+    await openSolverAndSearch(page)
+
+    await expect(page.getByTestId('tracker-solver-p1-strategy')).toContainText('Move 0')
+    await expect(page.getByTestId('tracker-solver-p1-strategy-other')).toBeHidden()
   })
 
   test('shows the value stability and the support change, and submits no command', async ({

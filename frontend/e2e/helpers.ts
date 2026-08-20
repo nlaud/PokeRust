@@ -44,8 +44,22 @@ export async function seedTeam(page: Page) {
 
 /** Selects a visible option from the custom list box for the specified field. */
 export async function pickSelectOption(page: Page, labelText: string, optionName: string) {
-  await page.locator(`label:has-text("${labelText}") button[aria-haspopup="listbox"]`).click()
-  await page.getByRole('option', { name: optionName }).click()
+  // Scoped to the field, not to the page. `Select` renders its trigger and its
+  // list inside one root, and the settings sidebar stays mounted on every page,
+  // so two fields can offer an option of the same name at the same time.
+  const field = page.locator(`label:has-text("${labelText}")`)
+  await field.locator('button[aria-haspopup="listbox"]').click()
+  await field.getByRole('option', { name: optionName }).click()
+}
+
+/** Picks the solver search in the settings sidebar, then closes the sidebar.
+ *
+ * The picker lives beside the other solver limits, so every page that runs a
+ * search reads the same choice. */
+export async function pickSolverSearch(page: Page, optionName: string) {
+  await page.getByRole('button', { name: 'Open settings' }).click()
+  await pickSelectOption(page, 'Search', optionName)
+  await page.getByRole('button', { name: 'Close settings' }).click()
 }
 
 export async function startTrackerSession(page: Page) {

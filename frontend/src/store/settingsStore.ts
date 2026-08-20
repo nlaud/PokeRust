@@ -1,11 +1,14 @@
 import { create } from 'zustand'
 import { computeReadableTextColor } from '../lib/color'
 import {
+  DEFAULT_SOLVER_ALGORITHM,
   DEFAULT_SOLVER_SETTINGS,
+  SOLVER_ALGORITHMS,
   SOLVER_PRESETS,
   type SolverPreset,
   type SolverSettings,
 } from '../components/solver/solverSettings'
+import type { BotAlgorithm } from '../api/types'
 
 export type Theme = 'light' | 'dark' | 'custom'
 
@@ -23,6 +26,11 @@ interface Settings {
   customAccent: string
   solverPreset: SolverPreset
   solverSettings: SolverSettings
+  /** The search that the tracker solver panel runs.
+   *
+   * It lives beside the other solver limits, because the picker sits in the
+   * settings sidebar with them. */
+  solverAlgorithm: BotAlgorithm
 }
 
 function loadSettings(): Settings {
@@ -41,6 +49,12 @@ function loadSettings(): Settings {
           ...parsed.solverSettings,
           particles: Math.min(32, Math.max(1, parsed.solverSettings?.particles ?? 16)),
         },
+        // A stored name from an older build may no longer be offered.
+        solverAlgorithm: SOLVER_ALGORITHMS.some(
+          (option) => option.value === parsed.solverAlgorithm,
+        )
+          ? (parsed.solverAlgorithm as BotAlgorithm)
+          : DEFAULT_SOLVER_ALGORITHM,
       }
     }
   } catch {
@@ -52,6 +66,7 @@ function loadSettings(): Settings {
     customAccent: DEFAULT_CUSTOM_ACCENT,
     solverPreset: 'balanced',
     solverSettings: DEFAULT_SOLVER_SETTINGS,
+    solverAlgorithm: DEFAULT_SOLVER_ALGORITHM,
   }
 }
 
@@ -104,6 +119,7 @@ interface SettingsStore extends Settings {
   setCustomColors: (background: string, accent: string) => void
   setSolverPreset: (preset: SolverPreset) => void
   setSolverSettings: (settings: SolverSettings) => void
+  setSolverAlgorithm: (algorithm: BotAlgorithm) => void
   setSidebarOpen: (open: boolean) => void
 }
 
@@ -139,6 +155,10 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     const safe = { ...solverSettings, particles: Math.min(32, Math.max(1, solverSettings.particles)) }
     persist({ ...get(), solverPreset: 'custom', solverSettings: safe })
     set({ solverPreset: 'custom', solverSettings: safe })
+  },
+  setSolverAlgorithm: (solverAlgorithm) => {
+    persist({ ...get(), solverAlgorithm })
+    set({ solverAlgorithm })
   },
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
 }))
