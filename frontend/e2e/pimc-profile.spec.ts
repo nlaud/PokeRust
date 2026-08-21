@@ -8,18 +8,16 @@ test.describe('PIMC profile', () => {
     await seedTeam(page)
     await page.goto('/simulate')
     await pickSelectOption(page, 'Ruleset', 'Pokémon Champions Season 2 Singles')
+    // A fog-of-war mode hides data, so the battle reads the
+    // imperfect-information search from the settings sidebar.
+    await pickSolverSearch(page, 'imperfect', 'PIMC (averaged worlds)')
 
     const picker = page.getByTestId('bot-picker')
-    // The algorithm list appears only after the profile turns on.
+    // The resolved search appears only after the profile turns on.
     await picker.getByRole('button', { name: 'None' }).click()
-    await page.getByRole('option', { name: 'Solver', exact: true }).click()
+    await picker.getByRole('option', { name: 'Solver', exact: true }).click()
 
-    await picker.locator('button[aria-haspopup="listbox"]').nth(1).click()
-    // Scoped to the picker: the settings sidebar offers the same name.
-    await picker.getByRole('option', { name: 'PIMC (averaged worlds)' }).click()
-
-    // The search limits, including the particle count, live in the settings
-    // sidebar. The picker names the search alone.
+    await expect(picker.getByTestId('bot-algorithm-name')).toHaveText('PIMC (averaged worlds)')
     await expect(picker.getByTestId('bot-algorithm-hint')).toContainText('strategy fusion')
     await page.screenshot({
       path: testInfo.outputPath('pimc-setup-picker.png'),
@@ -34,7 +32,7 @@ test.describe('PIMC profile', () => {
 
     // The search picker and the advanced limits both live in the settings
     // sidebar, so the particle field appears there rather than in the panel.
-    await pickSolverSearch(page, 'PIMC (averaged worlds)')
+    await pickSolverSearch(page, 'imperfect', 'PIMC (averaged worlds)')
 
     const panel = page.getByTestId('tracker-solver-panel')
     await panel.getByTestId('tracker-solver-toggle').click()

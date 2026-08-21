@@ -1,10 +1,13 @@
 import { create } from 'zustand'
 import { computeReadableTextColor } from '../lib/color'
 import {
-  DEFAULT_SOLVER_ALGORITHM,
+  DEFAULT_IMPERFECT_SOLVER,
+  DEFAULT_PERFECT_SOLVER,
   DEFAULT_SOLVER_SETTINGS,
-  SOLVER_ALGORITHMS,
+  IMPERFECT_SOLVERS,
+  PERFECT_SOLVERS,
   SOLVER_PRESETS,
+  type SolverOption,
   type SolverPreset,
   type SolverSettings,
 } from '../components/solver/solverSettings'
@@ -26,11 +29,28 @@ interface Settings {
   customAccent: string
   solverPreset: SolverPreset
   solverSettings: SolverSettings
-  /** The search that the tracker solver panel runs.
+  /** The search to use when the position hides data.
    *
-   * It lives beside the other solver limits, because the picker sits in the
-   * settings sidebar with them. */
-  solverAlgorithm: BotAlgorithm
+   * The tracker always uses it, and a simulate battle uses it under every
+   * information mode except Perfect Information. */
+  imperfectSolver: BotAlgorithm
+  /** The search to use when the position hides nothing.
+   *
+   * Only a simulate battle under Perfect Information uses it. */
+  perfectSolver: BotAlgorithm
+}
+
+/** Reads one stored search name against the list that may hold it.
+ *
+ * A name from an older build can be absent from this build, and it can also sit
+ * in the other list. Both cases take the default, because a search of the wrong
+ * category cannot play the position that its dropdown configures. */
+function storedSolver(
+  stored: unknown,
+  options: SolverOption[],
+  fallback: BotAlgorithm,
+): BotAlgorithm {
+  return options.some((option) => option.value === stored) ? (stored as BotAlgorithm) : fallback
 }
 
 function loadSettings(): Settings {
@@ -38,6 +58,7 @@ function loadSettings(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY) ?? localStorage.getItem(OLD_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>
+      const legacy = parsed as { solverAlgorithm?: unknown }
       // Add custom color fields to old stored settings.
       return {
         theme: parsed.theme ?? 'light',
@@ -49,12 +70,19 @@ function loadSettings(): Settings {
           ...parsed.solverSettings,
           particles: Math.min(32, Math.max(1, parsed.solverSettings?.particles ?? 16)),
         },
-        // A stored name from an older build may no longer be offered.
-        solverAlgorithm: SOLVER_ALGORITHMS.some(
-          (option) => option.value === parsed.solverAlgorithm,
-        )
-          ? (parsed.solverAlgorithm as BotAlgorithm)
-          : DEFAULT_SOLVER_ALGORITHM,
+        // One earlier build stored a single `solverAlgorithm` across both
+        // categories. Read it into whichever list holds it, so a user who chose
+        // PIMC or Double Oracle then keeps that choice here.
+        imperfectSolver: storedSolver(
+          parsed.imperfectSolver ?? legacy?.solverAlgorithm,
+          IMPERFECT_SOLVERS,
+          DEFAULT_IMPERFECT_SOLVER,
+        ),
+        perfectSolver: storedSolver(
+          parsed.perfectSolver ?? legacy?.solverAlgorithm,
+          PERFECT_SOLVERS,
+          DEFAULT_PERFECT_SOLVER,
+        ),
       }
     }
   } catch {
@@ -66,7 +94,8 @@ function loadSettings(): Settings {
     customAccent: DEFAULT_CUSTOM_ACCENT,
     solverPreset: 'balanced',
     solverSettings: DEFAULT_SOLVER_SETTINGS,
-    solverAlgorithm: DEFAULT_SOLVER_ALGORITHM,
+    imperfectSolver: DEFAULT_IMPERFECT_SOLVER,
+    perfectSolver: DEFAULT_PERFECT_SOLVER,
   }
 }
 
@@ -119,7 +148,8 @@ interface SettingsStore extends Settings {
   setCustomColors: (background: string, accent: string) => void
   setSolverPreset: (preset: SolverPreset) => void
   setSolverSettings: (settings: SolverSettings) => void
-  setSolverAlgorithm: (algorithm: BotAlgorithm) => void
+  setImperfectSolver: (algorithm: BotAlgorithm) => void
+  setPerfectSolver: (algorithm: BotAlgorithm) => void
   setSidebarOpen: (open: boolean) => void
 }
 
@@ -156,9 +186,13 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     persist({ ...get(), solverPreset: 'custom', solverSettings: safe })
     set({ solverPreset: 'custom', solverSettings: safe })
   },
-  setSolverAlgorithm: (solverAlgorithm) => {
-    persist({ ...get(), solverAlgorithm })
-    set({ solverAlgorithm })
+  setImperfectSolver: (imperfectSolver) => {
+    persist({ ...get(), imperfectSolver })
+    set({ imperfectSolver })
+  },
+  setPerfectSolver: (perfectSolver) => {
+    persist({ ...get(), perfectSolver })
+    set({ perfectSolver })
   },
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
 }))

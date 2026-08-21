@@ -1,8 +1,6 @@
 // Stores versioned teams and formats in local storage.
 // After a schema change, increase the key version and add a migration.
 
-import type { BotAlgorithm } from '../api/types'
-
 export interface StoredTeam {
   id: string
   name: string
@@ -143,15 +141,13 @@ export interface BattleSetup {
   team2Source?: 'saved' | 'meta'
   /** True when the planned battle uses a P2 solver. */
   botEnabled?: boolean
-  /** The search that controls P2.
-   * The setup panel replaces a value that cannot play under
-   * `informationMode`, because a stored setup can hold an old pair. */
-  botAlgorithm?: BotAlgorithm
 }
 
-// This setup holds no solver limit. The Settings sidebar owns every limit, and
-// one choice there covers the simulator and the tracker. A stored limit from an
-// older build stays in the record and nothing reads it.
+// This setup holds no search and no solver limit. The Settings sidebar owns
+// both, and one choice there covers the simulator and the tracker.
+// `informationMode` above already says which of the two searches a battle uses,
+// so a stored pair can never disagree. A search or a limit from an older build
+// stays in the record and nothing reads it.
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'
 

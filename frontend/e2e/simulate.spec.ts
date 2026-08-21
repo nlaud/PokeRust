@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { pickSelectOption, seedTeam } from './helpers'
+import { pickSelectOption, pickSolverSearch, seedTeam } from './helpers'
 
 // Tests simulator mode against the real server.
 // The test covers team preview, both hotseat players, and turn resolution.
@@ -114,49 +114,40 @@ test.describe('Simulate mode', () => {
 
     // The profile section uses a span label. Scope each list box by its test ID.
     const picker = page.getByTestId('bot-picker')
-    const openOption = (name: string) =>
-      picker.locator('div.relative:has(> button[aria-expanded="true"])').getByRole('option', { name })
 
-    // The algorithm list box appears only after the user selects a profile.
+    // The resolved search appears only after the user selects a profile.
     await expect(picker.getByRole('button', { name: 'None' })).toBeVisible()
     await picker.getByRole('button', { name: 'None' }).click()
-    await openOption('Solver').click()
-    // The default information mode hides data, so the default algorithm is the
-    // belief search that plays under that mode.
-    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
+    await picker.getByRole('option', { name: 'Solver', exact: true }).click()
+    // The picker holds no algorithm list. The information mode picks the
+    // category, and the Settings sidebar picks the search inside it, so the two
+    // can never disagree. The default mode hides data, so the battle reads the
+    // imperfect-information search.
+    await expect(picker.getByTestId('bot-algorithm-name')).toHaveText('ISMCTS (sampled belief)')
     await expect(picker).toContainText('P2 uses the balanced limits from Settings')
 
-    // The picker explains what the chosen algorithm does, on the page and in a
-    // tooltip on the list-box trigger.
     const hint = picker.getByTestId('bot-algorithm-hint')
     const limit = picker.getByTestId('bot-algorithm-limit')
     await expect(hint).toContainText('Sampled')
     await expect(hint).toContainText('respects the fog of war')
     await expect(limit).toContainText('only a belief search can control P2')
-    await expect(
-      picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
-    ).toHaveAttribute('title', /Sampled/)
+    await expect(limit).toContainText('imperfect-information search from Settings')
 
-    // An algorithm that reads the true position cannot play under the fog of
-    // war. The list still shows it, and the option takes no selection.
-    await picker.getByRole('button', { name: 'ISMCTS (sampled belief)' }).click()
-    const exactOption = openOption('Double Oracle (exact)')
-    await expect(exactOption).toBeDisabled()
-    await expect(openOption('MCTS (sampled)')).toBeDisabled()
-    await expect(openOption('MCCFR (sampled belief)')).toBeEnabled()
+    // The other dropdown belongs to the other category, so changing it cannot
+    // reach a fog-of-war battle.
+    await pickSolverSearch(page, 'perfect', 'MCTS (sampled)')
+    await expect(picker.getByTestId('bot-algorithm-name')).toHaveText('ISMCTS (sampled belief)')
+
+    // Changing the search that this mode does read reaches the picker at once.
+    await pickSolverSearch(page, 'imperfect', 'MCCFR (sampled belief)')
+    await expect(picker.getByTestId('bot-algorithm-name')).toHaveText('MCCFR (sampled belief)')
     await page.screenshot({
-      path: testInfo.outputPath('bot-picker-disabled.png'),
+      path: testInfo.outputPath('bot-picker-resolved.png'),
       fullPage: true,
       animations: 'disabled',
     })
-    // A click on a disabled option changes nothing and leaves the list open.
-    await exactOption.click({ force: true })
-    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
-    await openOption('ISMCTS (sampled belief)').click()
-
-    await expect(
-      picker.locator('button[aria-haspopup="listbox"]').filter({ hasText: 'ISMCTS' }),
-    ).toHaveAttribute('aria-expanded', 'false')
+    // The rest of this test reads an ismcts badge, so put that search back.
+    await pickSolverSearch(page, 'imperfect', 'ISMCTS (sampled belief)')
 
     // The picker holds no limit of its own. The Settings sidebar owns every
     // limit, and the picker names the preset that P2 will use. A preset change
@@ -325,7 +316,7 @@ test.describe('Simulate mode', () => {
     })
   })
 
-  test('the P2 solver picker repairs a stored pair that cannot play', async ({ page }) => {
+  test('the information mode selects which stored search plays P2', async ({ page }) => {
     await page.goto('/')
     await page.evaluate(() => {
       localStorage.setItem(
@@ -336,37 +327,38 @@ test.describe('Simulate mode', () => {
           team2Id: '',
           informationMode: 'closedSheet',
           botPreset: 'fast',
+          // An older build stored the search on the setup. Settings owns it
+          // now, so this field must not reach the picker.
           botAlgorithm: 'doubleOracle',
         }),
+      )
+      // One earlier build kept a single search across both categories. The
+      // load path reads it into whichever list holds it.
+      localStorage.setItem(
+        'pokerust.settings.v2',
+        JSON.stringify({ theme: 'light', solverAlgorithm: 'mccfr' }),
       )
     })
     await page.goto('/simulate')
 
     const picker = page.getByTestId('bot-picker')
+    const name = picker.getByTestId('bot-algorithm-name')
 
-    // A stored exact algorithm cannot play under a fog-of-war mode, so the load
-    // path replaces it with the belief search. A stored `botPreset` also turns
-    // the profile on, which is what makes the algorithm list visible at all.
-    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
+    // The stored mode hides data, so the battle reads the imperfect search.
+    // The migrated `solverAlgorithm` supplies it, and the stored `botAlgorithm`
+    // never reaches this line.
+    await expect(name).toHaveText('MCCFR (sampled belief)')
 
-    // The repair reaches storage, so no reload restores the pair that reported
-    // no answer on every turn.
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const raw = localStorage.getItem('pokerust.battleSetup.v1')
-          return raw ? JSON.parse(raw).botAlgorithm : null
-        }),
-      )
-      .toBe('ismcts')
-    await page.reload()
-    await expect(picker.getByRole('button', { name: 'ISMCTS (sampled belief)' })).toBeVisible()
-
-    // A mode that holds no belief repairs the pair the other way.
+    // A mode that holds no belief reads the other dropdown, which the migration
+    // left at its default because `mccfr` is not a perfect-information search.
     await pickSelectOption(page, 'Information mode', 'Perfect Information')
-    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
+    await expect(name).toHaveText('Double Oracle (exact)')
+
+    // Both choices survive a reload, and the mode still selects between them.
     await page.reload()
-    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
+    await expect(name).toHaveText('Double Oracle (exact)')
+    await pickSelectOption(page, 'Information mode', 'Closed Team Sheet')
+    await expect(name).toHaveText('MCCFR (sampled belief)')
   })
 
   test('the reveal names the solver strategy under perfect information', async ({
@@ -389,25 +381,16 @@ test.describe('Simulate mode', () => {
     })
 
     const picker = page.getByTestId('bot-picker')
-    const openOption = (name: string) =>
-      picker
-        .locator('div.relative:has(> button[aria-expanded="true"])')
-        .getByRole('option', { name })
     await picker.getByRole('button', { name: 'None' }).click()
-    await openOption('Solver').click()
-    // Perfect Information holds no belief, so the mode change repairs the
-    // algorithm. The picker selects the exact search and disables both belief
-    // searches.
-    await expect(picker.getByRole('button', { name: 'Double Oracle (exact)' })).toBeVisible()
+    await picker.getByRole('option', { name: 'Solver', exact: true }).click()
+    // Perfect Information holds no belief, so the battle reads the
+    // perfect-information search. No belief search can reach this mode at all,
+    // because the two dropdowns keep the categories apart.
+    await expect(picker.getByTestId('bot-algorithm-name')).toHaveText('Double Oracle (exact)')
     await expect(picker.getByTestId('bot-algorithm-hint')).toContainText('Exact')
     await expect(picker.getByTestId('bot-algorithm-limit')).toContainText(
       'Perfect Information holds no belief',
     )
-    await picker.getByRole('button', { name: 'Double Oracle (exact)' }).click()
-    await expect(openOption('MCCFR (sampled belief)')).toBeDisabled()
-    await expect(openOption('ISMCTS (sampled belief)')).toBeDisabled()
-    await expect(openOption('Double Oracle (exact)')).toBeEnabled()
-    await page.keyboard.press('Escape')
 
     // The reveal takes no opt-in control. `reveals_strategy` in
     // `poke_rust/src/bin/server/analysis.rs` reads the profile alone, so every

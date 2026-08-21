@@ -86,7 +86,7 @@ src/
   store/
     battleStore.ts         Hotseat command flow
     benchmarkStore.ts      Benchmark stream state
-    settingsStore.ts       Saved display settings
+    settingsStore.ts       Saved display and solver settings
     trackerStore.ts        Tracker history, preview, and solver state
   pages/
     benchmark/             Benchmark charts
@@ -138,15 +138,17 @@ A bot session lets the server choose the P2 command.
 The client sends no `p2` field for that session.
 The server returns the drawn command as `p2Reveal`.
 
-`SetupPanel.tsx` pairs the algorithm with the information mode.
+`SetupPanel.tsx` reads the algorithm from the information mode.
 A search reads the true position, or it draws worlds from a belief.
 Only a belief search plays under a fog-of-war mode.
 Only a search of the true position plays under Perfect Information.
 
-The picker shows all six algorithms and disables every one that cannot play.
-A mode change replaces a selection that the new mode does not permit.
-The load path replaces a stored pair the same way.
-`POST /api/battles` returns 422 for a pair that still arrives.
+The Settings sidebar holds one search for each of those two cases.
+The mode picks the case, and the sidebar picks the search inside it.
+The picker therefore offers no algorithm list, and it names the search that the
+current mode resolves to.
+The pair can never disagree, so no panel repairs a stored selection.
+`POST /api/battles` still returns 422 for a pair that arrives from elsewhere.
 
 `P2RevealPanel.tsx` shows both states of that draw:
 
@@ -247,11 +249,8 @@ Open the panel and start the search.
 The Settings sidebar holds the search and the solver limits.
 The panel names the selected search and shows what that search reads.
 
-The `Search` control picks between an imperfect-information search and a
-perfect-information search:
-
-- ISMCTS, MCCFR, and PIMC read the belief, so they respect the fog of war.
-- Double oracle is exact for its depth, but it reads one drawn opponent.
+A tracker position always hides data, so the panel uses the
+`Imperfect-information search` from the sidebar.
 
 The panel keeps the last complete answer while a deeper depth runs.
 A double-oracle round inside that depth is an equilibrium of a restricted

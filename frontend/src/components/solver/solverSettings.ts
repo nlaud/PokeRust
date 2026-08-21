@@ -1,42 +1,80 @@
 import type { BotAlgorithm, BotProfileRequest } from '../../api/types'
 
-/** The searches that a tracker belief accepts, and what each one reads.
+/** One search, and what it reads.
  *
- * The first three read the belief itself, so they respect the fog of war. The
- * last one is exact for its depth, but it reads one drawn opponent, so it
- * answers a perfect-information game.
+ * The two lists below split every search by the information that it reads.
+ * That split is the same one the server holds: `is_exact` and `Mcts` in
+ * `poke_rust/src/bin/server/bot.rs` read the true position, and
+ * `searches_belief` names the three that read a belief. */
+export interface SolverOption {
+  value: BotAlgorithm
+  label: string
+  hint: string
+}
+
+/** The searches that read a belief, so they respect the fog of war.
  *
- * The list lives here rather than in the panel, because the picker sits in the
- * settings sidebar and the panel shows the hint of the selected entry. */
-export const SOLVER_ALGORITHMS: { value: BotAlgorithm; label: string; hint: string }[] = [
+ * The tracker always uses one of these, because a tracker session holds a
+ * belief and never a concrete position. A simulate battle uses one under every
+ * information mode except Perfect Information. */
+export const IMPERFECT_SOLVERS: SolverOption[] = [
   {
     value: 'ismcts',
     label: 'ISMCTS (sampled belief)',
-    hint: 'Sampled: it draws several possible opponents from the belief, then searches all of them.',
+    hint: 'Sampled: it draws several possible opponents from the belief, then searches all of them. The answer is an estimate, and it respects the fog of war.',
   },
   {
     value: 'mccfr',
     label: 'MCCFR (sampled belief)',
-    hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief.',
+    hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief. The answer is an estimate, and it respects the fog of war.',
   },
   {
     value: 'pimc',
     label: 'PIMC (averaged worlds)',
-    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if the hidden data were known, so the answer claims more than a real player can do.',
-  },
-  {
-    value: 'doubleOracle',
-    label: 'Double oracle (exact, one world)',
-    hint: 'Exact for its depth, but it reads one drawn opponent. It reports each round while it runs.',
+    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if the hidden data were known, so the answer claims more than a real player can do (strategy fusion).',
   },
 ]
 
-/** The default search: a sampled belief search, which respects the fog of war. */
-export const DEFAULT_SOLVER_ALGORITHM: BotAlgorithm = 'ismcts'
+/** The searches that read the true position.
+ *
+ * A simulate battle uses one of these under Perfect Information. No other
+ * information mode can, because the other player holds hidden data that these
+ * searches would read. */
+export const PERFECT_SOLVERS: SolverOption[] = [
+  {
+    value: 'doubleOracle',
+    label: 'Double Oracle (exact)',
+    hint: 'Exact: it solves every turn to the depth horizon and returns the true mixed strategy of that horizon. It reads the true position.',
+  },
+  {
+    value: 'serializedBounds',
+    label: 'Serialized Bounds (exact)',
+    hint: 'Exact: the same answer as Double Oracle through alpha-beta bounds. It reads the true position.',
+  },
+  {
+    value: 'backwardInduction',
+    label: 'Backward Induction (exact)',
+    hint: 'Exact: it builds the whole payoff matrix of every turn. The slowest exact algorithm. It reads the true position.',
+  },
+  {
+    value: 'mcts',
+    label: 'MCTS (sampled)',
+    hint: 'Sampled: it plays random lines and keeps the best. The answer is an estimate. It reads the true position.',
+  },
+]
+
+export const DEFAULT_IMPERFECT_SOLVER: BotAlgorithm = 'ismcts'
+export const DEFAULT_PERFECT_SOLVER: BotAlgorithm = 'doubleOracle'
+
+/** The label of one search, or its raw name for a name this build removed. */
+export function solverLabel(algorithm: BotAlgorithm): string {
+  const option = [...IMPERFECT_SOLVERS, ...PERFECT_SOLVERS].find((o) => o.value === algorithm)
+  return option?.label ?? algorithm
+}
 
 /** The hint of one search, or an empty string for a name this build removed. */
-export function solverAlgorithmHint(algorithm: BotAlgorithm): string {
-  return SOLVER_ALGORITHMS.find((option) => option.value === algorithm)?.hint ?? ''
+export function solverHint(algorithm: BotAlgorithm): string {
+  return [...IMPERFECT_SOLVERS, ...PERFECT_SOLVERS].find((o) => o.value === algorithm)?.hint ?? ''
 }
 
 export interface SolverSettings {
@@ -75,7 +113,6 @@ export const SOLVER_PRESETS: Record<Exclude<SolverPreset, 'custom'>, SolverSetti
   },
 }
 
-const BELIEF: BotAlgorithm[] = ['ismcts', 'mccfr', 'pimc']
 /** Builds a request with only the limits that the selected search reads. */
 export function solverProfile(
   algorithm: BotAlgorithm,
@@ -90,10 +127,11 @@ export function solverProfile(
     replacementDepth: settings.replacementDepth ?? undefined,
     damageRolls: settings.damageRolls,
     considerCrit: settings.considerCrit,
-    particles: BELIEF.includes(algorithm) ? settings.particles : undefined,
+    particles: isBeliefSearch(algorithm) ? settings.particles : undefined,
   }
 }
 
+/** True when this search reads a belief rather than the true position. */
 export function isBeliefSearch(algorithm: BotAlgorithm): boolean {
-  return BELIEF.includes(algorithm)
+  return IMPERFECT_SOLVERS.some((option) => option.value === algorithm)
 }

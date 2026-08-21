@@ -303,8 +303,9 @@ test.describe('Tracker solver panel', () => {
     await page.keyboard.press('Shift+Enter')
     await expect(page.getByText('Turn 1', { exact: true })).toBeVisible()
 
-    // The search picker lives in the settings sidebar, so the panel reads it.
-    await pickSolverSearch(page, 'ISMCTS (sampled belief)')
+    // A tracker position hides data, so the panel reads the imperfect-information
+    // search from the settings sidebar.
+    await pickSolverSearch(page, 'imperfect', 'ISMCTS (sampled belief)')
     const registered = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/solve'),
     )

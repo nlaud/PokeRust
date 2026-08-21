@@ -4,8 +4,10 @@ import { useSettings, type Theme } from '../../store/settingsStore'
 import Select from '../common/Select'
 import SolverControls from '../solver/SolverControls'
 import {
-  SOLVER_ALGORITHMS,
-  solverAlgorithmHint,
+  IMPERFECT_SOLVERS,
+  PERFECT_SOLVERS,
+  solverHint,
+  type SolverOption,
   type SolverPreset,
 } from '../solver/solverSettings'
 import type { BotAlgorithm } from '../../api/types'
@@ -36,6 +38,44 @@ const themes: { value: Theme; label: string; icon: ReactNode }[] = [
   { value: 'custom', label: 'Custom', icon: paletteIcon },
 ]
 
+/** One search dropdown, with what it reads and what the choice does.
+ *
+ * Two of these cover every search. A session never picks the list, because its
+ * information mode already says which information the search may read. */
+function SolverPicker({
+  label,
+  note,
+  value,
+  options,
+  onChange,
+  testId,
+}: {
+  label: string
+  note: string
+  value: BotAlgorithm
+  options: SolverOption[]
+  onChange: (algorithm: BotAlgorithm) => void
+  testId: string
+}) {
+  // The hint and the note sit beside the label, never inside it. A label holds
+  // the name of its control, and prose inside one both bloats the accessible
+  // name and makes a `label:has-text(...)` lookup match the wrong field.
+  return (
+    <div className="mb-3 text-sm" data-testid={testId}>
+      <label className="block">
+        <span className="mb-1 block text-ink-muted">{label}</span>
+        <Select
+          value={value}
+          options={options}
+          onChange={(next) => onChange(next as BotAlgorithm)}
+        />
+      </label>
+      <p className="mt-1 text-xs text-ink-muted">{solverHint(value)}</p>
+      <p className="mt-1 text-[11px] text-ink-muted">{note}</p>
+    </div>
+  )
+}
+
 export default function SettingsSidebar() {
   const {
     sidebarOpen,
@@ -47,10 +87,12 @@ export default function SettingsSidebar() {
     setCustomColors,
     solverPreset,
     solverSettings,
-    solverAlgorithm,
+    imperfectSolver,
+    perfectSolver,
     setSolverPreset,
     setSolverSettings,
-    setSolverAlgorithm,
+    setImperfectSolver,
+    setPerfectSolver,
   } = useSettings()
   const [advanced, setAdvanced] = useState(false)
   const presets: { value: SolverPreset; label: string; detail: string }[] = [
@@ -136,17 +178,22 @@ export default function SettingsSidebar() {
 
         <section className="mt-6 border-t border-subtle pt-5">
           <h3 className="mb-2 text-sm font-medium text-ink-muted">Solver</h3>
-          <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-ink-muted">Search</span>
-            <Select
-              value={solverAlgorithm}
-              options={SOLVER_ALGORITHMS}
-              onChange={(value) => setSolverAlgorithm(value as BotAlgorithm)}
-            />
-            <span className="mt-1 block text-xs text-ink-muted">
-              {solverAlgorithmHint(solverAlgorithm)}
-            </span>
-          </label>
+          <SolverPicker
+            label="Imperfect-information search"
+            note="The tracker always uses it. A simulate battle uses it under every information mode except Perfect Information."
+            value={imperfectSolver}
+            options={IMPERFECT_SOLVERS}
+            onChange={setImperfectSolver}
+            testId="imperfect-solver"
+          />
+          <SolverPicker
+            label="Perfect-information search"
+            note="A simulate battle uses it under Perfect Information, where neither side hides data."
+            value={perfectSolver}
+            options={PERFECT_SOLVERS}
+            onChange={setPerfectSolver}
+            testId="perfect-solver"
+          />
           <div className="grid grid-cols-3 gap-2">
             {presets.map((preset) => (
               <button
@@ -179,7 +226,7 @@ export default function SettingsSidebar() {
           {advanced && (
             <div className="text-xs">
               <SolverControls
-                algorithm={solverAlgorithm}
+                algorithm={imperfectSolver}
                 settings={solverSettings}
                 onChange={setSolverSettings}
               />

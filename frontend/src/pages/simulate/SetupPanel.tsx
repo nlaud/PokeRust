@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
-import { solverProfile } from '../../components/solver/solverSettings'
-import type { BotAlgorithm, InformationMode } from '../../api/types'
+import { solverHint, solverLabel, solverProfile } from '../../components/solver/solverSettings'
+import type { InformationMode } from '../../api/types'
 import { CATALOG } from '../../lib/items'
 import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
@@ -25,81 +25,25 @@ const BOT_OPTIONS = [
   { value: 'on', label: 'Solver', hint: 'The solver controls Player 2.' },
 ]
 
-// The first three algorithms solve the game exactly to the depth horizon.
-// The last four sample, so they return an estimate.
-const BOT_ALGORITHM_OPTIONS: { value: BotAlgorithm; label: string; hint: string }[] = [
-  {
-    value: 'doubleOracle',
-    label: 'Double Oracle (exact)',
-    hint: 'Exact: it solves every turn to the depth horizon and returns the true mixed strategy of that horizon. It reads the true position, so it sees through the fog of war.',
-  },
-  {
-    value: 'serializedBounds',
-    label: 'Serialized Bounds (exact)',
-    hint: 'Exact: the same answer as Double Oracle through alpha-beta bounds. It reads the true position, so it sees through the fog of war.',
-  },
-  {
-    value: 'backwardInduction',
-    label: 'Backward Induction (exact)',
-    hint: 'Exact: it builds the whole payoff matrix of every turn. The slowest exact algorithm. It reads the true position, so it sees through the fog of war.',
-  },
-  {
-    value: 'mcts',
-    label: 'MCTS (sampled)',
-    hint: 'Sampled: it plays random lines and keeps the best. The answer is an estimate. It reads the true position, so it sees through the fog of war.',
-  },
-  {
-    value: 'ismcts',
-    label: 'ISMCTS (sampled belief)',
-    hint: 'Sampled: it draws a possible version of your team from the belief, then searches. The answer is an estimate, and it respects the fog of war.',
-  },
-  {
-    value: 'mccfr',
-    label: 'MCCFR (sampled belief)',
-    hint: 'Sampled: it learns a mixed strategy from repeated self-play over the belief. The answer is an estimate, and it respects the fog of war.',
-  },
-  {
-    value: 'pimc',
-    label: 'PIMC (averaged worlds)',
-    hint: 'Baseline: it solves each drawn world exactly and averages the strategies. Each world plays as if it knew your hidden data, so the answer claims more than a real player can do (strategy fusion).',
-  },
-]
-
-// An algorithm reads the true position, or it reads a belief.
-// A session hides the data of the other player, or it hides nothing.
-// A pair plays only when the two answers agree.
-// The picker disables every other pair, and `bot_algorithm_fits_mode` in
-// `poke_rust/src/bin/server/routes.rs` rejects one that still arrives.
-// `strategy_respects_fog` and `belief_search_inputs` in
-// `poke_rust/src/bin/server/analysis.rs` hold the same rule.
-// A new algorithm needs one entry here and one arm there.
-const BELIEF_ALGORITHMS: BotAlgorithm[] = ['ismcts', 'mccfr', 'pimc']
-
 /** True when this information mode hides data from P2. */
 function hidesData(mode: InformationMode): boolean {
   return mode !== 'perfect'
 }
 
-/** True when this algorithm can control P2 under this information mode. */
-function canPlay(algorithm: BotAlgorithm, mode: InformationMode): boolean {
-  return BELIEF_ALGORITHMS.includes(algorithm) === hidesData(mode)
-}
-
-/** The algorithm that plays under this information mode. */
-function defaultAlgorithmFor(mode: InformationMode): BotAlgorithm {
-  return hidesData(mode) ? 'ismcts' : 'doubleOracle'
-}
-
 /**
- * Names the reason that this mode limits the algorithm list.
+ * Names the search that P2 uses under this information mode, and why.
  *
- * The picker shows this line at all times. It explains the disabled entries,
- * which the list keeps so that the user reads the whole set.
+ * The mode picks the category, and the Settings sidebar picks the search inside
+ * that category. The pair can therefore never disagree, so this panel offers no
+ * algorithm list of its own and needs no repair path for a stored pair.
+ *
+ * `bot_algorithm_fits_mode` in `poke_rust/src/bin/server/routes.rs` holds the
+ * same rule and returns 422 for a pair that still arrives.
  */
-function algorithmLimitNote(mode: InformationMode): string {
+function algorithmModeNote(mode: InformationMode): string {
   return hidesData(mode)
-    ? 'This information mode hides Player 1 data, so only a belief search can control P2. The other algorithms read the true position.'
-    : 'Perfect Information holds no belief, so only a search of the true position can control P2. Pick another information mode for a belief search.'
+    ? 'This information mode hides Player 1 data, so only a belief search can control P2. P2 uses your imperfect-information search from Settings.'
+    : 'Perfect Information holds no belief, so only a search of the true position can control P2. P2 uses your perfect-information search from Settings.'
 }
 
 type TeamSource = 'saved' | 'meta'
@@ -113,7 +57,7 @@ export default function SetupPanel() {
   const [teams] = useState(loadTeams)
   const [formats] = useState(loadFormats)
   const { createBattle, busy, error, clearError } = useBattle()
-  const { solverPreset, solverSettings } = useSettings()
+  const { solverPreset, solverSettings, imperfectSolver, perfectSolver } = useSettings()
 
   // Restore valid values from the last configuration.
   // Otherwise, select Doubles and the first favorite teams.
@@ -135,21 +79,9 @@ export default function SetupPanel() {
   const defaultInformationMode = saved?.informationMode ?? 'closedSheet'
   const [informationMode, setInformationMode] = useState<InformationMode>(defaultInformationMode)
   const [botEnabled, setBotEnabled] = useState(saved?.botEnabled ?? false)
-  const savedAlgorithm = saved?.botAlgorithm
-  // A stored algorithm that cannot play under the stored mode creates a bot
-  // that never answers, so the load path replaces it. A setup from an older
-  // picker can hold such a pair.
-  const [botAlgorithm, setBotAlgorithm] = useState<BotAlgorithm>(
-    savedAlgorithm && canPlay(savedAlgorithm, defaultInformationMode)
-      ? savedAlgorithm
-      : defaultAlgorithmFor(defaultInformationMode),
-  )
-
-  // A mode change replaces an algorithm that cannot play in the new mode.
-  const changeInformationMode = (mode: InformationMode) => {
-    setInformationMode(mode)
-    if (!canPlay(botAlgorithm, mode)) setBotAlgorithm(defaultAlgorithmFor(mode))
-  }
+  // The mode selects the category and Settings selects the search inside it, so
+  // this panel stores no algorithm and a mode change repairs nothing.
+  const botAlgorithm = hidesData(informationMode) ? imperfectSolver : perfectSolver
 
   useEffect(() => {
     saveBattleSetup({
@@ -160,18 +92,8 @@ export default function SetupPanel() {
       team2Source,
       informationMode,
       botEnabled,
-      botAlgorithm,
     })
-  }, [
-    formatId,
-    team1Id,
-    team2Id,
-    team1Source,
-    team2Source,
-    informationMode,
-    botEnabled,
-    botAlgorithm,
-  ])
+  }, [formatId, team1Id, team2Id, team1Source, team2Source, informationMode, botEnabled])
 
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
@@ -209,13 +131,6 @@ export default function SetupPanel() {
     })
   }
 
-  const algorithmHint = BOT_ALGORITHM_OPTIONS.find((o) => o.value === botAlgorithm)?.hint ?? ''
-  // The list keeps every algorithm and disables each one that cannot play. The
-  // user then reads the whole set and cannot select a pair that never answers.
-  const algorithmOptions = BOT_ALGORITHM_OPTIONS.map((option) => ({
-    ...option,
-    disabled: !canPlay(option.value, informationMode),
-  }))
   const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
   const teamOptions = sortedTeams.map((t) => ({ value: t.id, label: t.name }))
 
@@ -265,7 +180,7 @@ export default function SetupPanel() {
           <Select
             value={informationMode}
             options={INFO_MODE_OPTIONS}
-            onChange={(v) => changeInformationMode(v as InformationMode)}
+            onChange={(v) => setInformationMode(v as InformationMode)}
           />
         </label>
 
@@ -280,16 +195,14 @@ export default function SetupPanel() {
           </div>
           {botEnabled && (
             <>
-              <Select
-                value={botAlgorithm}
-                options={algorithmOptions}
-                onChange={(v) => setBotAlgorithm(v as BotAlgorithm)}
-              />
+              <p className="text-sm font-semibold" data-testid="bot-algorithm-name">
+                {solverLabel(botAlgorithm)}
+              </p>
               <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-hint">
-                {algorithmHint}
+                {solverHint(botAlgorithm)}
               </p>
               <p className="mt-1 text-xs text-ink-muted" data-testid="bot-algorithm-limit">
-                {algorithmLimitNote(informationMode)}
+                {algorithmModeNote(informationMode)}
               </p>
               <p className="mt-1 text-xs text-ink-muted">
                 P2 uses the {solverPreset === 'competitive' ? 'high' : solverPreset} limits from Settings. Its live strategy stays visible.

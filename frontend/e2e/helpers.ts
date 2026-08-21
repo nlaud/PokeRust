@@ -52,13 +52,22 @@ export async function pickSelectOption(page: Page, labelText: string, optionName
   await field.getByRole('option', { name: optionName }).click()
 }
 
-/** Picks the solver search in the settings sidebar, then closes the sidebar.
+/** Picks one of the two solver searches in the settings sidebar.
  *
- * The picker lives beside the other solver limits, so every page that runs a
- * search reads the same choice. */
-export async function pickSolverSearch(page: Page, optionName: string) {
+ * `reads` selects the dropdown. A position that hides data uses the imperfect
+ * one, and a position that hides nothing uses the perfect one. Every page reads
+ * the same two choices. */
+export async function pickSolverSearch(
+  page: Page,
+  reads: 'imperfect' | 'perfect',
+  optionName: string,
+) {
+  // Scoped by test ID, not by label text. "Imperfect-information search" holds
+  // "perfect-information search" as a substring, so `has-text` matches both.
   await page.getByRole('button', { name: 'Open settings' }).click()
-  await pickSelectOption(page, 'Search', optionName)
+  const field = page.getByTestId(`${reads}-solver`)
+  await field.locator('button[aria-haspopup="listbox"]').click()
+  await field.getByRole('option', { name: optionName }).click()
   await page.getByRole('button', { name: 'Close settings' }).click()
 }
 

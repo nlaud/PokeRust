@@ -1,9 +1,5 @@
 import { useState } from 'react'
-import {
-  SOLVER_ALGORITHMS,
-  solverAlgorithmHint,
-  solverProfile,
-} from '../../components/solver/solverSettings'
+import { solverHint, solverLabel, solverProfile } from '../../components/solver/solverSettings'
 import type { SolveUpdate, StrategyRow } from '../../api/types'
 import { useSolve } from '../../store/solveStore'
 import { useTracker } from '../../store/trackerStore'
@@ -257,8 +253,10 @@ export default function TrackerSolverPanel() {
   const { phase, started, progress, complete, previousComplete, live, stale, error, start, stop } =
     useSolve()
   const [open, setOpen] = useState(false)
-  // The picker lives in the settings sidebar, beside the other solver limits.
-  const { solverPreset, solverSettings, solverAlgorithm } = useSettings()
+  // A tracker session holds a belief and never a concrete position, so it
+  // always uses the imperfect-information search. The settings sidebar holds
+  // that choice, beside the other solver limits.
+  const { solverPreset, solverSettings, imperfectSolver } = useSettings()
   // The complete answer wins while a deeper depth runs. A double-oracle round
   // inside that depth is an equilibrium of a restricted action set, not of the
   // whole game, so replacing a finished depth with one would swap a real answer
@@ -309,10 +307,7 @@ export default function TrackerSolverPanel() {
           <div className="flex flex-wrap items-end gap-2">
             <span className="min-w-[11rem] flex-1" data-testid="tracker-solver-algorithm">
               <span className="mb-0.5 block text-ink-muted">Search</span>
-              <span className="font-semibold">
-                {SOLVER_ALGORITHMS.find((o) => o.value === solverAlgorithm)?.label ??
-                  solverAlgorithm}
-              </span>
+              <span className="font-semibold">{solverLabel(imperfectSolver)}</span>
             </span>
             <button
               onClick={() => {
@@ -320,7 +315,7 @@ export default function TrackerSolverPanel() {
                 void start({
                   source: 'tracker',
                   sessionId: trackerId,
-                  profile: solverProfile(solverAlgorithm, solverSettings, solverPreset),
+                  profile: solverProfile(imperfectSolver, solverSettings, solverPreset),
                 })
               }}
               data-testid="tracker-solver-start"
@@ -339,9 +334,10 @@ export default function TrackerSolverPanel() {
             )}
           </div>
 
-          <p className="mt-1 text-ink-muted">{solverAlgorithmHint(solverAlgorithm)}</p>
+          <p className="mt-1 text-ink-muted">{solverHint(imperfectSolver)}</p>
           <p className="mt-1 text-ink-muted">
-            The search and its limits live in Settings. The limits use the{' '}
+            A tracker position hides data, so it uses the imperfect-information
+            search from Settings. The limits use the{' '}
             {solverPreset === 'competitive' ? 'high' : solverPreset} preset.
           </p>
           <p className="mt-1 text-ink-muted" data-testid="tracker-solver-no-submit">

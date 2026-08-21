@@ -292,7 +292,9 @@ belief.
 An exact or `mcts` profile needs Perfect Information.
 Both other pairs give P2 a uniform draw on every turn, so the endpoint returns
 422.
-`frontend/src/pages/simulate/SetupPanel.tsx` disables the same pairs.
+`frontend/src/pages/simulate/SetupPanel.tsx` cannot build either pair.
+The Settings sidebar holds one search for each information class, and the
+information mode of the session picks between them.
 
 `botP2.algorithm` is optional.
 A request that names no algorithm takes the search of its information mode.
