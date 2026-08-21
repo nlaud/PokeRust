@@ -676,3 +676,163 @@ search itself did not drift.
   agreement, the same split result as the singles run.
 - Sizing a corpus so that a time budget stops it does not work. The label rate
   rose from 0.58 to 0.71 per second, and the corpus ran out first.
+
+## 2026-08-21: Field features and a real-team corpus
+
+The first run of `runbook/refresh_and_train.py`. Two things changed together, so
+this run does not compare cleanly against 2026-08-05. Read it as a new baseline.
+
+1. Seven field and side-condition features joined the frame. `FEATURE_COUNT`
+   moved from 13 to 20.
+2. The corpus plays archived teams. `--teamsheet-dir` supplies 758 rosters that
+   `runbook/refresh_and_train.py` fetched from a VGCPastes export, and
+   `--teamsheet-mix 0.8` sends 80 percent of matchups to them.
+
+### The run
+
+```sh
+python runbook/refresh_and_train.py --hours 4
+```
+
+| Setting | Value |
+|---|---|
+| Teams | 758 archived rosters, 80 percent mix |
+| Usage cache | Season `Current`, refreshed 2026-08-20, 235 Doubles species |
+| Label depth | 2, iterative deepening, `--min-label-depth 1` |
+| Chance mode | `top1` |
+| Action cap | 24 per player, dominance filter on |
+| Workers | 20 |
+| Budget | 4 hours |
+
+The labeling stage produced 11,733 labels in 14,459 seconds. It kept 11,646
+value labels and 11,604 policy labels.
+
+| Depth | Labels |
+|---|---|
+| 2 | 11,609 |
+| 1 | 37 |
+| dropped, deadline expired | 87 |
+
+Depth 2 covered 99.7 percent of the corpus. The calibration measured 0.53 labels
+per second, and the run held 0.81 per second.
+
+### The value fit
+
+| Model | Train loss | Train MAE | Held-out loss | Held-out MAE |
+|---|---|---|---|---|
+| `heuristic` | 0.5590 | 0.1505 | 0.5584 | 0.1514 |
+| `fitted` | 0.5075 | 0.0953 | 0.5088 | 0.0978 |
+| `fitted_mlp` | 0.5112 | 0.1005 | 0.5130 | 0.1027 |
+
+The accept rule passed. `fitted` beat `heuristic` by 0.0536 on the held-out
+split.
+
+Do not read 0.0978 against the 0.0957 of 2026-08-05. That run labeled 19,200
+positions from generated rosters. This one labeled 11,646 from archived teams,
+which is a different and harder distribution. The `heuristic` error rose over
+the same pair, from 0.1429 to 0.1514, which says the same thing.
+
+### The field features
+
+| Feature | Variance | Fitted weight |
+|---|---|---|
+| `weather_edge` | 0.0945 | +0.1326 |
+| `weather_control` | 0.2508 | +0.0554 |
+| `terrain_edge` | 0.0004 | +0.1090 |
+| `terrain_control` | 0.0000, constant | +0.0686 |
+| `tailwind` | 0.0141 | +0.2254 |
+| `guard_conditions` | 0.0003 | +0.0443 |
+| `trick_room` | 0.1751 | +0.1216 |
+
+Three of the seven carry real signal: `weather_control`, `trick_room`, and
+`weather_edge`. The team corpus explains each number.
+
+| Source | Teams of 758 |
+|---|---|
+| Drizzle, Drought, Sand Stream, Snow Warning | 301 |
+| Trick Room | 306 |
+| Tailwind | 442 |
+| Electric Surge | 1 |
+| Grassy, Misty, and Psychic Surge | 0 |
+| Safeguard, Mist, Lucky Chant | 1 |
+
+`terrain_control` reads constant because one team of 758 carries a terrain
+setter. `guard_conditions` reads near zero for the same reason. Champions M-B
+has no terrain archetype and almost no status guard, so both features are
+correct and dormant. Their weights come from the hand value and the L2 penalty
+alone, as `tera` does.
+
+`tailwind` carries a large weight against a small variance. 442 teams hold the
+move, but the feature reads only the turns that Tailwind stands on exactly one
+side. A doubles corpus often has it up on both sides, which cancels.
+
+### The kill features
+
+The kill feature correlation was +0.9022, under the 0.99 threshold. The 16
+damage rolls still separate the pair.
+
+| Feature | 2026-08-05 | This run |
+|---|---|---|
+| `guaranteed_kill` | -0.0548 | -0.0410 |
+| `possible_kill` | +0.1555 | +0.1747 |
+
+### The learning curve
+
+| Training split | Samples | Held-out MAE |
+|---|---|---|
+| 25% | 2,329 | 0.0980 |
+| 50% | 4,659 | 0.0978 |
+| 75% | 6,988 | 0.0978 |
+| 100% | 9,317 | 0.0978 |
+
+Four times the data lowered the error by 0.0002. The curve stays flat, as it did
+on the generated corpus. A larger corpus is not the next step.
+
+### The model choice
+
+The network lost by 0.0049 mean absolute error against a 0.0020 margin.
+`SolveConfig::eval` and `MctsConfig::eval` keep `eval::fitted`.
+
+One hidden layer over 20 features did not beat a dot product, the same result
+that 13 features gave.
+
+### The policy fit
+
+| Model | Train loss | Train top-1 | Held-out loss | Held-out top-1 |
+|---|---|---|---|---|
+| hand | 5.4557 | 0.073 | 5.3557 | 0.069 |
+| fitted | 3.7062 | 0.071 | 3.6892 | 0.068 |
+
+The fit lowered the cross entropy by 1.67 and did not raise the top-1
+agreement. `MctsConfig::policy_prior` stays `false`.
+
+### What the refresh broke
+
+The refresh moved the cache, and three tests read cache contents rather than
+loader behavior. Each one documented that risk and then pinned a value anyway.
+
+1. `Mega Gallade` joined the roster. `SPECIES_OVERRIDES` now maps it to
+   `Species::GalladeMega`. `runbook/check_species.py` lists every unresolved
+   name in one pass.
+2. `loads_the_entire_cache` pinned the species count at 235. It now asserts a
+   range. It also pinned unmapped names at zero, and the site sent four corrupt
+   `stat_alignment` strings. It now allows a small count, which still catches
+   enum drift.
+3. `tolerates_species_with_missing_categories` pinned Ditto. No species has a
+   category gap this season. The test now reads whatever the cache holds.
+4. `every_cache_species_has_a_champions_learnset` counted every cache species.
+   A Mega forme has no learnset and `is_selectable_species` already drops one,
+   so the test now filters to selectable species.
+
+### Takeaways
+
+- The accept rule passed. `fitted` cut the held-out error from 0.1514 to 0.0978.
+- Depth 2 reached 99.7 percent of the corpus in four hours on 20 workers.
+- Weather and Trick Room carry real signal. Terrain and the status guards are
+  dormant in this metagame, not broken.
+- A field feature must count what one side gains, not whether the field is up.
+  A raw indicator subtracts to zero and reads constant.
+- The learning curve stays flat on a real-team corpus, so corpus size is still
+  not the limit.
+- `MLP_HIDDEN` equals `FEATURE_COUNT`, so a new feature invalidates the shipped
+  network file. The `reset` stage of the runbook reseeds it.

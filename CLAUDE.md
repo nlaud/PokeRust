@@ -14,6 +14,7 @@ Use strict mode unless the user requests another mode.
 - `poke_rust/benches/RESULTS.md` records benchmark results.
 - `poke_rust/src/solver/README.md` explains the search targets and algorithms.
 - `poke_rust/src/solver/TRAINING.md` explains how to retrain the evaluator.
+- `runbook/REFRESH_AND_TRAIN.md` explains the one-command refresh and retrain.
 
 ## Project state
 

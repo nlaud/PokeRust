@@ -76,6 +76,7 @@ use poke_rust::state::battle::{
     TeamPreviewCommand,
 };
 use poke_rust::state::dex_data::{parse_learnset_dex, parse_move_dex, parse_pokemon_dex};
+use poke_rust::state::pokemon::parse_team_sheet_str;
 
 /// The value network that this binary fits.
 type ValueNetwork = Mlp<FEATURE_COUNT, MLP_HIDDEN>;
@@ -245,6 +246,24 @@ struct Args {
     #[arg(long, default_value_t = 0.002)]
     mlp_margin: f64,
 
+    /// A directory of teamsheets that the corpus plays.
+    ///
+    /// Each `.txt` file is one roster in teamsheet format. The collector pairs
+    /// two of them for each matchup. Without this option every matchup uses a
+    /// roster that `generate_meta_team` builds from the usage cache.
+    ///
+    /// Real teams hold the item, ability, and move combinations that players
+    /// actually bring, which a per-Pokemon marginal cannot reproduce.
+    #[arg(long)]
+    teamsheet_dir: Option<PathBuf>,
+
+    /// Fraction of matchups that draw from `--teamsheet-dir`.
+    ///
+    /// The rest draw from the usage cache. A mixture keeps the rare Pokemon that
+    /// no archived team brought, so the corpus still covers them.
+    #[arg(long, default_value_t = 0.8)]
+    teamsheet_mix: f64,
+
     /// The `meta_scraper/data` directory.
     #[arg(long, default_value = "../meta_scraper/data")]
     meta_root: PathBuf,
@@ -352,6 +371,26 @@ fn main() {
         }
     };
 
+    let pool = match args.teamsheet_dir.as_ref() {
+        Some(dir) => match TeamPool::load(dir, args.brought_per_side, &pokemon_dex, &move_dex) {
+            Ok(loaded) => Some(loaded),
+            Err(error) => {
+                eprintln!("cannot read the teamsheet directory: {error}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    if pool.is_some() {
+        println!(
+            "team source: {:.0}% archived teamsheets, {:.0}% usage cache",
+            100.0 * args.teamsheet_mix,
+            100.0 * (1.0 - args.teamsheet_mix),
+        );
+    } else {
+        println!("team source: usage cache");
+    }
+
     let mechanics = args.mechanics();
     println!(
         "format: {format:?}, {} active, {} brought of {}, tera {}, mega {}",
@@ -373,6 +412,7 @@ fn main() {
         &args,
         wanted,
         &meta_dex,
+        pool.as_ref(),
         &pokemon_dex,
         &move_dex,
         &learnset_dex,
@@ -486,6 +526,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.min_label_depth == 0 {
         return Err("--min-label-depth must be greater than 0".to_string());
     }
+    if !(0.0..=1.0).contains(&args.teamsheet_mix) {
+        return Err("--teamsheet-mix must be from 0.0 through 1.0".to_string());
+    }
     if args.min_label_depth > args.label_depth {
         return Err("--min-label-depth must not be greater than --label-depth".to_string());
     }
@@ -540,10 +583,82 @@ struct Position {
 ///
 /// A state hash removes a repeat position, so an early turn that both sides
 /// keep replaying enters the corpus once.
+/// The archived rosters that a matchup can draw from.
+///
+/// One entry is the text of one teamsheet and the count of Pokemon that parsed
+/// out of it. The count comes from the parser rather than the file, because a
+/// paste can name a Pokemon or a move that this dex does not hold, and the
+/// parser drops that block.
+struct TeamPool {
+    sheets: Vec<(String, usize)>,
+}
+
+impl TeamPool {
+    /// Loads every `.txt` file of `dir` that parses into a usable roster.
+    ///
+    /// A roster must hold at least `brought` Pokemon. A shorter one cannot fill
+    /// a team-preview command, so it never reaches a battle.
+    fn load(
+        dir: &Path,
+        brought: u8,
+        pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
+        move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
+    ) -> Result<TeamPool, String> {
+        let listing = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let mut paths: Vec<PathBuf> = listing
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect();
+        // A directory listing has no defined order, and the corpus seed must
+        // pick the same pair on every run.
+        paths.sort();
+
+        let mut sheets = Vec::new();
+        let mut short = 0usize;
+        for path in paths {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let parsed = parse_team_sheet_str(&text, pokemon_dex, move_dex, true);
+            if parsed.len() < brought as usize {
+                short += 1;
+                continue;
+            }
+            sheets.push((text, parsed.len()));
+        }
+        if sheets.is_empty() {
+            return Err(format!("{}: no usable teamsheet", dir.display()));
+        }
+        println!(
+            "loaded {} teamsheet(s) from {} ({} dropped as too short)",
+            sheets.len(),
+            dir.display(),
+            short
+        );
+        Ok(TeamPool { sheets })
+    }
+
+    /// Two rosters, chosen by seed. The pair is distinct when the pool holds
+    /// more than one roster, so a matchup is not a mirror of one team.
+    fn pair(&self, seed: u64) -> (&(String, usize), &(String, usize)) {
+        let count = self.sheets.len();
+        let first = (seed % count as u64) as usize;
+        let second = if count == 1 {
+            first
+        } else {
+            let offset = 1 + (seed / count as u64) % (count as u64 - 1);
+            ((first as u64 + offset) % count as u64) as usize
+        };
+        (&self.sheets[first], &self.sheets[second])
+    }
+}
+
 fn collect_positions(
     args: &Args,
     wanted: usize,
     meta_dex: &MetaDex,
+    pool: Option<&TeamPool>,
     pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
     move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
     learnset_dex: &std::collections::HashMap<Species, HashSet<PokemonMove>>,
@@ -562,8 +677,15 @@ fn collect_positions(
             .wrapping_add(match_index);
         match_index += 1;
 
-        let Some(mut state) = start_match(args, meta_dex, pokemon_dex, move_dex, learnset_dex, seed)
-        else {
+        let Some(mut state) = start_match(
+            args,
+            meta_dex,
+            pool,
+            pokemon_dex,
+            move_dex,
+            learnset_dex,
+            seed,
+        ) else {
             continue;
         };
 
@@ -600,21 +722,41 @@ fn collect_positions(
 fn start_match(
     args: &Args,
     meta_dex: &MetaDex,
+    pool: Option<&TeamPool>,
     pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
     move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
     learnset_dex: &std::collections::HashMap<Species, HashSet<PokemonMove>>,
     seed: u64,
 ) -> Option<MatchState> {
     let size = args.roster_size as usize;
-    let p1 = generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed).ok()?;
-    let p2 = generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed ^ 0xA5A5_A5A5).ok()?;
-    if p1.len() < size || p2.len() < size {
-        return None;
-    }
+    // The roll is a fixed function of the seed, so a rerun draws the same
+    // matchup from the same source.
+    let archived = pool.filter(|_| {
+        let roll = (seed.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64
+            / (1u64 << 53) as f64;
+        roll < args.teamsheet_mix
+    });
+
+    let (p1_text, p1_len, p2_text, p2_len) = match archived {
+        Some(pool) => {
+            let (first, second) = pool.pair(seed);
+            (first.0.clone(), first.1, second.0.clone(), second.1)
+        }
+        None => {
+            let p1 = generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed).ok()?;
+            let p2 =
+                generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed ^ 0xA5A5_A5A5)
+                    .ok()?;
+            if p1.len() < size || p2.len() < size {
+                return None;
+            }
+            (render_teamsheet(&p1), p1.len(), render_teamsheet(&p2), p2.len())
+        }
+    };
 
     let mut preview = team_preview_state_from_team_strings(
-        &render_teamsheet(&p1),
-        &render_teamsheet(&p2),
+        &p1_text,
+        &p2_text,
         pokemon_dex,
         move_dex,
         args.active_per_side,
@@ -625,14 +767,17 @@ fn start_match(
     // Terastallization. Champions has none, so the corpus sets the rules itself.
     preview.mechanics = args.mechanics();
 
+    // Each side indexes its own roster, and an archived roster can be shorter
+    // than `--roster-size`. Passing `size` here would name a Pokemon that the
+    // sheet does not hold.
     let p1_picks = random_preview_command(
-        size,
+        p1_len,
         args.active_per_side,
         args.brought_per_side,
         seed ^ 0xC3C3_C3C3_C3C3_C3C3,
     );
     let p2_picks = random_preview_command(
-        size,
+        p2_len,
         args.active_per_side,
         args.brought_per_side,
         seed ^ 0x3C3C_3C3C_3C3C_3C3C,

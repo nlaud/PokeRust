@@ -41,6 +41,8 @@ const SPECIES_OVERRIDES: &[(&str, Species)] = &[
     ("lycanrocduskform", Species::LycanrocDusk),
     ("lycanrocmidnightform", Species::LycanrocMidnight),
     ("mausholdfamilyoffour", Species::MausholdFour),
+    // The source names most Mega forms suffix-first, but this one prefix-first.
+    ("megagallade", Species::GalladeMega),
     ("meowsticfemale", Species::MeowsticF),
     ("palafinzeroform", Species::Palafin),
     ("paldeantaurosaquabreed", Species::TaurosPaldeaAqua),

@@ -196,7 +196,10 @@ fn render_stat_line(points: &StatPoints) -> Option<String> {
 /// Gigantamax forme in its own right (those are selected via held item /
 /// in-battle command, never listed directly on a teamsheet). Mirrors
 /// `routes::get_species_list`'s filter.
-fn is_selectable_species(species: &Species, pokemon_dex: &HashMap<Species, PokemonData>) -> bool {
+pub(crate) fn is_selectable_species(
+    species: &Species,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> bool {
     let Some(data) = pokemon_dex.get(species) else {
         return false;
     };

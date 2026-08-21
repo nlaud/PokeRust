@@ -2,7 +2,12 @@
 
 `solver::eval` scores a position at the search horizon.
 `bin/train_eval` fits the weights of that evaluator from labeled positions.
-This document holds the rerun procedure.
+This document holds the manual rerun procedure.
+
+`runbook/REFRESH_AND_TRAIN.md` automates this procedure.
+It also refreshes the team data and the usage data first.
+Use the runbook for a normal rerun.
+Use this document to understand one stage, or to run one stage by hand.
 
 Run every command from `poke_rust/`.
 
@@ -111,6 +116,16 @@ Each option has a reason.
 | `--workers` | Leaves two cores for the machine |
 | `--seed` | Makes the corpus and every label reproducible |
 
+Add `--teamsheet-dir` to play archived teams instead of generated rosters.
+`generate_meta_team` builds a roster from per-Pokemon marginal rates.
+Those rates hold no combination, so a generated roster rarely pairs a weather
+setter with the Pokemon that use the weather.
+The field features measure such pairs, so the corpus needs real teams.
+
+`--teamsheet-mix` sets the fraction of matchups that use an archived team.
+The rest use the usage cache, which keeps the rare Pokemon that no archived team
+brought.
+
 Add `--iterative-deepening` and `--label-deadline` for a deeper target.
 Iterative deepening keeps the last complete pass, so an expensive position
 returns a depth-1 label instead of a static score.
@@ -182,9 +197,18 @@ Each feature must be a P1 quantity minus the matching P2 quantity.
 That form gives side-swap symmetry for every weight vector.
 A test asserts this property, so a one-sided feature fails the test suite.
 
-An old weight file stays readable after step 2.
+The old linear weight file stays readable after step 2.
 `resolve` fills one name at a time, and a missing name keeps its hand-set
 value.
+
+The old network file does not stay readable.
+`MLP_HIDDEN` equals `FEATURE_COUNT`, so a new feature changes the hidden-layer
+width.
+`MlpRecord::to_network` refuses a record of the earlier width, and
+`fitted_network` then returns `None`.
+
+Write the hand-seeded network at the new width before you retrain.
+The `reset` stage of `runbook/refresh_and_train.py` does this for you.
 
 ## How a new mechanic reaches the corpus
 

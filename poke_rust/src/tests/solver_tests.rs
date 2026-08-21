@@ -3541,25 +3541,53 @@ fn single_action_rmse(seeds: &[u64], batch: usize, exact: f64) -> f64 {
 /// One batch member keeps the law of one independent draw, so the batched search
 /// must still reach the value that backward induction computes.
 ///
-/// The tolerance matches `generative_mcts_agrees_with_the_exact_search`, because
-/// explicit exploration biases the mean by more than the sampling error alone.
+/// That claim is about the mean of the draw, not about one draw. This test
+/// therefore averages several seeds rather than reading one.
+///
+/// One seed does not test the claim. A measurement over seeds 1 through 12 gave
+/// a mean gap of -0.015 with a per-seed spread near 0.05, and two of the twelve
+/// seeds fell outside a 0.08 band. A single-seed check at that band therefore
+/// failed about one time in six for reasons that have nothing to do with the
+/// batch plan, and any change to the leaf evaluator re-rolled it.
+///
+/// Averaging `SEEDS` draws cuts the error of the mean by the square root of that
+/// count, so the tolerance below is a stricter test than the old single-seed
+/// band, not a looser one.
 #[test]
 fn mcts_stratified_batch_matches_the_exact_value() {
+    const SEEDS: u64 = 8;
+
     let exact = exact_value();
     let config = MctsConfig {
         transition: TransitionMode::Generative { batch: 16 },
         ..generative_mcts_config()
     };
 
-    let result = run_mcts(3, &config);
+    let results: Vec<mcts::MctsResult> =
+        (1..=SEEDS).map(|seed| run_mcts(seed, &config)).collect();
+    let values: Vec<f64> = results.iter().map(|result| result.value).collect();
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
 
     assert!(
-        (result.value - exact).abs() < 0.08,
-        "the batched search returned {}, the exact value is {exact}",
-        result.value
+        (mean - exact).abs() < 0.05,
+        "the batched search averaged {mean} over {SEEDS} seeds, \
+         the exact value is {exact}; values {values:?}"
     );
-    assert!(result.stats.turns_simulated > 0);
-    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    // Every draw must be a real search, and none of them may report that a
+    // configured limit stopped the work early.
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.stats.turns_simulated > 0,
+            "seed {} ran nothing",
+            index + 1
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "seed {}: {:?}",
+            index + 1,
+            result.warnings
+        );
+    }
 }
 
 /// A batch adds a plan seed and a cursor for every chance node. Both must come
@@ -7602,3 +7630,4 @@ fn pimc_is_deterministic_in_its_seed() {
     );
     assert!((first.effective_sample_size - 3.0).abs() < 1e-9);
 }
+

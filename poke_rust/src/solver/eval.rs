@@ -17,6 +17,18 @@
 //! The logistic map then returns one minus the original score.
 //! Side-swap symmetry therefore holds for every weight vector.
 //!
+//! # Field state
+//!
+//! Weather, terrain, and a pseudo-weather belong to the field, so both sides
+//! read the same value. A raw indicator of one of them holds the same value on
+//! both sides and subtracts to zero.
+//!
+//! Each field feature therefore counts what one side gains from the field, not
+//! whether the field is up. [`weather_features`] and [`terrain_features`] hold
+//! that rule, and [`matchup_features`] holds it for Trick Room.
+//!
+//! A side condition is already stored per side, so it needs no re-expression.
+//!
 //! # Three scorers
 //!
 //! [`heuristic`] uses the hand-set weights in [`HAND_WEIGHTS`].
@@ -58,19 +70,21 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::ability::Ability;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::unknowns::UnknownBattleState;
 use crate::simulator::{DamageConfig, get_possible_commands_for_active_slot};
 use crate::simulator::helpers::{
-    accuracy_hit_probability, calculate_damage_outcomes_for_target, effective_move_priority,
-    effective_speed_for_slot,
+    accuracy_hit_probability, calculate_damage_outcomes_for_target, current_terrain,
+    current_weather, effective_move_priority, effective_speed_for_slot, pokemon_is_grounded,
 };
 use crate::state::battle::{
     BattleCommand, BattleState, FieldSlot, Player, try_mega_evolution,
 };
 use crate::state::dex_data::{
-    MoveCategory, MoveData, PokemonData, PseudoWeather, SideCondition, Status,
+    MoveCategory, MoveData, PokemonData, PokemonType, PseudoWeather, SideCondition, Status,
+    Terrain, Weather,
 };
 use crate::state::pokemon::PokemonState;
 
@@ -137,7 +151,7 @@ pub fn score_batch(
 // ── The feature frame ───────────────────────────────────────────────────────
 
 /// How many features the value model holds.
-pub const FEATURE_COUNT: usize = 13;
+pub const FEATURE_COUNT: usize = 20;
 
 /// Names the features in index order.
 /// `weights/eval_v1.json` stores a value against each name.
@@ -155,6 +169,13 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "tera",
     "mega",
     "screens",
+    "weather_edge",
+    "weather_control",
+    "terrain_edge",
+    "terrain_control",
+    "tailwind",
+    "guard_conditions",
+    "trick_room",
 ];
 
 /// One value for each feature, in the order of [`FEATURE_NAMES`].
@@ -164,7 +185,8 @@ pub type Features = [f64; FEATURE_COUNT];
 ///
 /// The first five entries reproduce the health, status, boost, and hazard terms
 /// of the original evaluator.
-/// The other eight are initial values for the matchup features.
+/// The next eight are initial values for the matchup features.
+/// The last seven are initial values for the field and side-condition features.
 pub const HAND_WEIGHTS: Features = [
     1.0,  // health
     -1.0, // status
@@ -179,6 +201,13 @@ pub const HAND_WEIGHTS: Features = [
     0.15, // tera
     0.15, // mega
     0.10, // screens
+    0.12, // weather_edge
+    0.08, // weather_control
+    0.10, // terrain_edge
+    0.07, // terrain_control
+    0.14, // tailwind
+    0.05, // guard_conditions
+    0.06, // trick_room
 ];
 
 /// Fraction of a Pokémon score that does not depend on remaining HP.
@@ -263,11 +292,12 @@ fn dot(weights: &Features, values: &Features) -> f64 {
 
 /// One side's own quantities, before the subtraction.
 fn side_features(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> Features {
-    let (active, bench, side_conditions, has_tera, has_mega) = match player {
+    let (active, bench, side_conditions, condition_turns, has_tera, has_mega) = match player {
         Player::P1 => (
             &state.p1_active_mons,
             &state.p1_back_mons,
             &state.p1_side_conditions,
+            &state.p1_side_condition_turns,
             state.p1_has_tera,
             state.p1_has_mega,
         ),
@@ -275,6 +305,7 @@ fn side_features(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> 
             &state.p2_active_mons,
             &state.p2_back_mons,
             &state.p2_side_conditions,
+            &state.p2_side_condition_turns,
             state.p2_has_tera,
             state.p2_has_mega,
         ),
@@ -308,11 +339,22 @@ fn side_features(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> 
     );
     out[12] = screen_count(side_conditions);
 
-    let (threat, guaranteed, possible, speed) = matchup_features(state, player, ctx);
+    let (weather_edge, weather_control) = weather_features(state, active, bench);
+    out[13] = weather_edge;
+    out[14] = weather_control;
+    let (terrain_edge, terrain_control) = terrain_features(state, active, bench);
+    out[15] = terrain_edge;
+    out[16] = terrain_control;
+    out[17] = timed_condition(side_conditions, condition_turns, &SideCondition::TailWind);
+    out[18] = guard_conditions(side_conditions, condition_turns);
+
+    let (threat, guaranteed, possible, speed, trick_room) =
+        matchup_features(state, player, ctx);
     out[5] = threat;
     out[6] = guaranteed;
     out[7] = possible;
     out[8] = speed;
+    out[19] = trick_room;
     out
 }
 
@@ -380,6 +422,269 @@ fn screen_count(side_conditions: &[SideCondition]) -> f64 {
         .count() as f64
 }
 
+// ── Field and side conditions ───────────────────────────────────────────
+
+/// Turns that a timed effect is worth at full value.
+///
+/// Every timer in the engine counts down, so an effect with one turn left is
+/// nearly spent. Five turns is the standard duration of weather, terrain,
+/// Tailwind, and Trick Room, so a fresh effect scores one.
+const EFFECT_DURATION_SCALE: f64 = 5.0;
+
+/// How much a bench Pokémon counts against an active one.
+///
+/// A bench Pokémon cannot use the field this turn. The field is still standing
+/// when it comes in, so it is worth more than nothing.
+const BENCH_SHARE: f64 = 0.25;
+
+/// How much an unspent setter counts against a setter whose field is already up.
+const SETTER_SHARE: f64 = 0.5;
+
+/// Scales an effect by the turns it has left.
+///
+/// Zero turns means that the effect carries no timer. A side condition stores
+/// zero for a standing effect, and weather stores `None` for the same case, so
+/// both read as full value.
+fn duration_scale(turns: u8) -> f64 {
+    if turns == 0 {
+        return 1.0;
+    }
+    f64::from(turns).min(EFFECT_DURATION_SCALE) / EFFECT_DURATION_SCALE
+}
+
+/// One named side condition, scaled by the turns it has left.
+fn timed_condition(conditions: &[SideCondition], turns: &[u8], wanted: &SideCondition) -> f64 {
+    conditions
+        .iter()
+        .zip(turns.iter())
+        .find(|(condition, _)| *condition == wanted)
+        .map_or(0.0, |(_, left)| duration_scale(*left))
+}
+
+/// Status-blocking side conditions standing on a side.
+///
+/// Safeguard, Mist, and Lucky Chant each refuse an effect that the opponent
+/// wants to apply. None of them appear in [`screen_count`], which reads the
+/// damage-reducing screens alone.
+fn guard_conditions(conditions: &[SideCondition], turns: &[u8]) -> f64 {
+    conditions
+        .iter()
+        .zip(turns.iter())
+        .filter(|(condition, _)| {
+            matches!(
+                condition,
+                SideCondition::SafeGuard | SideCondition::Mist | SideCondition::LuckyChant
+            )
+        })
+        .map(|(_, left)| duration_scale(*left))
+        .sum()
+}
+
+/// The weather that one ability sets on entry.
+fn weather_of_setter(ability: &Ability) -> Option<Weather> {
+    match ability {
+        Ability::Drizzle => Some(Weather::Rain),
+        Ability::PrimordialSea => Some(Weather::HeavyRain),
+        Ability::Drought | Ability::OrichalcumPulse => Some(Weather::Sun),
+        Ability::DesolateLand => Some(Weather::ExtremeSunlight),
+        Ability::SandStream => Some(Weather::Sandstorm),
+        Ability::SnowWarning => Some(Weather::Snow),
+        Ability::DeltaStream => Some(Weather::StrongWinds),
+        _ => None,
+    }
+}
+
+/// The terrain that one ability sets on entry.
+fn terrain_of_setter(ability: &Ability) -> Option<Terrain> {
+    match ability {
+        Ability::ElectricSurge | Ability::HadronEngine => Some(Terrain::ElectricTerrain),
+        Ability::GrassySurge => Some(Terrain::GrassyTerrain),
+        Ability::MistySurge => Some(Terrain::MistyTerrain),
+        Ability::PsychicSurge => Some(Terrain::PsychicTerrain),
+        _ => None,
+    }
+}
+
+/// What one Pokémon gains from the weather that is up now.
+///
+/// A negative value means that the weather hurts this Pokémon. Rain and sun
+/// each help one attacking type and hurt the other. Sand chips the Pokémon that
+/// do not resist it. Every weather also has abilities that turn it into a speed
+/// advantage or a recovery advantage.
+fn weather_benefit(mon: &PokemonState, weather: &Weather) -> f64 {
+    let has_type = |wanted: PokemonType| mon.types.contains(&wanted);
+    match weather {
+        Weather::Rain | Weather::HeavyRain => {
+            if matches!(
+                mon.ability,
+                Ability::SwiftSwim | Ability::RainDish | Ability::DrySkin | Ability::Hydration
+            ) {
+                return 1.0;
+            }
+            f64::from(has_type(PokemonType::Water)) * 0.5
+                - f64::from(has_type(PokemonType::Fire)) * 0.5
+        }
+        Weather::Sun | Weather::ExtremeSunlight => {
+            if matches!(
+                mon.ability,
+                Ability::Chlorophyll
+                    | Ability::SolarPower
+                    | Ability::FlowerGift
+                    | Ability::LeafGuard
+            ) {
+                return 1.0;
+            }
+            let dry_skin = f64::from(mon.ability == Ability::DrySkin) * 0.5;
+            f64::from(has_type(PokemonType::Fire)) * 0.5
+                - f64::from(has_type(PokemonType::Water)) * 0.5
+                - dry_skin
+        }
+        Weather::Sandstorm => {
+            if matches!(
+                mon.ability,
+                Ability::SandRush | Ability::SandForce | Ability::SandVeil
+            ) {
+                return 1.0;
+            }
+            // Rock takes no chip and gains the special-defense boost. Ground and
+            // Steel take no chip. Two abilities also stop the chip.
+            if has_type(PokemonType::Rock) {
+                return 0.75;
+            }
+            if has_type(PokemonType::Ground)
+                || has_type(PokemonType::Steel)
+                || matches!(mon.ability, Ability::Overcoat | Ability::MagicGuard)
+            {
+                return 0.25;
+            }
+            -0.25
+        }
+        Weather::Snow => {
+            if matches!(
+                mon.ability,
+                Ability::SlushRush | Ability::IceBody | Ability::SnowCloak
+            ) {
+                return 1.0;
+            }
+            // Snow raises the defense of an Ice-type rather than chipping others.
+            f64::from(has_type(PokemonType::Ice)) * 0.5
+        }
+        // Strong Winds removes the Flying weaknesses of a Flying-type.
+        Weather::StrongWinds => f64::from(has_type(PokemonType::Flying)) * 0.5,
+    }
+}
+
+/// What one grounded Pokémon gains from the terrain that is up now.
+///
+/// Terrain reaches a grounded Pokémon alone, so the caller checks that first.
+/// Each terrain gives every grounded Pokémon a defensive effect. It also gives
+/// one type an offensive boost.
+fn terrain_benefit(mon: &PokemonState, terrain: &Terrain) -> f64 {
+    let has_type = |wanted: PokemonType| mon.types.contains(&wanted);
+    match terrain {
+        Terrain::ElectricTerrain => {
+            let surfer = f64::from(mon.ability == Ability::SurgeSurfer) * 0.5;
+            0.25 + f64::from(has_type(PokemonType::Electric)) * 0.5 + surfer
+        }
+        Terrain::GrassyTerrain => {
+            let pelt = f64::from(mon.ability == Ability::GrassPelt) * 0.25;
+            0.35 + f64::from(has_type(PokemonType::Grass)) * 0.5 + pelt
+        }
+        Terrain::MistyTerrain => 0.35 + f64::from(has_type(PokemonType::Dragon)) * 0.25,
+        Terrain::PsychicTerrain => 0.30 + f64::from(has_type(PokemonType::Psychic)) * 0.5,
+    }
+}
+
+/// The weather edge of one side, and its control of the weather.
+///
+/// The first value counts what the side gains from the weather that is up now,
+/// scaled by the turns that weather has left. The second value counts the living
+/// weather setters of the side. It adds a bonus when the weather up now is the
+/// weather that this side sets.
+///
+/// Weather is field state, so both sides read the same weather. A raw indicator
+/// would hold the same value on both sides and would subtract to zero in
+/// [`features`]. Only a side-relative count carries information.
+fn weather_features(
+    state: &BattleState,
+    active: &[PokemonState],
+    bench: &[PokemonState],
+) -> (f64, f64) {
+    let weather = current_weather(state);
+    let scale = duration_scale(state.weather_turns.unwrap_or(0));
+
+    let mut edge = 0.0;
+    let mut control = 0.0;
+    for (mon, share) in active
+        .iter()
+        .map(|mon| (mon, 1.0))
+        .chain(bench.iter().map(|mon| (mon, BENCH_SHARE)))
+    {
+        if mon.fainted || mon.hp == 0 {
+            continue;
+        }
+        if let Some(weather) = weather.as_ref() {
+            edge += share * scale * weather_benefit(mon, weather);
+        }
+        if let Some(set) = weather_of_setter(&mon.ability) {
+            // A setter that has not fired is a standing option, so it counts for
+            // less than a setter whose weather already governs the field.
+            control += share * SETTER_SHARE;
+            if weather.as_ref() == Some(&set) {
+                control += share * (1.0 - SETTER_SHARE);
+            }
+        }
+    }
+    (edge, control)
+}
+
+/// The terrain edge of one side, and its control of the terrain.
+///
+/// This is the weather pair with one extra rule: terrain reaches a grounded
+/// Pokémon alone. A bench Pokémon has no ground state yet, so it counts through
+/// [`BENCH_SHARE`] without the check.
+fn terrain_features(
+    state: &BattleState,
+    active: &[PokemonState],
+    bench: &[PokemonState],
+) -> (f64, f64) {
+    let terrain = current_terrain(state);
+    let scale = duration_scale(state.terrain_turns.unwrap_or(0));
+
+    let mut edge = 0.0;
+    let mut control = 0.0;
+    for (mon, share, grounded) in active
+        .iter()
+        .map(|mon| (mon, 1.0, pokemon_is_grounded(state, mon)))
+        .chain(bench.iter().map(|mon| (mon, BENCH_SHARE, true)))
+    {
+        if mon.fainted || mon.hp == 0 {
+            continue;
+        }
+        if let Some(terrain) = terrain.as_ref()
+            && grounded
+        {
+            edge += share * scale * terrain_benefit(mon, terrain);
+        }
+        if let Some(set) = terrain_of_setter(&mon.ability) {
+            control += share * SETTER_SHARE;
+            if terrain.as_ref() == Some(&set) {
+                control += share * (1.0 - SETTER_SHARE);
+            }
+        }
+    }
+    (edge, control)
+}
+
+/// The turns that Trick Room has left, or `None` when it is not up.
+fn trick_room_turns(state: &BattleState) -> Option<u8> {
+    state
+        .pseudo_weathers
+        .iter()
+        .position(|pseudo| *pseudo == PseudoWeather::TrickRoom)
+        .map(|index| state.pseudo_weather_turns.get(index).copied().unwrap_or(0))
+}
+
 /// How reliably one Pokémon can still protect.
 ///
 /// A protecting move succeeds with probability `1 / 3^stall_counter`, so the
@@ -410,17 +715,22 @@ fn matchup_features(
     state: &BattleState,
     player: Player,
     ctx: &EvalContext<'_>,
-) -> (f64, f64, f64, f64) {
+) -> (f64, f64, f64, f64, f64) {
     let (attackers, defenders) = match player {
         Player::P1 => (&state.p1_active_mons, &state.p2_active_mons),
         Player::P2 => (&state.p2_active_mons, &state.p1_active_mons),
     };
-    let trick_room = state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
+    let room_turns = trick_room_turns(state);
+    let trick_room = room_turns.is_some();
+    // `speed` already reads the reversed order, so this scale prices the part
+    // that `speed` cannot see: how long the reversal has left to run.
+    let room_scale = room_turns.map_or(0.0, duration_scale);
 
     let mut threat = 0.0;
     let mut guaranteed = 0.0;
     let mut possible = 0.0;
     let mut speed = 0.0;
+    let mut room_edge = 0.0;
 
     for (attacker_index, attacker) in attackers.iter().enumerate() {
         if attacker.fainted || attacker.hp == 0 {
@@ -456,6 +766,10 @@ fn matchup_features(
             if faster {
                 speed += 1.0;
             }
+            // The side that the reversal favors is the slower side in raw speed.
+            if trick_room && own_speed < their_speed {
+                room_edge += room_scale;
+            }
 
             if let Some(best) = best_attack(
                 state,
@@ -473,7 +787,7 @@ fn matchup_features(
         }
     }
 
-    (threat, guaranteed, possible, speed)
+    (threat, guaranteed, possible, speed, room_edge)
 }
 
 /// What one attack does to one target.
@@ -1136,6 +1450,188 @@ mod tests {
             vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
         );
         assert!((heuristic(&state, &ctx()) - 0.5).abs() < 1e-9);
+    }
+
+    /// The name-to-index map that the field tests read.
+    fn feature(name: &str) -> usize {
+        FEATURE_NAMES
+            .iter()
+            .position(|entry| *entry == name)
+            .unwrap_or_else(|| panic!("no feature named {name}"))
+    }
+
+    /// Weather is field state, so a mirrored position under weather must still
+    /// score even. This is the property that stops a raw weather indicator from
+    /// entering the frame.
+    #[test]
+    fn weather_alone_keeps_a_mirrored_position_even() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+        );
+        for weather in [
+            Weather::Rain,
+            Weather::Sun,
+            Weather::Sandstorm,
+            Weather::Snow,
+        ] {
+            state.weather = Some(weather.clone());
+            state.weather_turns = Some(5);
+            let values = features(&state, &ctx());
+            assert!(
+                values[feature("weather_edge")].abs() < 1e-12,
+                "{weather:?} left a one-sided edge"
+            );
+            assert!((heuristic(&state, &ctx()) - 0.5).abs() < 1e-9, "{weather:?}");
+        }
+    }
+
+    /// The same weather charged against different Pokemon must move the feature.
+    /// Rain helps a Water-type and hurts a Fire-type.
+    #[test]
+    fn rain_favors_the_water_side_over_the_fire_side() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Squirtle, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Charmander, pokemon_dex, move_dex)],
+            vec![],
+        );
+        let dry = features(&state, &ctx())[feature("weather_edge")];
+        assert!(dry.abs() < 1e-12, "no weather must read zero, got {dry}");
+
+        state.weather = Some(Weather::Rain);
+        state.weather_turns = Some(5);
+        let wet = features(&state, &ctx())[feature("weather_edge")];
+        assert!(wet > 0.0, "rain must favor the Water side, got {wet}");
+
+        state.weather = Some(Weather::Sun);
+        let sunny = features(&state, &ctx())[feature("weather_edge")];
+        assert!(sunny < 0.0, "sun must favor the Fire side, got {sunny}");
+    }
+
+    /// A shorter timer is worth less than a fresh one.
+    #[test]
+    fn a_spent_weather_timer_lowers_the_edge() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Squirtle, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Charmander, pokemon_dex, move_dex)],
+            vec![],
+        );
+        state.weather = Some(Weather::Rain);
+        state.weather_turns = Some(5);
+        let fresh = features(&state, &ctx())[feature("weather_edge")];
+        state.weather_turns = Some(1);
+        let spent = features(&state, &ctx())[feature("weather_edge")];
+        assert!(spent < fresh, "spent {spent} must be under fresh {fresh}");
+        assert!(spent > 0.0, "a live timer must keep the sign");
+    }
+
+    /// Tailwind is stored per side, so it needs no re-expression. It must be
+    /// charged to the side that owns it.
+    #[test]
+    fn tailwind_is_charged_to_its_own_side() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+        );
+        let even = heuristic(&state, &ctx());
+        assert!((even - 0.5).abs() < 1e-9);
+
+        state.p1_side_conditions.push(SideCondition::TailWind);
+        state.p1_side_condition_turns.push(4);
+        let values = features(&state, &ctx());
+        assert!(values[feature("tailwind")] > 0.0);
+        assert!(heuristic(&state, &ctx()) > even);
+
+        state.p2_side_conditions.push(SideCondition::TailWind);
+        state.p2_side_condition_turns.push(4);
+        assert!((heuristic(&state, &ctx()) - 0.5).abs() < 1e-9, "both sides");
+    }
+
+    /// Safeguard, Mist, and Lucky Chant are status guards, and none of them may
+    /// leak into the damage-reducing screen count.
+    #[test]
+    fn status_guards_stay_out_of_the_screen_feature() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+        );
+        state.p1_side_conditions.push(SideCondition::SafeGuard);
+        state.p1_side_condition_turns.push(5);
+        let values = features(&state, &ctx());
+        assert!(values[feature("guard_conditions")] > 0.0);
+        assert!(values[feature("screens")].abs() < 1e-12);
+    }
+
+    /// Trick Room reverses the order, which `speed` already reads. This feature
+    /// prices the remaining clock, so it must fall as the clock runs out and it
+    /// must read zero when Trick Room is not up.
+    #[test]
+    fn the_trick_room_feature_prices_the_clock() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![],
+        );
+        let index = feature("trick_room");
+        assert!(features(&state, &ctx())[index].abs() < 1e-12, "no room");
+
+        state.pseudo_weathers.push(PseudoWeather::TrickRoom);
+        state.pseudo_weather_turns.push(5);
+        let fresh = features(&state, &ctx())[index];
+        assert!(fresh > 0.0, "the slow side must gain, got {fresh}");
+
+        state.pseudo_weather_turns[0] = 1;
+        let spent = features(&state, &ctx())[index];
+        assert!(spent < fresh, "spent {spent} must be under fresh {fresh}");
+    }
+
+    /// Every new feature must read zero on a position that has no field state.
+    /// A feature that is nonzero on an empty field is measuring something else.
+    #[test]
+    fn the_field_features_read_zero_without_field_state() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let state = battle_state_from_lists(
+            vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
+            vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
+            vec![mon(Species::Charmander, pokemon_dex, move_dex)],
+            vec![mon(Species::Squirtle, pokemon_dex, move_dex)],
+        );
+        let values = features(&state, &ctx());
+        for name in [
+            "weather_edge",
+            "terrain_edge",
+            "tailwind",
+            "guard_conditions",
+            "trick_room",
+        ] {
+            assert!(
+                values[feature(name)].abs() < 1e-12,
+                "{name} read {} on an empty field",
+                values[feature(name)]
+            );
+        }
     }
 
     #[test]

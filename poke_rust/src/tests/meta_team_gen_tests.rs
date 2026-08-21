@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::meta::team_gen::{generate_meta_team, render_teamsheet};
+use crate::meta::team_gen::{generate_meta_team, is_selectable_species, render_teamsheet};
 use crate::meta::{MetaDex, MetaFormat};
 use crate::state::pokemon::{
     nature_stat_modifiers, parse_team_sheet_str, scale_evs_for_stat_points,
@@ -314,8 +314,17 @@ fn every_cache_species_has_a_champions_learnset() {
         let Ok(dex) = MetaDex::load(&root, None, format) else {
             continue;
         };
+        // Only a species that a team can lead with. `is_selectable_species`
+        // drops a Mega forme, because a teamsheet never names one: the team
+        // brings the base form and the stone. The cache can still hold usage
+        // data under the Mega name, and the refresh of 2026-08-20 added
+        // `mega-gallade.json` as the first such entry.
+        //
+        // A Mega forme therefore never reaches a generated team, so a missing
+        // learnset for one is not the failure this test looks for.
         let missing: Vec<String> = dex
             .species()
+            .filter(|s| is_selectable_species(s, pokemon_dex()))
             .filter(|s| !learnset_dex().contains_key(s))
             .map(|s| format!("{s:?}"))
             .collect();
