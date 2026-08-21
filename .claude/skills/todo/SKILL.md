@@ -19,7 +19,7 @@ Arguments: `$ARGUMENTS`
 
 ## Why a subagent
 
-The task reads source files, runs `cargo test`, and runs a Codex review. Those
+The task reads source files, runs `cargo test`, and runs a code review. Those
 steps produce many large tool results. A subagent keeps those results out of the
 main thread. The main thread then stays cheap across many loop runs.
 
@@ -82,8 +82,8 @@ Map the last line of the subagent report to this action:
 | `DONE: <hash>` | Print the hash, the subject, and the facts that the user must know. Then print the next-item block. |
 | `BLOCKED: <error>` | Print the error and the repository state. |
 
-Print the facts that change what the user does next. A defect that the Codex
-review found is one example. A limit that the run left in place is another.
+Print the facts that change what the user does next. A defect that the review
+found is one example. A limit that the run left in place is another.
 
 Never invent a result. If the subagent returns no contract line, do not guess
 the outcome. See the section *A run with no status*.

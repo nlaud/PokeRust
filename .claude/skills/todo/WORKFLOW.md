@@ -267,54 +267,33 @@ Set the stage to `committing`.
 9. Delete `plan.md`.
 10. Set the stage to `reviewing`.
 
-The commit gives Codex an exact review target. Do not delete `state.json` yet.
+The commit gives the reviewer an exact review target. Do not delete
+`state.json` yet.
 
-## 9. Independent Codex review
+## 9. Independent review
 
-Invoke `/codex:rescue` for the review. Do not call the raw Codex MCP tools
-directly.
+A Claude subagent does this review. Start it with the `Agent` tool. Never use
+Codex for this step.
 
-Do not give Codex the current Claude chat or a chat summary. Do not give Codex
-the plan, the task text, Claude's reasoning, or expected findings. Do not tell
-Codex which code Claude thinks is correct.
+Do not give the reviewer the current Claude chat or a chat summary. Do not give
+the reviewer the plan, the task text, Claude's reasoning, or expected findings.
+Do not tell the reviewer which code Claude thinks is correct.
 
-Give Codex only the repository and the Git history. Tell Codex to review the
-commit named by `review_commit`. Codex must compare that commit with its first
+Give the reviewer only the repository and the Git history. Tell it to review the
+commit named by `review_commit`. It must compare that commit with its first
 parent.
 
 Before the review, confirm that `HEAD` equals `review_commit`. Confirm that no
 task file has an uncommitted change.
 
-Use this command and neutral prompt:
+Call `Agent` one time with these settings:
 
-```text
-/codex:rescue --wait --fresh --model gpt-5.6-sol --effort high Review the
-commit at HEAD independently. Use only repository files and Git history. Do
-not read .claude/todo. Find anything wrong with the code introduced by HEAD,
-including its interactions with existing code. Fix every problem that you find
-within HEAD's scope. Add or update tests for each fix. Run the applicable Rust
-and Playwright tests. Use Playwright to inspect each affected browser workflow
-and capture screenshots. Do not commit.
-```
+- `subagent_type`: `general-purpose`
+- `model`: `opus`
+- `run_in_background`: `false`
+- `description`: `Independent review`
 
-A Codex job can die and still leave its record as `running`. Judge the job by
-the log write time and by process liveness. Do not trust the job status field.
-
-If the job dies, read its log file. The log can hold a complete review. Use the
-findings that you can verify against the code. Run every verification yourself.
-
-### The subagent fallback
-
-A dead job has two shapes. Read the log size to tell them apart.
-
-1. A log with a complete review is recoverable. Use it.
-2. A log with only startup lines produced nothing. Nothing is recoverable.
-3. Retry a startup failure one time.
-4. If a second job fails the same way, start no third job. Use the fallback.
-
-The fallback keeps the independent pass. Start one subagent with
-`subagent_type` `general-purpose` and `run_in_background` `false`. Give it only
-this prompt:
+Use this prompt. Replace `<repository path>` with the path of the repository.
 
 ```text
 Review the commit at HEAD of the Git repository at <repository path>
@@ -325,35 +304,40 @@ attention to whether any response, warning string, log line, or error message
 can disclose hidden player-two data. Report every problem with the file, the
 line, and a concrete failure case. Fix every problem that you find within
 HEAD's scope. Add or update tests for each fix. Run cargo test and cargo
-clippy from poke_rust/. Do not commit. Do not amend. Report what you changed.
+clippy from poke_rust/. Run the applicable Playwright specs from frontend/.
+Use Playwright to inspect each affected browser workflow and capture
+screenshots. Do not commit. Do not amend. Report what you changed.
 ```
 
-That prompt is the whole handoff. The isolation rules of this section apply to
-the subagent reviewer exactly as they apply to Codex. Give it no plan, no task
-text, no reasoning, and no expected findings.
+That prompt is the whole handoff. Give the reviewer no plan, no task text, no
+reasoning, and no expected findings.
 
 Verify every finding yourself against the code. Reject a finding that you
 cannot confirm, and say so in your report.
 
-Record the reviewer that ran in `state.json`. Remove a dead `codex_job` block.
+Start one reviewer for each run. If the reviewer returns no report, start a
+second reviewer one time. If the second reviewer also returns no report, return
+`BLOCKED:` with that fact.
 
-Inspect `git status --short` and `git diff` after Codex finishes. Make sure that
-Codex changed only files related to the reviewed commit.
+Record the reviewer that ran in `state.json`.
 
-Codex runs Playwright, so it also writes temporary artifacts. Read the section
-*Temporary files*. An artifact is not a Codex change. Do not report it as one,
-and do not stage it. Section 11 removes it.
+Inspect `git status --short` and `git diff` after the reviewer finishes. Make
+sure that the reviewer changed only files related to the reviewed commit.
 
-If Codex needs a follow-up, invoke `/codex:rescue` with `--wait`, `--resume`,
-`--model gpt-5.6-sol`, and `--effort high`. Do not add chat context or the
-deleted plan. Give only repository facts that Codex can verify.
+The reviewer runs Playwright, so it also writes temporary artifacts. Read the
+section *Temporary files*. An artifact is not a reviewer change. Do not report
+it as one, and do not stage it. Section 11 removes it.
 
-If Codex finds a required fix outside the commit scope, ask the user first.
-Update the progress log for each file that Codex changes.
+If the review needs a follow-up, continue the same reviewer with `SendMessage`.
+Do not add chat context or the deleted plan. Give only repository facts that the
+reviewer can verify.
+
+If the reviewer finds a required fix outside the commit scope, ask the user
+first. Update the progress log for each file that the reviewer changes.
 
 Set the stage to `reverifying`.
 
-## 10. Verify the Codex changes
+## 10. Verify the reviewer changes
 
 Run these commands from `poke_rust/`:
 
@@ -392,9 +376,9 @@ Set the stage to `finalizing`.
 
 1. Remove the repository artifacts. Read the section *Temporary files* for the
    command.
-2. Inspect all uncommitted Codex changes.
-3. If Codex changed files, stage only those files.
-4. If Codex changed files, run `git commit --amend --no-edit`.
+2. Inspect all uncommitted reviewer changes.
+3. If the reviewer changed files, stage only those files.
+4. If the reviewer changed files, run `git commit --amend --no-edit`.
 5. Run `git status --short`. Every remaining line must be a change that you
    chose to leave. If a line names an artifact, remove that file.
 6. Record the final commit hash.
@@ -418,7 +402,7 @@ Return a report with these facts:
 - The commit hash and subject.
 - The count of changed files.
 - The done sub-bullet count, and the total sub-bullet count of the item.
-- The Codex review result and any fixes that Codex made.
+- The review result and any fixes that the reviewer made.
 - The test result and the clippy result.
 - The Playwright result and the screenshot paths.
 - The task-start and task-end usage limits.
@@ -519,7 +503,7 @@ Usage: Daily/5h 68% left | Weekly 57% left
 [6/12] Implement — 2 sub-bullets of 3 done, 2 files of 4 done
 [7/12] Verify — tests and clippy passed
 [8/12] Commit — created the review target
-[9/12] Codex review — fixed one edge case
+[9/12] Review — fixed one edge case
 [10/12] Verify fixes — Playwright passed
 [11/12] Finalize — amended the task commit
 ```
@@ -606,6 +590,6 @@ conversation history. Record every fact that the next run needs.
 
 ## Tool notes
 
-- `/codex:rescue --fresh` starts a new Codex task without an old Codex thread.
-- `/codex:rescue --resume` continues only the current task's Codex thread.
+- `Agent` starts the reviewer of section 9. Give it a fresh prompt each run.
+- `SendMessage` continues only the reviewer that this run started.
 - The main thread owns the push notification. Send none from this workflow.
