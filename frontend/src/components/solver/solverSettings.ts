@@ -84,6 +84,8 @@ export interface SolverSettings {
   damageRolls: number
   considerCrit: boolean
   particles: number
+  /** Reaches the depth by refinement instead of by a complete search. */
+  refine: boolean
 }
 
 export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
@@ -93,6 +95,7 @@ export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
   damageRolls: 1,
   considerCrit: false,
   particles: 16,
+  refine: false,
 }
 
 export type SolverPreset = 'fast' | 'balanced' | 'competitive' | 'custom'
@@ -128,7 +131,25 @@ export function solverProfile(
     damageRolls: settings.damageRolls,
     considerCrit: settings.considerCrit,
     particles: isBeliefSearch(algorithm) ? settings.particles : undefined,
+    refine: supportsRefinement(algorithm) ? settings.refine : undefined,
   }
+}
+
+/** The searches that can reach their depth by refinement.
+ *
+ * A refinement pass raises the cells of a matrix equilibrium, so it needs a
+ * search that solves a matrix. A sampled search walks trajectories and holds no
+ * support to raise. `pimc` qualifies, because each of its worlds is exact.
+ *
+ * The server holds the same rule in `BotAlgorithm::supports_refinement`, and it
+ * rejects the flag for every other name. */
+export function supportsRefinement(algorithm: BotAlgorithm): boolean {
+  return (
+    algorithm === 'doubleOracle' ||
+    algorithm === 'backwardInduction' ||
+    algorithm === 'serializedBounds' ||
+    algorithm === 'pimc'
+  )
 }
 
 /** True when this search reads a belief rather than the true position. */

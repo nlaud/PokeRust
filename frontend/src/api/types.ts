@@ -271,6 +271,15 @@ export interface BotProfileRequest {
   damageRolls?: number
   /** Enables critical-hit branches in solver simulations. */
   considerCrit?: boolean
+  /** Reaches `depth` by refinement instead of by a complete search.
+   *
+   * The search solves depth 1 over every action, then raises only the cells
+   * that decide the answer to `depth`. Use it when a complete search at that
+   * depth cannot finish, which is every doubles position at depth 2.
+   *
+   * Applies to an exact algorithm and to `pimc`, whose worlds are exact. The
+   * server rejects it for a sampled algorithm. */
+  refine?: boolean
   /** Belief searches only. */
   particles?: number
   /** Makes a sampled search reproducible.
@@ -292,6 +301,8 @@ export interface BotProfileView {
   considerCrit: boolean
   /** Null when a forced decision uses the remaining turn budget. */
   replacementDepth: number | null
+  /** True when the search reaches its depth by refinement. */
+  refine: boolean
   /** The workers that this search asks the process pool for.
    *
    * A busy pool can give the search fewer workers. The count does not change

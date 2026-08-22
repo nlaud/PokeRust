@@ -7,6 +7,7 @@ import {
   IMPERFECT_SOLVERS,
   PERFECT_SOLVERS,
   solverHint,
+  supportsRefinement,
   type SolverOption,
   type SolverPreset,
 } from '../solver/solverSettings'
@@ -227,6 +228,11 @@ export default function SettingsSidebar() {
             <div className="text-xs">
               <SolverControls
                 algorithm={imperfectSolver}
+                // The session picks between the two searches above, so offer
+                // refinement when either one can use it.
+                showRefine={
+                  supportsRefinement(imperfectSolver) || supportsRefinement(perfectSolver)
+                }
                 settings={solverSettings}
                 onChange={setSolverSettings}
               />

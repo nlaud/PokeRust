@@ -6,9 +6,4 @@ and the analysis jobs.
 
 # New features
 
-## Parallel search
-
-- [ ] Measure scaling with 1, 2, 4, and more workers.
-  - [ ] Use a fixed set of representative doubles positions.
-  - [ ] Record time, simulated turns, cache hits, memory, reproducibility, and
-        strategy quality.
+- I think we want to cap at depth 1 and just improve the root node evaluator lowk, train that to be as good as possible and solve based on that. Remove the sizing amounts and just make the root node evaluators as good as possible, even if they are slower. (What info can we give them, can we make the architecture better?)

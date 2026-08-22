@@ -85,6 +85,15 @@ impl BotAlgorithm {
         )
     }
 
+    /// True when the profile may reach its depth by refinement.
+    ///
+    /// A refinement pass solves a matrix, so it needs an algorithm that solves a
+    /// matrix. A sampled search walks trajectories instead and has no support to
+    /// raise. `Pimc` qualifies, because each of its worlds is an exact search.
+    fn supports_refinement(self) -> bool {
+        self.is_exact() || self == BotAlgorithm::Pimc
+    }
+
     fn exact_algorithm(self) -> SolverAlgorithm {
         match self {
             BotAlgorithm::SerializedBounds => SolverAlgorithm::SerializedBounds,
@@ -104,6 +113,13 @@ pub const COMPETITIVE_SIMULATION_TURN_BUDGET: u64 = 500_000;
 pub const DEFAULT_SIMULATION_TURN_BUDGET: u64 = BALANCED_SIMULATION_TURN_BUDGET;
 
 pub const DEFAULT_DEPTH: u8 = 3;
+
+/// The depth that a refined profile solves completely before it raises cells.
+///
+/// One turn of lookahead over the complete action set is the answer that every
+/// later round improves. A doubles position finishes it in about one third of a
+/// second.
+pub const REFINE_BASE_DEPTH: u8 = 1;
 pub const DEFAULT_DAMAGE_ROLLS: u8 = 1;
 pub const DEFAULT_PARTICLES: usize = 16;
 pub const MAX_PARTICLES: usize = 32;
@@ -131,6 +147,10 @@ pub struct BotProfileRequest {
     /// Turns of lookahead below a replacement or a self-switch pivot.
     /// An absent field gives a forced decision the remaining turn depth.
     pub replacement_depth: Option<u8>,
+    /// Reaches `depth` by refinement instead of by a complete search.
+    ///
+    /// Applies to an exact algorithm and to `pimc`, whose worlds are exact.
+    pub refine: Option<bool>,
     /// Belief searches only.
     pub particles: Option<usize>,
     /// Makes a sampled search reproducible.
@@ -156,6 +176,8 @@ pub struct BotProfileView {
     pub consider_crit: bool,
     /// Absent when a forced decision uses the remaining turn budget.
     pub replacement_depth: Option<u8>,
+    /// True when the search reaches its depth by refinement.
+    pub refine: bool,
     /// The workers that this search asks the process pool for.
     ///
     /// A busy pool can give the search fewer workers. The count does not change
@@ -179,6 +201,11 @@ pub struct BotProfileView {
 #[derive(Debug, Clone, Copy)]
 pub enum BotSearchConfig {
     Exact(SolveConfig),
+    /// A complete search at `base_depth`, then refinement up to `solve.depth`.
+    Refine {
+        solve: SolveConfig,
+        base_depth: u8,
+    },
     Mcts(MctsConfig),
     Ismcts(IsmctsConfig),
     Mccfr(MccfrConfig),
@@ -195,10 +222,13 @@ impl BotSearchConfig {
     /// ladder would multiply the world count by the depth. That search publishes
     /// an answer after each world instead, so the panel still moves.
     pub fn first_depth(self, requested: u8) -> u8 {
-        if matches!(self, BotSearchConfig::Exact(_)) {
-            1
-        } else {
-            requested
+        match self {
+            BotSearchConfig::Exact(_) => 1,
+            // A refinement pass runs its own ladder inside one call: it solves
+            // the base depth completely and then raises cells. A rung above that
+            // would repeat the base pass.
+            BotSearchConfig::Refine { .. } => requested,
+            _ => requested,
         }
     }
 
@@ -227,6 +257,13 @@ impl BotSearchConfig {
             BotSearchConfig::Exact(config) => {
                 BotSearchConfig::Exact(SolveConfig { depth, ..config })
             }
+            BotSearchConfig::Refine { solve, base_depth } => BotSearchConfig::Refine {
+                solve: SolveConfig { depth, ..solve },
+                // The base pass must stay at or below the refined depth. A rung
+                // at the base depth then has nothing to raise and returns the
+                // base answer, which is the honest result for that rung.
+                base_depth: base_depth.min(depth),
+            },
             BotSearchConfig::Mcts(config) => BotSearchConfig::Mcts(MctsConfig { depth, ..config }),
             BotSearchConfig::Ismcts(config) => BotSearchConfig::Ismcts(IsmctsConfig {
                 search: MctsConfig {
@@ -321,6 +358,12 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         "seed",
         "a seed applies only to a sampling algorithm",
     )?;
+    reject_unused(
+        scope,
+        req.refine.is_some() && !algorithm.supports_refinement(),
+        "refine",
+        "refinement applies only to an exact algorithm or to pimc",
+    )?;
 
     let depth = req.depth.unwrap_or(preset_depth);
     check_range(scope, "depth", depth, 1, 8)?;
@@ -342,6 +385,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         None => preset_particles,
     };
     let exact = algorithm.is_exact();
+    let refine = req.refine.unwrap_or(false) && algorithm.supports_refinement();
     if let Some(seed) = req.seed {
         check_range(scope, "seed", seed, 0, MAX_SAFE_INTEGER)?;
     }
@@ -383,6 +427,13 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
                 .to_string(),
         );
     }
+    if refine {
+        approximations.push(format!(
+            "The search solves depth {REFINE_BASE_DEPTH} over every action, then raises only the \
+             cells that decide the answer to depth {depth}. An action that it never raises was \
+             ranked at depth {REFINE_BASE_DEPTH} alone, and the answer reports how many."
+        ));
+    }
     approximations.push(format!(
         "The search can simulate at most {simulation_turn_budget} turn(s). It uses static scores after the budget is exhausted."
     ));
@@ -401,6 +452,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         particles,
         damage_rolls,
         consider_crit,
+        refine,
     );
 
     Ok(BotProfile {
@@ -412,6 +464,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
             damage_rolls,
             consider_crit,
             replacement_depth,
+            refine,
             workers: search_workers(&search),
             particles,
             seed: req.seed,
@@ -441,6 +494,7 @@ fn search_workers(search: &BotSearchConfig) -> u8 {
 }
 
 /// Builds the solver configuration of one resolved profile.
+#[allow(clippy::too_many_arguments)]
 fn build_search(
     algorithm: BotAlgorithm,
     depth: u8,
@@ -448,6 +502,7 @@ fn build_search(
     particles: Option<usize>,
     damage_rolls: u8,
     consider_crit: bool,
+    refine: bool,
 ) -> BotSearchConfig {
     let exact = SolveConfig {
         depth,
@@ -465,7 +520,18 @@ fn build_search(
         ..SolveConfig::default()
     };
     if algorithm.is_exact() {
-        return BotSearchConfig::Exact(exact);
+        // A refined profile runs its own base pass, so it takes no outer ladder.
+        return if refine {
+            BotSearchConfig::Refine {
+                solve: SolveConfig {
+                    iterative_deepening: false,
+                    ..exact
+                },
+                base_depth: REFINE_BASE_DEPTH.min(depth),
+            }
+        } else {
+            BotSearchConfig::Exact(exact)
+        };
     }
     if algorithm == BotAlgorithm::Pimc {
         // Each world is a complete perfect-information solve, so it takes the
@@ -473,7 +539,11 @@ fn build_search(
         // double oracle to every name that is not exact itself.
         let base = PimcConfig::default();
         return BotSearchConfig::Pimc(PimcConfig {
-            solve: exact,
+            solve: SolveConfig {
+                iterative_deepening: !refine,
+                ..exact
+            },
+            refine_base_depth: refine.then(|| REFINE_BASE_DEPTH.min(depth)),
             particles: particles.unwrap_or(base.particles),
             ..base
         });
@@ -711,6 +781,147 @@ mod current_tests {
         };
         let profile = resolve("analysis", &request).unwrap();
         assert_eq!(profile.view.simulation_turn_budget, DEFAULT_SIMULATION_TURN_BUDGET);
+    }
+
+    /// Two techniques stay off by decision, for every preset and every
+    /// algorithm.
+    ///
+    /// A cap truncates the action set that the reported strategy ranges over.
+    /// The dominance filter reads the current position, so a partner command
+    /// that changes the weather or the terrain can invert the comparison it
+    /// makes. Both trade an unmeasured amount of answer quality for speed, and
+    /// this project buys speed from exact pruning instead.
+    ///
+    /// A later change that makes a search faster must not reach for either one.
+    #[test]
+    fn no_profile_caps_or_culls_the_action_set() {
+        let algorithms = [
+            "doubleOracle",
+            "backwardInduction",
+            "serializedBounds",
+            "mcts",
+            "ismcts",
+            "mccfr",
+            "pimc",
+        ];
+        for preset in ["fast", "balanced", "competitive", "custom"] {
+            for algorithm in algorithms {
+                let refine = BotAlgorithm::from_wire("botP2", algorithm)
+                    .expect("the name is in the list")
+                    .supports_refinement();
+                let request = BotProfileRequest {
+                    preset: Some(preset.to_string()),
+                    algorithm: Some(algorithm.to_string()),
+                    refine: refine.then_some(true),
+                    ..BotProfileRequest::default()
+                };
+                let profile = resolve("botP2", &request)
+                    .unwrap_or_else(|error| panic!("{preset}/{algorithm}: {error}"));
+                let (cap, cull) = match profile.search {
+                    BotSearchConfig::Exact(config) => (
+                        config.max_actions_per_player,
+                        config.prune_dominated_actions,
+                    ),
+                    BotSearchConfig::Refine { solve, .. } => (
+                        solve.max_actions_per_player,
+                        solve.prune_dominated_actions,
+                    ),
+                    BotSearchConfig::Pimc(config) => (
+                        config.solve.max_actions_per_player,
+                        config.solve.prune_dominated_actions,
+                    ),
+                    BotSearchConfig::Mcts(config) => (
+                        config.max_actions_per_player,
+                        config.prune_dominated_actions,
+                    ),
+                    BotSearchConfig::Ismcts(config) => (
+                        config.search.max_actions_per_player,
+                        config.search.prune_dominated_actions,
+                    ),
+                    BotSearchConfig::Mccfr(config) => (
+                        config.search.max_actions_per_player,
+                        config.search.prune_dominated_actions,
+                    ),
+                };
+                assert_eq!(cap, None, "{preset}/{algorithm} capped the action set");
+                assert!(!cull, "{preset}/{algorithm} enabled the dominance filter");
+            }
+        }
+    }
+
+    /// A refined profile must build a refinement search and say so.
+    #[test]
+    fn a_refined_profile_builds_a_refinement_search() {
+        let request = BotProfileRequest {
+            algorithm: Some("doubleOracle".to_string()),
+            depth: Some(2),
+            refine: Some(true),
+            ..BotProfileRequest::default()
+        };
+        let profile = resolve("botP2", &request).unwrap();
+        assert!(profile.view.refine);
+        let BotSearchConfig::Refine { solve, base_depth } = profile.search else {
+            panic!("a refined profile must build a refinement search");
+        };
+        assert_eq!(solve.depth, 2);
+        assert_eq!(base_depth, REFINE_BASE_DEPTH);
+        // The pass runs its own base pass, so an outer ladder would repeat it.
+        assert!(!solve.iterative_deepening);
+        assert_eq!(profile.search.first_depth(2), 2);
+        assert!(!profile.search.searches_belief());
+        assert!(
+            profile
+                .view
+                .approximations
+                .iter()
+                .any(|line| line.contains("raises only the")),
+            "{:?}",
+            profile.view.approximations
+        );
+    }
+
+    /// Each PIMC world is an exact search, so a world can refine.
+    #[test]
+    fn a_refined_pimc_profile_refines_each_world() {
+        let request = BotProfileRequest {
+            algorithm: Some("pimc".to_string()),
+            depth: Some(2),
+            particles: Some(2),
+            refine: Some(true),
+            ..BotProfileRequest::default()
+        };
+        let profile = resolve("analysis", &request).unwrap();
+        assert!(profile.view.refine);
+        let BotSearchConfig::Pimc(config) = profile.search else {
+            panic!("pimc must build a pimc configuration");
+        };
+        assert_eq!(config.refine_base_depth, Some(REFINE_BASE_DEPTH));
+        assert_eq!(config.particles, 2);
+        assert!(profile.search.searches_belief());
+    }
+
+    /// A sampled search walks trajectories and holds no support to raise.
+    #[test]
+    fn a_sampled_profile_rejects_refinement() {
+        for algorithm in ["mcts", "ismcts", "mccfr"] {
+            let request = BotProfileRequest {
+                algorithm: Some(algorithm.to_string()),
+                refine: Some(true),
+                ..BotProfileRequest::default()
+            };
+            let error = resolve("botP2", &request)
+                .expect_err("a sampled profile cannot refine")
+                .to_string();
+            assert!(error.contains("refine"), "{algorithm}: {error}");
+        }
+    }
+
+    /// An absent flag keeps the complete search.
+    #[test]
+    fn an_absent_refine_flag_keeps_the_complete_search() {
+        let profile = resolve("botP2", &BotProfileRequest::default()).unwrap();
+        assert!(!profile.view.refine);
+        assert!(matches!(profile.search, BotSearchConfig::Exact(_)));
     }
 
     #[test]

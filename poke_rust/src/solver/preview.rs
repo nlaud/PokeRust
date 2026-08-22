@@ -649,6 +649,9 @@ fn solve_preview_pass(
         rows,
         cols,
         seed,
+        // The battle policy scores battle commands, and a preview row
+        // is a bring-and-lead choice. Index order stands here.
+        matrix::OracleOrder::default(),
         OracleLimits {
             alpha: LOSS,
             beta: WIN,
@@ -1218,6 +1221,9 @@ fn solve_open_list_preview_pass(
         rows,
         cols,
         seed,
+        // The battle policy scores battle commands, and a preview row
+        // is a bring-and-lead choice. Index order stands here.
+        matrix::OracleOrder::default(),
         OracleLimits {
             alpha: LOSS,
             beta: WIN,

@@ -481,6 +481,19 @@ pub struct SolveConfig {
     /// Enables serialized bounds during double-oracle search.
     /// Each bound requires an auxiliary search.
     pub use_serialized_bounds: bool,
+    /// Reads the trained policy to order each double-oracle best-response check,
+    /// and to open each restricted game.
+    ///
+    /// A best-response check abandons an action when the best action so far
+    /// already beats its optimistic completion. Index order starts from a weak
+    /// incumbent, so the check evaluates many actions before it can abandon any.
+    /// The policy order puts a strong action first instead.
+    ///
+    /// This cannot change a value or a strategy. The check still reads every
+    /// action, and double oracle still stops on a best response over the
+    /// complete action set. It changes the cells that the run reads, and
+    /// therefore the work counters.
+    pub policy_order: bool,
     /// Maximum joint actions for each player.
     /// `None` keeps the complete action set.
     /// A cap makes the result approximate.
@@ -543,6 +556,7 @@ impl Default for SolveConfig {
             eval: eval::fitted,
             eval_batch: None,
             use_serialized_bounds: false,
+            policy_order: true,
             max_actions_per_player: None,
             prune_dominated_actions: false,
             node_budget: Some(2_000_000),
@@ -697,6 +711,18 @@ pub enum SolveWarning {
     /// statically rather than searched. Under iterative deepening this appears
     /// only when no pass finished, for the same reason as `BudgetExhausted`.
     DeadlineExceeded { budget: Duration },
+    /// A refinement pass judged some actions at the base depth alone.
+    ///
+    /// `solver::refine` upgrades the cells of a small candidate set to the
+    /// refined depth, and it ranks every other action at the base depth. An
+    /// action that the pass never verified could still hold a better response at
+    /// the refined depth. The answer is a certified equilibrium of the refined
+    /// game only when `verified` reaches `total`.
+    ActionsUnverified {
+        player: Player,
+        verified: usize,
+        total: usize,
+    },
     /// The search stopped short of the requested depth. Only iterative deepening
     /// reports this: a single-pass search always returns the depth it was asked
     /// for, however much of it was scored statically.
@@ -750,7 +776,8 @@ impl SolveWarning {
     pub fn stopped_configured_work(&self) -> bool {
         matches!(
             self,
-            SolveWarning::BudgetExhausted { .. }
+            SolveWarning::ActionsUnverified { .. }
+                | SolveWarning::BudgetExhausted { .. }
                 | SolveWarning::SimulationTurnBudgetExhausted { .. }
                 | SolveWarning::DeadlineExceeded { .. }
                 | SolveWarning::DepthNotReached { .. }
@@ -814,6 +841,14 @@ impl fmt::Display for SolveWarning {
                 kept,
                 total,
             } => write!(f, "{player:?}'s action set was limited to {kept} of {total}"),
+            SolveWarning::ActionsUnverified {
+                player,
+                verified,
+                total,
+            } => write!(
+                f,
+                "{player:?} had {verified} of {total} actions verified at the refined depth. The rest were ranked at the base depth"
+            ),
             SolveWarning::NoCompletedRound => write!(
                 f,
                 "the search completed no double-oracle round, so both strategies are the uniform placeholder rather than an equilibrium"
@@ -977,6 +1012,83 @@ pub fn solve_seeded_cancellable(
 /// The hook cannot change the search. It reads one [`RootRound`] and returns.
 ///
 /// `None` gives the behavior of [`solve_seeded_cancellable`].
+/// What one refinement pass verified.
+#[derive(Debug, Clone, Copy)]
+pub struct RefineReport {
+    /// Actions that the pass verified at the refined depth, for each player.
+    pub verified: [usize; 2],
+    /// Actions that the position offers, for each player.
+    pub total: [usize; 2],
+    /// Restricted games that the pass solved. Each one published a strategy.
+    pub rounds: usize,
+}
+
+/// Solves at `base_depth`, then raises the cells that decide the answer to
+/// `config.depth` while the budget lasts.
+///
+/// A doubles position offers hundreds of joint actions for each player, and one
+/// depth-2 cell costs a whole depth-1 solve. A complete depth-2 equilibrium is
+/// therefore minutes of work, while the equilibrium support is only a handful of
+/// actions. This entry point spends a budget on the support first, and it widens
+/// from there.
+///
+/// `progress` reads each restricted game that the pass solves, so a caller can
+/// show a strategy that improves rather than one answer at the end.
+///
+/// Read `solver::README.md` for the ordering rule and for what the answer
+/// promises. [`SolveWarning::ActionsUnverified`] names the defect.
+pub fn refine_seeded_progress_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &SolveConfig,
+    base_depth: u8,
+    progress: Option<RootProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<(SolveResult, RefineReport), SolveError> {
+    let _guard = scoped_sample_rng(seed);
+    let (result, report) = search::refine_run(
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        base_depth,
+        progress,
+        cancel,
+    )?;
+    Ok((
+        result,
+        RefineReport {
+            verified: report.verified,
+            total: report.total,
+            rounds: report.rounds,
+        },
+    ))
+}
+
+/// [`refine_seeded_progress_cancellable`] without a progress hook.
+pub fn refine_seeded_cancellable(
+    seed: u64,
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &SolveConfig,
+    base_depth: u8,
+    cancel: Option<&CancelFlag>,
+) -> Result<(SolveResult, RefineReport), SolveError> {
+    refine_seeded_progress_cancellable(
+        seed,
+        state,
+        pokemon_dex,
+        move_dex,
+        config,
+        base_depth,
+        None,
+        cancel,
+    )
+}
+
 pub fn solve_seeded_progress_cancellable(
     seed: u64,
     state: &MatchState,

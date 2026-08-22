@@ -533,6 +533,51 @@ pub struct OracleSeed<'a> {
     pub cols: Option<&'a [usize]>,
 }
 
+/// The order in which a best-response check reads the actions of each player.
+///
+/// A check abandons an action as soon as a bound rules it out, and that bound is
+/// the best action found so far. Index order therefore starts from a weak
+/// incumbent, and it evaluates many actions before a strong one appears. A check
+/// that reads a strong action first abandons most of the rest after one cell.
+///
+/// The order changes the cells that a run reads. It cannot change the best
+/// response or its value, because the check still reads every action, and the
+/// bound test abandons an action only when even its optimistic completion loses.
+/// `None` keeps index order.
+///
+/// An index at or past the action count is dropped, and a missing index is
+/// appended in index order, so a partial or stale list still reads every action
+/// exactly one time.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OracleOrder<'a> {
+    pub rows: Option<&'a [usize]>,
+    pub cols: Option<&'a [usize]>,
+}
+
+/// A complete scan permutation of `len` actions.
+///
+/// Every action appears exactly one time, so the caller can iterate the result
+/// in place of `0..len`.
+fn scan_order(order: Option<&[usize]>, len: usize) -> Vec<usize> {
+    let Some(order) = order else {
+        return (0..len).collect();
+    };
+    let mut seen = vec![false; len];
+    let mut out = Vec::with_capacity(len);
+    for &index in order {
+        if index < len && !seen[index] {
+            seen[index] = true;
+            out.push(index);
+        }
+    }
+    for (index, &taken) in seen.iter().enumerate() {
+        if !taken {
+            out.push(index);
+        }
+    }
+    out
+}
+
 /// One cell that a [`double_oracle_with`] run asks for.
 ///
 /// The three fields name the cell inside one run. A parallel oracle builds the
@@ -632,7 +677,14 @@ pub fn double_oracle<F>(
 where
     F: FnMut(usize, usize) -> f64,
 {
-    double_oracle_with(rows, cols, seed, limits, ClosureOracle(cell_value))
+    double_oracle_with(
+        rows,
+        cols,
+        seed,
+        OracleOrder::default(),
+        limits,
+        ClosureOracle(cell_value),
+    )
 }
 
 /// [`double_oracle`], with an oracle that also reads each round.
@@ -653,6 +705,7 @@ pub fn double_oracle_with<O>(
     rows: usize,
     cols: usize,
     seed: OracleSeed<'_>,
+    order: OracleOrder<'_>,
     limits: OracleLimits,
     mut oracle: O,
 ) -> (MatrixSolution, OracleStats)
@@ -747,6 +800,7 @@ where
             &mut cells,
             &col_strategy,
             limits.high,
+            order.rows,
             &mut stats,
             &mut oracle,
         ) else {
@@ -767,6 +821,7 @@ where
             &mut cells,
             &row_strategy,
             limits.low,
+            order.cols,
             &mut stats,
             &mut oracle,
         ) else {
@@ -938,6 +993,7 @@ fn best_response_row<O>(
     cells: &mut [Vec<Option<f64>>],
     col_strategy: &[f64],
     high: f64,
+    order: Option<&[usize]>,
     stats: &mut OracleStats,
     oracle: &mut O,
 ) -> Option<(f64, usize)>
@@ -951,7 +1007,9 @@ where
     let mut best_value = f64::NEG_INFINITY;
     let mut best_row = 0;
 
-    for (i, row) in cells.iter_mut().enumerate() {
+    // Every row is still read. [`OracleOrder`] changes only which row sets the
+    // incumbent first, and therefore how early the bound test fires.
+    for i in scan_order(order, cells.len()) {
         let mut accumulated = 0.0;
         let mut abandoned = false;
 
@@ -959,7 +1017,7 @@ where
             let optimistic = accumulated
                 + support[k..]
                     .iter()
-                    .map(|&jj| col_strategy[jj] * row[jj].unwrap_or(high))
+                    .map(|&jj| col_strategy[jj] * cells[i][jj].unwrap_or(high))
                     .sum::<f64>();
             if optimistic < best_value - EPS {
                 stats.cutoffs += 1;
@@ -967,12 +1025,12 @@ where
                 break;
             }
 
-            let value = match row[j] {
+            let value = match cells[i][j] {
                 Some(value) => value,
                 None => {
                     stats.cells_requested += 1;
                     let value = oracle.cell(i, j);
-                    row[j] = Some(value);
+                    cells[i][j] = Some(value);
                     if oracle.stop_requested() {
                         return None;
                     }
@@ -999,6 +1057,7 @@ fn best_response_col<O>(
     cells: &mut [Vec<Option<f64>>],
     row_strategy: &[f64],
     low: f64,
+    order: Option<&[usize]>,
     stats: &mut OracleStats,
     oracle: &mut O,
 ) -> Option<(f64, usize)>
@@ -1013,9 +1072,8 @@ where
     let mut best_value = f64::INFINITY;
     let mut best_col = 0;
 
-    // `j` selects a column of every row, so no single iterator replaces it.
-    #[allow(clippy::needless_range_loop)]
-    for j in 0..cols {
+    // Every column is still read. See [`best_response_row`] for the order.
+    for j in scan_order(order, cols) {
         let mut accumulated = 0.0;
         let mut abandoned = false;
 
@@ -1086,6 +1144,43 @@ fn lift(restricted: &[f64], indices: &[usize], full_len: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A partial, stale, or repeated order must still name every action one
+    /// time. The best-response check iterates this list in place of `0..len`, so
+    /// a dropped action would silently leave a best response unconsidered.
+    #[test]
+    fn a_scan_order_is_always_a_complete_permutation() {
+        let cases: [(Option<&[usize]>, usize); 6] = [
+            (None, 4),
+            (Some(&[]), 4),
+            (Some(&[3, 1]), 4),
+            (Some(&[9, 2]), 4),
+            (Some(&[1, 1, 1]), 4),
+            (Some(&[3, 2, 1, 0]), 4),
+        ];
+        for (order, len) in cases {
+            let scan = scan_order(order, len);
+            let mut sorted = scan.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..len).collect::<Vec<usize>>(),
+                "order {order:?} of {len} produced {scan:?}"
+            );
+        }
+    }
+
+    /// The requested actions must come first, in the requested order.
+    #[test]
+    fn a_scan_order_leads_with_the_requested_actions() {
+        assert_eq!(scan_order(Some(&[3, 1]), 5), vec![3, 1, 0, 2, 4]);
+    }
+
+    /// No order means index order, which is what an unordered run reads.
+    #[test]
+    fn no_scan_order_is_index_order() {
+        assert_eq!(scan_order(None, 3), vec![0, 1, 2]);
+    }
 
     /// The defining property of an equilibrium: neither player can improve by
     /// deviating to any pure strategy. Every solved matrix should satisfy this,
@@ -1407,6 +1502,7 @@ mod tests {
             payoffs.len(),
             payoffs[0].len(),
             OracleSeed::default(),
+            OracleOrder::default(),
             OracleLimits::default(),
             oracle,
         );
@@ -1475,6 +1571,7 @@ mod tests {
                 rows: Some(&seed),
                 cols: Some(&seed),
             },
+            OracleOrder::default(),
             OracleLimits::default(),
             StoppingOracle {
                 payoffs: &payoffs,
@@ -1513,6 +1610,7 @@ mod tests {
             3,
             2,
             OracleSeed::default(),
+            OracleOrder::default(),
             OracleLimits::default(),
             FirstCellStop { calls: 0 },
         );

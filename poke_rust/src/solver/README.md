@@ -99,6 +99,21 @@ One solve therefore has one level of parallelism.
 The matrix solver and the double-oracle control loop stay serial.
 `SearchContext::serial_ab` also stays serial.
 
+`SearchOracle::prefetch_rate` sets the size of a batch.
+A cell of a leaf matrix costs one turn simulation.
+A cell of an interior matrix costs a whole subtree, which is thousands of turn
+simulations in doubles.
+The two depths therefore take a different rate.
+
+Both the batch limit and the worker request must read that one rate.
+A request that divides a deep batch by the leaf rate asks for one worker.
+
+Only the prefetch holds work for the pool.
+A best-response check reads its cells one at a time, so that its bound test can
+abandon an action.
+A doubles depth-1 solve returned 10.5k turns for each second on 22 workers
+against 9.2k turns on one worker before the leaf rate rose.
+
 The double-oracle round uses a batch in two places:
 
 1. The fill of the missing restricted cells.
@@ -132,6 +147,94 @@ One worker holds its own transposition table.
 A large `tt_capacity` therefore multiplies the memory of a solve.
 Set `VERBOSITY` to zero before a large search, because two workers interleave
 their output.
+
+### Policy order
+
+`SolveConfig::policy_order` reads the trained policy at each double-oracle node.
+The ranking does two jobs.
+
+1. It orders both best-response checks.
+2. Its strongest few actions open the restricted game.
+
+A best-response check abandons an action when the best action so far beats the
+optimistic completion of that action.
+Index order starts the check from a weak best action.
+The check then reads many actions before it can abandon one.
+The policy order puts a strong action first.
+
+The order cannot move a value or a strategy.
+The check still reads every action.
+Double oracle still stops on a best response over the complete action set.
+The order changes the cells that a run reads, and therefore the work counters.
+
+`search::policy_seed_actions` sizes the seed.
+The seed takes one action for each 64 candidate actions, up to eight.
+A restricted game of `s` actions costs `s * s` cells before the first check.
+A seed that covers a large part of a small action set rebuilds the whole matrix.
+That cost is the work that double oracle exists to avoid.
+
+The root position keeps `RootSeed` instead.
+That seed holds the support of the previous deepening pass, which is a measured
+answer rather than a prediction.
+
+### Budgeted refinement
+
+`solver::refine_seeded_progress_cancellable` solves at a base depth, then raises
+the cells that decide the answer to a deeper one.
+
+A doubles position offers 290 to 722 joint actions for each player.
+One depth-2 cell costs a whole depth-1 solve, which is about 14,500 turn
+simulations.
+One best-response check at depth 2 must read every action, so it costs about 4.2
+million turn simulations, and one complete round costs about eight minutes.
+
+The equilibrium support is small.
+A measured doubles position played 5 actions of 290, and 5 of 370.
+The cells that decide the answer are a few dozen.
+
+The pass runs in three steps.
+
+1. It solves the position exactly at the base depth.
+2. It raises the cells of the base support to the refined depth.
+3. It admits one more action at a time while the budget lasts.
+
+The candidate order comes from a best-response check at the base depth.
+A base cell costs one turn simulation, so that check ranks every action for about
+the price of one refined cell.
+
+The order decides which action the pass reads next.
+It never removes an action, and it never decides the answer.
+An admitted action enters the restricted game with refined cells, and the matrix
+solver gives it a probability or does not.
+
+The pass reaches the exact equilibrium of the refined game when it verifies every
+action.
+`solver_tests::a_complete_refinement_equals_the_exact_answer` holds that rule.
+Below that, `SolveWarning::ActionsUnverified` reports the actions that the pass
+ranked at the base depth alone.
+That warning stops the answer from being complete.
+
+Two rules keep the published answer honest.
+
+A round whose cell fill met a limit never publishes.
+A stopped cell takes a static score, a matrix of static scores often ties
+everywhere, and the matrix solver then returns a uniform strategy over the whole
+restricted game.
+The pass keeps its last complete round instead, as a deepening pass keeps its
+last complete depth.
+
+The base pass carries a report.
+`SearchContext::double_oracle` records its no-round fallback only for a root
+call, and it recognizes one by the presence of a report.
+Without the report a base pass that completed no round would return the uniform
+strategy it started from and never report `NoCompletedRound`.
+
+Measured results are in `benches/RESULTS.md`.
+Thirty seconds gave a support of 3 actions with probabilities 0.55, 0.39, and
+0.07.
+An exact depth-2 search of the same position never left depth 1 in that time, and
+a sampled search returned a strategy over all 290 actions with a largest
+probability of 0.03.
 
 ### Approximate search
 
@@ -210,9 +313,24 @@ A cell that a stop reached part way therefore writes nothing to the per-world
 table, and the run discards the round that asked for it.
 
 One job budget covers a whole PIMC search.
-Each world takes an equal share through `CancelFlag::child_with_budget`.
+Each world takes a share through `CancelFlag::child_with_budget`.
 Without the share, the first world spends the budget of the job.
 The answer would then rest on one world.
+
+An equal share starves every world at once when one solve costs more than that
+share.
+The answer is then a mixture of positions that static scores answered.
+`pimc::first_world_quota` therefore gives the first world the larger of the equal
+share and one half of the job budget.
+Two worlds can always finish when each one fits in one half.
+
+`pimc::later_world_quota` sizes the rest from what the first world cost.
+A world of one belief solves a position of one shape, so that cost predicts the
+rest better than an equal split does.
+The job budget still bounds the run, and `PimcResult::worlds_solved` reports the
+worlds that finished.
+Fewer worlds raise the strategy fusion of the answer, and a world that never
+searched is worse.
 
 A child flag claims one turn from itself and then from the job above it.
 The job can refuse a claim that the share permitted.

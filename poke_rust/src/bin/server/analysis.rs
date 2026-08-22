@@ -987,6 +987,50 @@ fn one_search(
                 result.depth_reached == config.depth && solver::warnings_are_complete(&result.warnings);
             Ok(checkpoint)
         }
+        BotSearchConfig::Refine { solve, base_depth } => {
+            let round = |round: solver::RootRound| {
+                let mut checkpoint = partial_checkpoint(
+                    1.0 - round.value,
+                    P2Strategy::Battle(round.p2_strategy),
+                    round.depth,
+                    round.stats.turns_simulated,
+                    round.stats.nodes_expanded,
+                    round.stats.elapsed,
+                    &[],
+                    &[],
+                );
+                checkpoint.complete = false;
+                if let Some(progress) = progress {
+                    progress(checkpoint);
+                }
+            };
+            let (result, _) = solver::refine_seeded_progress_cancellable(
+                seed,
+                state,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &solve,
+                base_depth,
+                Some(&round),
+                cancel,
+            )
+            .map_err(engine_error)?;
+            let mut checkpoint = partial_checkpoint(
+                result.p2_win_odds,
+                P2Strategy::Battle(result.p2_strategy),
+                result.depth_reached,
+                result.stats.turns_simulated,
+                result.stats.nodes_expanded,
+                result.stats.elapsed,
+                &result.warnings,
+                &[],
+            );
+            // An unverified action leaves the answer incomplete, and
+            // `warnings_are_complete` already reads that warning.
+            checkpoint.complete =
+                result.depth_reached == solve.depth && solver::warnings_are_complete(&result.warnings);
+            Ok(checkpoint)
+        }
         BotSearchConfig::Mcts(config) => {
             let sampled = |root: solver::mcts::SampledRoot| {
                 let mut checkpoint = partial_checkpoint(
@@ -1442,6 +1486,11 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         ),
         solver::SolveWarning::ActionsTruncated { .. } => {
             "The action cap removed at least one action, so the search can miss it.".to_string()
+        }
+        // No count here, for the reason the doc comment gives: a count would
+        // report the size of P2's action set to P1.
+        solver::SolveWarning::ActionsUnverified { .. } => {
+            "Some actions were ranked at the base depth and never verified deeper.".to_string()
         }
         solver::SolveWarning::NoCompletedRound => "The search completed no equilibrium round, so both strategies are an even split over the actions rather than a calculated mixture."
             .to_string(),

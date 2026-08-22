@@ -5,6 +5,8 @@ Run these commands to measure turn resolution and solver speed:
 ```sh
 cargo bench --bench turn_speed
 cargo bench --bench solver_speed
+cargo bench --bench depth2_cost
+cargo bench --bench doubles_probe
 ```
 
 The source files describe each test case. Add a section after an engine change.
@@ -836,3 +838,203 @@ loader behavior. Each one documented that risk and then pinned a value anyway.
   not the limit.
 - `MLP_HIDDEN` equals `FEATURE_COUNT`, so a new feature invalidates the shipped
   network file. The `reset` stage of the runbook reseeds it.
+
+## 2026-08-21: Depth-2 cost, and what 500,000 turns buys
+
+- Machine: Windows 11 with 31.5 GB of RAM, 22 pool workers
+- Build: release benchmark profile
+- Command: `cargo bench --bench depth2_cost`
+- Search: double oracle, one damage roll, no critical-hit branches
+- Action set: complete. No cap, and no dominance filter.
+
+### The question
+
+The `competitive` preset gives one job 500,000 turn simulations. PIMC must
+finish two worlds inside that, so one solve gets 250,000 turns.
+
+### The cost law
+
+A depth-2 solve costs `R + R * K * C`.
+
+- `R` is the root matrix cells that the search evaluated.
+- `K` is the chance successors that each root cell kept.
+- `C` is the child matrix cells for each successor.
+
+`K` enters one time. The action count enters two times, through `R` and `C`.
+
+### Complete joint actions for each player
+
+| Format | Actions | Matrix cells |
+|---|---|---|
+| Singles | 10 to 18 | 100 to 180 |
+| Doubles | 290 to 722 | 107k to 353k |
+
+Doubles offers about 470 actions for each player. The earlier estimate of 300 in
+`benchmarking.rs` is low.
+
+### Measured cost
+
+Turn simulations, averaged over four teamsheet pairings.
+
+| Format | Depth | baseline | policy | policy+cache | vs 250k |
+|---|---|---|---|---|---|
+| Singles | 2 | 4.4k | 3.9k | 3.9k | 64x under |
+| Doubles | 1 | 15.4k | 11.0k | 11.0k | 23x under |
+| Doubles | 2 | over 40M | over 40M | over 40M | over 160x over |
+
+`baseline` is index order. `policy` adds `SolveConfig::policy_order`.
+`policy+cache` adds a turn cache of 8,192 successor states.
+
+### Findings
+
+1. Singles depth 2 already fits, with 64 times the room it needs. It needed no
+   change.
+2. Doubles depth 1 fits, with 23 times the room it needs.
+3. Doubles depth 2 does not fit. One solve of the cheapest pairing ran past
+   40,000,000 turns and 20 minutes. The projection from `R * K * C` with
+   `R = C = 11k` is about 121M turns, which agrees.
+4. `policy_order` cuts doubles depth 1 by 1.4 times and singles depth 2 by 1.13
+   times. It cannot move a value, so this is free.
+5. The turn cache saved nothing. It matched `policy` in 23 of 24 rows. A cache
+   hit needs one `(position, command, command)` triple two times in one solve.
+   The transposition table already answers a repeated position before the turn
+   resolution runs, so the triple almost never repeats.
+6. `ChanceMode` is a weak lever at one damage roll. Singles depth 2 moved from
+   8.2k under `enumerate` to 7.1k under `top4` and 3.1k under `top1`. One roll
+   produces few successors, so there is little to discard.
+
+### Why doubles depth 2 cannot fit
+
+A best-response check must read every action one time to prove that the action
+is not the best response. One node therefore costs at least `2 * N` cells, and
+about 940 cells at `N = 470`. Depth 2 multiplies the cost of two nodes, so
+`R * C` has a floor near 884,000 turns. That floor is 3.5 times the 250,000
+target, and it assumes one double-oracle round and one cell for each action.
+
+The measured cost is far above the floor. No chance mode and no cache closes
+that distance, because both act on `K` and the distance is in `R * C`.
+
+### Parallel workers do not help the budget
+
+A doubles depth-2 solve used 652 CPU seconds over 20 minutes of wall clock, which
+is about half of one thread. `CellOracle::batch_limit` prefetches
+`(workers + 1) * 2` cells before each best-response check, and the check then
+reads cells one at a time so that its bound test can fire.
+
+The budget counts turn simulations, not seconds. More workers therefore lower the
+wall clock of a doubles solve and change nothing about whether it fits.
+
+## 2026-08-21: Doubles inside a wall-clock limit
+
+- Command: `cargo bench --bench doubles_wallclock`
+- Position: doubles pairing 10x3, the cheapest that `depth2_cost` reports
+- Actions: 290 for P1 and 370 for P2, complete
+- Limit: 30 seconds
+
+A turn budget and a wall-clock limit ask different questions. A budget counts
+turn simulations. A limit counts seconds, so the worker pool matters.
+
+### The prefetch rate
+
+A best-response check reads its cells one at a time, so that its bound test can
+abandon an action. Only the prefetch holds work for the pool.
+
+| Workers | Prefetch rate | Turns | Time | Turns for each second |
+|---|---|---|---|---|
+| 1 | - | 8,266 | 0.90s | 9,200 |
+| 22 | 2 | 9,251 | 0.88s | 10,500 |
+| 22 | 32 | 14,546 | 0.35s | 42,000 |
+
+Twenty-two workers returned 1.14 times the work of one worker at the old rate.
+The pool was idle through most of each check.
+
+The rate must match the depth. A cell of a leaf matrix costs one turn
+simulation. A cell of a depth-2 matrix costs a whole depth-1 solve, which is
+14,546 turns here. A rate of 32 at depth 2 lowered the depth-2 turn rate from
+18.2k for each second to 5.8k, because the check abandoned most of what the
+prefetch built. `SearchOracle::prefetch_rate` holds the two rates.
+
+Both the batch limit and the worker request must read that one rate. A request
+that divided a deep batch by the leaf rate asked for one worker.
+
+### What 30 seconds reaches
+
+| Search | Result |
+|---|---|
+| Exact, depth 1 | Finishes in 0.35s |
+| Exact, depth 2, top1 | Reaches depth 1 only. 572,089 turns. |
+| MCTS, depth 2 | 71,425 iterations. Support 290 of 290, top probability 0.03. |
+| MCTS, depth 2, widening | 60,808 iterations. Support 290 of 290, top probability 0.03. |
+
+The sampled search finishes, and its answer is close to uniform. The position
+holds 107,300 action pairs, so 71,425 iterations give each pair less than one
+visit. The reported error of 0.0008 measures the sampling noise of the value. It
+does not measure the quality of the strategy.
+
+### Why exact depth 2 misses the limit
+
+The depth-1 equilibrium uses a support of 5 actions of 290, and 5 of 370.
+Pokemon positions have a small support, which is what double oracle exploits.
+
+One depth-2 cell costs 14,546 turns.
+
+| Work | Cells | Turns | Time at 19k turns for each second |
+|---|---|---|---|
+| The 5x5 support at depth 2 | 25 | 364k | about 19s |
+| One best-response scan | 290 | 4.2M | about 221s |
+| One complete round | 660 | 9.6M | about 8 min |
+
+A best-response check must read every action one time to prove that the action
+is not the best response. One depth-2 round therefore costs about eight minutes,
+and convergence takes several rounds.
+
+### The rule this gives
+
+Depth-2 valuation of the depth-1 support fits 30 seconds. A certified depth-2
+equilibrium does not, and no rate or cache changes that. The distance is the
+scan over every action, and exactness needs that scan.
+
+## 2026-08-21: Budgeted refinement of a doubles position
+
+- Command: `cargo bench --bench doubles_wallclock`
+- Position: doubles pairing 10x3, 290 actions against 370
+- Search: `solver::refine_seeded_progress_cancellable`, base depth 1, refined
+  depth 2, chance mode top1, 22 workers
+
+### What each search returns in 30 seconds
+
+| Search | Value | Strategy |
+|---|---|---|
+| Exact, depth 1 | 0.3233 | support 5, finishes in 0.35s |
+| Exact, depth 2 | 0.3234 | reached depth 1 only |
+| MCTS, depth 2 | 0.3694 | support 290 of 290, largest 0.03 |
+| Refinement, depth 1 to 2 | 0.3143 | support 3, 0.55 and 0.39 and 0.07 |
+
+The sampled search spreads its iterations over 107,300 action pairs and returns a
+strategy that is close to uniform. The refinement spends the same seconds on the
+few dozen cells that decide the answer, and it returns a strategy that names an
+action.
+
+### How the refinement uses more time
+
+| Limit | Turns | Rounds | Verified P1 | Verified P2 | Value | Support |
+|---|---|---|---|---|---|---|
+| 10s | 186,896 | 2 | 6 of 290 | 5 of 370 | 0.3150 | 3 |
+| 30s | 410,874 | 8 | 9 of 290 | 8 of 370 | 0.3143 | 3 |
+| 60s | 903,501 | 18 | 14 of 290 | 13 of 370 | 0.3089 | 4 |
+
+The value still moves between 30 and 60 seconds, so the pass has not converged.
+`SolveWarning::ActionsUnverified` reports that, and the answer is not complete.
+
+The pass publishes a strategy after each round, so a caller shows an answer that
+improves rather than one answer at the end.
+
+### Takeaways
+
+- Two PIMC worlds of 30 seconds fit one minute, which is the target.
+- The pass reaches the exact refined answer when the budget lets it verify every
+  action. `a_complete_refinement_equals_the_exact_answer` holds that rule.
+- Verified counts stay small. Nine actions of 290 at 30 seconds is the honest
+  figure, and the warning carries it.
+- Do not read the sampled error of an MCTS answer as strategy quality. The 0.0008
+  figure above sits beside a uniform strategy.

@@ -28,6 +28,7 @@ function limitLine(profile: BotProfileView): string {
     `${profile.simulationTurnBudget.toLocaleString()} simulation turns`,
     `depth ${profile.depth}`,
   ]
+  if (profile.refine) parts.push('refined from depth 1')
   if (profile.replacementDepth !== null) parts.push(`replacement depth ${profile.replacementDepth}`)
   if (profile.particles !== null) parts.push(`${profile.particles} worlds`)
   parts.push(`${profile.damageRolls} damage rolls`)
@@ -47,16 +48,26 @@ function replayLine(replay: NonNullable<P2Reveal['replay']>): string {
   return parts.join(' · ')
 }
 
-function NotesTooltip({ lines }: { lines: string[] }) {
+function NotesTooltip({
+  lines,
+  label = 'Approx.',
+  ariaLabel = 'Show solver approximations',
+  testId = 'solver-approximations',
+}: {
+  lines: string[]
+  label?: string
+  ariaLabel?: string
+  testId?: string
+}) {
   if (lines.length === 0) return null
   return (
-    <span className="group relative shrink-0" data-testid="solver-approximations">
+    <span className="group relative shrink-0" data-testid={testId}>
       <button
         type="button"
-        aria-label="Show solver approximations"
+        aria-label={ariaLabel}
         className="rounded-card border border-subtle px-2 py-0.5 font-semibold text-ink-muted"
       >
-        Approx.
+        {label}
       </button>
       <span className="pointer-events-none absolute right-0 top-full z-50 mt-1 hidden w-80 rounded-card border border-subtle bg-card p-2 text-left text-ink-muted shadow-lg group-hover:block group-focus-within:block">
         {lines.map((line) => (
@@ -215,9 +226,18 @@ export default function P2RevealPanel() {
         <div className="mt-2 border-t border-subtle pt-2" data-testid="bot-badge-detail">
           <p className="text-ink-muted">{limitLine(botP2)}</p>
           {botAnalysis && (
-            <p className="mt-1 font-semibold" data-testid="bot-win-odds">
-              Player 2 win estimate {percent(botAnalysis.p2WinOdds)} · depth {botAnalysis.depthReached}
-              {botAnalysis.complete ? '' : ' · partial round'}
+            <p className="mt-1 flex items-center gap-2 font-semibold" data-testid="bot-win-odds">
+              <span>
+                Player 2 win estimate {percent(botAnalysis.p2WinOdds)} · depth{' '}
+                {botAnalysis.depthReached}
+                {botAnalysis.complete ? '' : ' · partial round'}
+              </span>
+              <NotesTooltip
+                lines={botAnalysis.warnings}
+                label={`${botAnalysis.warnings.length} note(s)`}
+                ariaLabel="Show the notes on this answer"
+                testId="bot-answer-notes"
+              />
             </p>
           )}
           {(played || p2Strategy || drawnStrategy) && (

@@ -218,6 +218,37 @@ world runs under a child flag of the job.
 `solver::actions` also supplies legal commands to the HTTP server.
 Use `replacement_commands_are_valid` during replacement phases.
 
+`SolveConfig::policy_order` ranks the actions of each double-oracle node.
+The ranking orders both best-response checks, and it opens the restricted game.
+It cannot move a value, because the check still reads every action.
+Do not size the seed as a constant.
+`search::policy_seed_actions` scales it with the action count, because a seed
+that covers a small action set rebuilds the whole matrix.
+
+`solver::refine_seeded_progress_cancellable` solves at a base depth, then raises
+the cells of the support to a deeper one while the budget lasts.
+Use it when an exact solve at the deeper depth cannot finish.
+It reaches the exact answer when it verifies every action.
+`SolveWarning::ActionsUnverified` names the actions it did not verify, and that
+warning stops the answer from being complete.
+The candidate order never removes an action, and it never decides the answer.
+A round whose cell fill met a limit must not publish.
+A stopped cell holds a static score, and a matrix of static scores returns a
+uniform strategy that no search produced.
+
+`BotProfileRequest::refine` turns it on for an exact algorithm and for `pimc`.
+The server rejects the flag for a sampled algorithm.
+
+`SearchOracle::prefetch_rate` sets how much speculative work a batch does.
+A leaf cell costs one turn simulation, and an interior cell costs a subtree.
+The batch limit and the worker request must read the same rate.
+
+Depth-2 cost is `R + R * K * C`.
+`K` is the kept chance successors, and it enters one time.
+The action count enters two times, through the root cells and the child cells.
+Read `benches/RESULTS.md` before you try to make a doubles depth-2 solve fit a
+turn budget.
+
 Sort equal-probability successors with a state-hash tie breaker.
 This makes repeated solves stable within one process.
 Different processes can still differ by a few floating-point units.

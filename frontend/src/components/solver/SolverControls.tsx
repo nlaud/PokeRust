@@ -1,5 +1,5 @@
 import type { BotAlgorithm } from '../../api/types'
-import { isBeliefSearch, type SolverSettings } from './solverSettings'
+import { isBeliefSearch, supportsRefinement, type SolverSettings } from './solverSettings'
 
 function NumberField({
   label,
@@ -40,11 +40,19 @@ export default function SolverControls({
   algorithm,
   settings,
   disabled,
+  showRefine,
   onChange,
 }: {
   algorithm?: BotAlgorithm
   settings: SolverSettings
   disabled?: boolean
+  /** Whether to offer the refinement switch.
+   *
+   * Refinement is one shared setting, and two pickers feed it: the sidebar
+   * holds an imperfect-information search and a perfect-information search, and
+   * the session picks between them. `algorithm` names only one of the two, so
+   * the caller decides. An absent value falls back to `algorithm`. */
+  showRefine?: boolean
   onChange: (settings: SolverSettings) => void
 }) {
   const set = <K extends keyof SolverSettings>(key: K, value: SolverSettings[K]) =>
@@ -127,6 +135,20 @@ export default function SolverControls({
         />
         Critical-hit branches
       </label>
+      {(showRefine ?? (algorithm === undefined || supportsRefinement(algorithm))) && (
+        <label
+          className="flex items-center gap-2 self-center"
+          title="Solves depth 1 over every action, then raises only the cells that decide the answer to the chosen depth. A doubles position cannot finish a complete depth-2 search, and this does reach depth 2 on the cells that matter. The answer reports how many actions it verified."
+        >
+          <input
+            type="checkbox"
+            checked={settings.refine}
+            disabled={disabled}
+            onChange={(event) => set('refine', event.target.checked)}
+          />
+          Refine to depth
+        </label>
+      )}
     </div>
   )
 }

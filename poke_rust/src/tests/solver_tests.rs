@@ -7227,6 +7227,7 @@ fn job_seed_is_stable() {
 
 fn pimc_config(particles: usize) -> PimcConfig {
     PimcConfig {
+        refine_base_depth: None,
         solve: base_config(),
         particles,
         resample_threshold: 0.5,
@@ -7436,17 +7437,382 @@ fn pimc_always_reports_strategy_fusion() {
     );
 }
 
-/// One world must not spend the budget of the whole job. Each world takes an
-/// equal share, so a small budget still reaches every world.
+/// A refinement pass with budget to spare must reach the exact answer.
+///
+/// The pass verifies one action at a time, so a pass that verifies every action
+/// holds the complete refined matrix. Its answer is then the answer of a plain
+/// solve at the refined depth. This is the property that makes the pass a
+/// budgeted approximation of an exact search rather than a separate heuristic.
 #[test]
-fn pimc_splits_the_simulation_budget_between_the_worlds() {
+fn a_complete_refinement_equals_the_exact_answer() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    let exact = solve(
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            ..base_config()
+        },
+    )
+    .expect("the position is solvable");
+
+    let (refined, report) = crate::solver::refine_seeded_cancellable(
+        7,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            ..base_config()
+        },
+        1,
+        None,
+    )
+    .expect("the position is solvable");
+
+    assert_eq!(
+        report.verified, report.total,
+        "an unbounded pass must verify every action"
+    );
+    assert!(
+        (refined.value - exact.value).abs() < 1e-6,
+        "refined {} against exact {}",
+        refined.value,
+        exact.value
+    );
+    assert_valid_strategies(&refined);
+    assert!(
+        !refined
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, SolveWarning::ActionsUnverified { .. })),
+        "a complete pass must not report unverified actions: {:?}",
+        refined.warnings
+    );
+    assert!(
+        crate::solver::warnings_are_complete(&refined.warnings),
+        "{:?}",
+        refined.warnings
+    );
+}
+
+/// A budget that stops the pass early must say which actions it never verified.
+///
+/// The answer is then an equilibrium of the actions that the pass reached, and a
+/// caller that read it as exact would trust a number that no deep search
+/// produced.
+#[test]
+fn a_stopped_refinement_names_the_actions_it_did_not_verify() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    // Enough for the base pass and the first support cells, and no more.
+    let flag = CancelFlag::with_simulation_turn_budget(40);
+    let (refined, report) = crate::solver::refine_seeded_cancellable(
+        7,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            ..base_config()
+        },
+        1,
+        Some(&flag),
+    )
+    .expect("the position is solvable");
+
+    assert!(
+        report.verified[0] < report.total[0] || report.verified[1] < report.total[1],
+        "the fixture must leave an action unverified: {:?} of {:?}",
+        report.verified,
+        report.total
+    );
+    assert!(
+        refined
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, SolveWarning::ActionsUnverified { .. })),
+        "{:?}",
+        refined.warnings
+    );
+    assert!(
+        !crate::solver::warnings_are_complete(&refined.warnings),
+        "an unverified action leaves the answer incomplete: {:?}",
+        refined.warnings
+    );
+    assert_valid_strategies(&refined);
+}
+
+/// A budget that dies inside a cell fill must not publish that fill.
+///
+/// A stopped cell takes a static score. A matrix of static scores often ties
+/// everywhere, and the matrix solver then returns a uniform strategy over every
+/// action of the restricted game. That answer looks like an equilibrium and no
+/// search produced it, so the pass keeps its last complete round instead.
+///
+/// A live server showed the defect: a doubles position returned five actions at
+/// exactly 0.2 each.
+#[test]
+fn a_refinement_never_publishes_a_partly_scored_round() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let config = SolveConfig {
+        depth: 2,
+        ..base_config()
+    };
+
+    let complete = crate::solver::refine_seeded_cancellable(
+        7, &state, pokemon_dex, move_dex, &config, 1, None,
+    )
+    .expect("the position is solvable")
+    .0;
+
+    // Sweep budgets across the whole run, so at least one lands inside a fill.
+    let full = complete.stats.turns_simulated.max(4);
+    for budget in (1..=full).step_by((full as usize / 12).max(1)) {
+        let flag = CancelFlag::with_simulation_turn_budget(budget);
+        let (result, _) = crate::solver::refine_seeded_cancellable(
+            7,
+            &state,
+            pokemon_dex,
+            move_dex,
+            &config,
+            1,
+            Some(&flag),
+        )
+        .expect("the position is solvable");
+
+        assert_valid_strategies(&result);
+        // A budget too small for one double-oracle round leaves the uniform
+        // strategy that the run started from. `NoCompletedRound` is the existing
+        // label for that, and the answer is honest about it.
+        if result
+            .warnings
+            .contains(&SolveWarning::NoCompletedRound)
+        {
+            continue;
+        }
+        let played: Vec<f64> = result
+            .p1_strategy
+            .iter()
+            .map(|action| action.probability)
+            .collect();
+        // A uniform spread over three or more actions is the signature of a
+        // matrix that tied everywhere, which a static score produces.
+        if played.len() >= 3 {
+            let uniform = 1.0 / played.len() as f64;
+            let all_uniform = played
+                .iter()
+                .all(|probability| (probability - uniform).abs() < 1e-9);
+            assert!(
+                !all_uniform,
+                "budget {budget} published a uniform strategy over {} actions",
+                played.len()
+            );
+        }
+    }
+}
+
+/// A base depth equal to the refined depth has nothing to raise.
+#[test]
+fn a_refinement_to_its_own_depth_is_the_base_answer() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let config = SolveConfig {
+        depth: 1,
+        ..base_config()
+    };
+
+    let exact = solve(&state, pokemon_dex, move_dex, &config).expect("the position is solvable");
+    let (refined, report) =
+        crate::solver::refine_seeded_cancellable(7, &state, pokemon_dex, move_dex, &config, 1, None)
+            .expect("the position is solvable");
+
+    assert_eq!(report.rounds, 0, "no round can raise a cell here");
+    assert!(
+        (refined.value - exact.value).abs() < 1e-9,
+        "refined {} against exact {}",
+        refined.value,
+        exact.value
+    );
+    assert_eq!(refined.depth_reached, 1);
+}
+
+/// The pass must publish a strategy for each restricted game it solves.
+///
+/// A caller shows the newest answer while the pass runs, so a pass that reported
+/// one answer at the end would leave the panel empty for its whole run.
+#[test]
+fn a_refinement_publishes_every_round() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let hook = |round: crate::solver::RootRound| {
+        seen.borrow_mut().push(round.value);
+    };
+
+    let (_, report) = crate::solver::refine_seeded_progress_cancellable(
+        7,
+        &state,
+        pokemon_dex,
+        move_dex,
+        &SolveConfig {
+            depth: 2,
+            ..base_config()
+        },
+        1,
+        Some(&hook),
+        None,
+    )
+    .expect("the position is solvable");
+
+    assert_eq!(
+        seen.borrow().len(),
+        report.rounds,
+        "one publication for each round"
+    );
+    assert!(report.rounds > 0, "the pass must solve at least one round");
+    for value in seen.borrow().iter() {
+        assert!(
+            (0.0..=1.0).contains(value),
+            "a published value must be a probability, got {value}"
+        );
+    }
+}
+
+/// The policy order changes the work, never the answer.
+///
+/// `SolveConfig::policy_order` orders both best-response checks and opens the
+/// restricted game. Double oracle stops on a best response over the complete
+/// action set either way, so both runs must return one value and one support.
+///
+/// This is the guard that lets the search take a free speed-up. A run that moves
+/// a value has a bug in the order or in the seed, not a tuning problem.
+#[test]
+fn the_policy_order_keeps_the_value_and_the_support() {
+    let (pokemon_dex, move_dex) = dexes();
+    let state = contested_position();
+
+    for depth in [1u8, 2u8] {
+        let solve_with = |policy_order| {
+            solve(
+                &state,
+                pokemon_dex,
+                move_dex,
+                &SolveConfig {
+                    depth,
+                    policy_order,
+                    ..base_config()
+                },
+            )
+            .expect("the position is solvable")
+        };
+        let ordered = solve_with(true);
+        let plain = solve_with(false);
+
+        assert!(
+            (ordered.value - plain.value).abs() < 1e-6,
+            "depth {depth}: ordered {} against plain {}",
+            ordered.value,
+            plain.value
+        );
+        assert_valid_strategies(&ordered);
+
+        let support = |result: &SolveResult, player| {
+            let strategy = match player {
+                Player::P1 => &result.p1_strategy,
+                Player::P2 => &result.p2_strategy,
+            };
+            let mut names: Vec<String> = strategy
+                .iter()
+                .filter(|action| action.probability > 1e-9)
+                .map(|action| format!("{:?}", action.commands))
+                .collect();
+            names.sort();
+            names
+        };
+        for player in [Player::P1, Player::P2] {
+            assert_eq!(
+                support(&ordered, player),
+                support(&plain, player),
+                "depth {depth}, {player:?}: the support moved"
+            );
+        }
+    }
+}
+
+/// A budget that fits two whole worlds must produce two whole worlds.
+///
+/// An even split gives each of `worlds` worlds one share, and every share is
+/// then too small to finish. The answer is a mixture of positions that were
+/// scored statically rather than searched, which says nothing. Two searched
+/// worlds say more than four unsearched ones.
+#[test]
+fn pimc_finishes_whole_worlds_rather_than_starving_every_world() {
     let (pokemon_dex, move_dex) = dexes();
     let worlds = 4;
-    let budget = 8;
     let world = || pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
 
-    // One world of this position costs more than the whole budget, so an unsplit
-    // budget would leave the later worlds unsearched.
+    let single = pimc::search(
+        7,
+        &belief_of_worlds(vec![world()]),
+        pokemon_dex,
+        move_dex,
+        &pimc_config(1),
+    )
+    .expect("the position is playable");
+    let cost = single.stats.turns_simulated;
+
+    // Enough for two whole worlds and no more. An even split would give each of
+    // the four worlds half of what one world needs.
+    let budget = cost * 2;
+    let even_share = budget / worlds as u64;
+    assert!(
+        even_share < cost,
+        "the fixture needs an even share below the cost of one world;          one world cost {cost} and an even share is {even_share}"
+    );
+
+    let belief = belief_of_worlds((0..worlds).map(|_| world()).collect());
+    let flag = CancelFlag::with_simulation_turn_budget(budget);
+    let result = pimc::search_progress_cancellable(
+        7,
+        &belief,
+        pokemon_dex,
+        move_dex,
+        &pimc_config(worlds),
+        None,
+        Some(&flag),
+    )
+    .expect("the position is playable");
+
+    assert!(
+        result.worlds_solved >= 2,
+        "a budget of {budget} fits two worlds of {cost} turns, but only {} finished",
+        result.worlds_solved
+    );
+    assert!(
+        flag.simulation_turns() <= budget,
+        "the job simulated {} turns of a {budget}-turn budget",
+        flag.simulation_turns()
+    );
+}
+
+/// The job budget bounds the whole run, whatever a world asks for.
+///
+/// A world takes a share of the job budget, and its flag claims from the job
+/// flag above it. A budget below the cost of one world therefore stops the first
+/// world, and the answer names the job budget rather than the share.
+#[test]
+fn pimc_never_spends_more_than_the_job_budget() {
+    let (pokemon_dex, move_dex) = dexes();
+    let worlds = 4;
+    let budget = 4;
+    let world = || pimc_world(&[PokemonMove::BodySlam, PokemonMove::Crunch]);
+
     let single = pimc::search(
         7,
         &belief_of_worlds(vec![world()]),
@@ -7474,10 +7840,6 @@ fn pimc_splits_the_simulation_budget_between_the_worlds() {
     )
     .expect("the position is playable");
 
-    assert_eq!(
-        result.worlds_solved, worlds,
-        "every world must get its own share of the budget"
-    );
     assert!(
         flag.simulation_turns() <= budget,
         "the job simulated {} turns of a {budget}-turn budget",

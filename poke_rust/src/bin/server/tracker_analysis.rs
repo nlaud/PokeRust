@@ -777,6 +777,20 @@ pub(crate) fn one_search(
             .map_err(engine_error)?;
             Ok(exact_rung(result))
         }
+        BotSearchConfig::Refine { solve, base_depth } => {
+            let (result, _) = solver::refine_seeded_progress_cancellable(
+                inputs.seed,
+                state,
+                pokemon_dex,
+                move_dex,
+                &solve,
+                base_depth,
+                progress,
+                cancel,
+            )
+            .map_err(engine_error)?;
+            Ok(exact_rung(result))
+        }
         BotSearchConfig::Mcts(config) => {
             let result = solver::mcts::search_progress_cancellable(
                 inputs.seed,
@@ -1000,6 +1014,13 @@ pub(crate) fn preview_battle_config(search: BotSearchConfig) -> SolveConfig {
         BotSearchConfig::Exact(config) => SolveConfig {
             deadline: None,
             ..config
+        },
+        // The preview matrix is a bring-and-lead game with no support to raise,
+        // so the preview rung takes the complete search of a refined profile.
+        BotSearchConfig::Refine { solve, .. } => SolveConfig {
+            deadline: None,
+            iterative_deepening: true,
+            ..solve
         },
         BotSearchConfig::Mcts(config) => sampled(config),
         BotSearchConfig::Ismcts(config) => sampled(config.search),
@@ -1300,6 +1321,13 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::Cancelled => {
             "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
+        solver::SolveWarning::ActionsUnverified {
+            player,
+            verified,
+            total,
+        } => format!(
+            "{player:?} verified {verified} of {total} actions at the refined depth.              The rest were ranked at the base depth."
+        ),
         solver::SolveWarning::StrategyFusion { worlds } => format!(
             "The search solved {worlds} world(s) separately and averaged the strategies. Each \
              world played as if the hidden data were known (strategy fusion), so the answer \

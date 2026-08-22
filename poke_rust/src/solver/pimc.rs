@@ -90,6 +90,16 @@ pub struct PimcConfig {
     /// its share then returns its last complete depth rather than a statically
     /// scored pass.
     pub solve: SolveConfig,
+    /// Solves each world by refinement from this base depth.
+    ///
+    /// `None` gives each world a complete search to `solve.depth`.
+    ///
+    /// A doubles world cannot finish a depth-2 search in the share of a job
+    /// budget, so it returns its depth-1 pass. Refinement spends the same share
+    /// on the cells that decide the answer and reaches depth 2 on those.
+    /// `super::refine_seeded_cancellable` holds the rule and the defect that it
+    /// reports.
+    pub refine_base_depth: Option<u8>,
     /// Worlds that [`search_belief`] draws from a belief.
     pub particles: usize,
     /// Resample the belief when the effective sample size falls below this share
@@ -107,6 +117,7 @@ impl Default for PimcConfig {
                 iterative_deepening: true,
                 ..SolveConfig::default()
             },
+            refine_base_depth: None,
             particles: 8,
             resample_threshold: 0.5,
         }
@@ -299,7 +310,7 @@ pub fn search_progress_cancellable(
     let mut worlds = belief.clone();
     worlds.resample_if_degenerate(config.resample_threshold);
 
-    let quota = world_quota(cancel, worlds.len());
+    let mut quota = first_world_quota(cancel, worlds.len());
     let world_config = SolveConfig {
         // The mixture needs the whole strategy of each world, so no world takes
         // the shortcut of an early stop at the root.
@@ -329,15 +340,36 @@ pub fn search_progress_cancellable(
         }
 
         let share = quota.map(|budget| cancel.expect("a quota needs a flag").child_with_budget(budget));
-        let result = solve_seeded_cancellable(
-            seed.wrapping_add(index as u64),
-            &particle.state,
-            pokemon_dex,
-            move_dex,
-            &world_config,
-            share.as_ref().or(cancel),
-        )?;
+        let world_seed = seed.wrapping_add(index as u64);
+        let world_cancel = share.as_ref().or(cancel);
+        let result = match config.refine_base_depth {
+            Some(base_depth) => {
+                super::refine_seeded_cancellable(
+                    world_seed,
+                    &particle.state,
+                    pokemon_dex,
+                    move_dex,
+                    &world_config,
+                    base_depth,
+                    world_cancel,
+                )?
+                .0
+            }
+            None => solve_seeded_cancellable(
+                world_seed,
+                &particle.state,
+                pokemon_dex,
+                move_dex,
+                &world_config,
+                world_cancel,
+            )?,
+        };
         quota_hit |= share.is_some_and(|share| share.simulation_budget_hit());
+        // The first world measures what a world of this belief costs. Size the
+        // rest from that rather than from an even split.
+        if index == 0 {
+            quota = later_world_quota(cancel, worlds.len(), result.stats.turns_simulated);
+        }
 
         mix[0].add(&result.p1_strategy, particle.weight);
         mix[1].add(&result.p2_strategy, particle.weight);
@@ -442,13 +474,45 @@ fn check_particles(belief: &ParticleBelief) -> Result<(), PimcError> {
     Ok(())
 }
 
-/// The share of the job budget that one world may spend.
+/// The worlds that the job budget must always be able to finish.
+///
+/// An even split gives every world the same share. That share starves every
+/// world at once when one solve costs more than it, and the answer is then a
+/// mixture of positions that were scored statically rather than searched. Two
+/// searched worlds say more than thirty-two unsearched ones, so the first world
+/// may take this fraction of the job budget.
+const GUARANTEED_WORLDS: u64 = 2;
+
+/// The share of the job budget that the first world may spend.
 ///
 /// `None` means that the caller set no budget, so each world reads the flag of
 /// the job itself.
-fn world_quota(cancel: Option<&CancelFlag>, worlds: usize) -> Option<u64> {
+///
+/// The first world has no measurement to size itself from, so it takes the
+/// larger of the even share and the [`GUARANTEED_WORLDS`] share.
+fn first_world_quota(cancel: Option<&CancelFlag>, worlds: usize) -> Option<u64> {
     let budget = cancel.and_then(CancelFlag::simulation_turn_budget)?;
-    Some((budget / worlds.max(1) as u64).max(1))
+    let even = budget / worlds.max(1) as u64;
+    Some(even.max(budget / GUARANTEED_WORLDS).max(1))
+}
+
+/// The share of the job budget that a later world may spend.
+///
+/// `measured` is what the first world cost. A world of the same belief solves a
+/// position of the same shape, so that cost predicts the rest far better than an
+/// even split does. The margin covers the variation between two draws.
+///
+/// The job budget still bounds the run. A quota above what the job has left
+/// simply lets the parent flag stop the world, and the loop then reports the
+/// worlds that finished.
+fn later_world_quota(
+    cancel: Option<&CancelFlag>,
+    worlds: usize,
+    measured: u64,
+) -> Option<u64> {
+    let budget = cancel.and_then(CancelFlag::simulation_turn_budget)?;
+    let even = budget / worlds.max(1) as u64;
+    Some(even.max(measured.saturating_add(measured / 4)).max(1))
 }
 
 /// Adds the cost of one world to the running total.

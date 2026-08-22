@@ -1186,7 +1186,10 @@ fn measure_solver_cell(
 /// Resolve one teamsheet pairing's team preview into a real mid-turn-one battle
 /// position — the same construction [`run_turn_speed`] uses.
 #[allow(clippy::too_many_arguments)]
-fn battle_position(
+/// Builds a real mid-turn-one battle position from two teamsheets.
+///
+/// `benches/depth2_cost.rs` measures the same positions that `run_solver` does.
+pub fn battle_position(
     paths: &[PathBuf],
     i: usize,
     j: usize,

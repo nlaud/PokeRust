@@ -146,8 +146,8 @@ use crate::state::dex_data::{MoveData, PokemonData};
 
 use super::actions::{self, JointActions, Phase};
 use super::chance::ChanceMode;
-use super::eval::EvalContext;
-use super::matrix::{self, CellJob, EPS, MatrixSolution};
+use super::eval::{self, EvalContext};
+use super::matrix::{self, CellJob, EPS, MatrixSolution, OracleOrder};
 use super::pool;
 use super::{
     CancelFlag, JointActionProb, SolveConfig, SolveError, SolveResult, SolveStats, SolveWarning,
@@ -164,6 +164,28 @@ const WIN: f64 = 1.0;
 /// simultaneous game and its two serializations — so their values cannot be
 /// confused for one another in the shared cache keyspace.
 const SALT_SIMULTANEOUS: u64 = 0x243F_6A88_85A3_08D3;
+
+/// Candidate actions for each action that the policy seeds.
+///
+/// The seed must stay small next to the action set. A restricted game of `s`
+/// actions costs `s * s` cells before any best-response check runs, so a seed
+/// that reaches a large part of a small action set rebuilds the whole matrix and
+/// gives up what double oracle exists to save.
+///
+/// One seed action for each 64 candidates keeps that cost negligible. A singles
+/// position offers 10 to 18 actions and therefore seeds one action, which is the
+/// same restricted game an unseeded run opens. A doubles position offers 290 to
+/// 722 and seeds 4 to 8, which is where discovering the support one action at a
+/// time is the dominant cost.
+const ACTIONS_PER_SEED: usize = 64;
+
+/// The most actions that the policy opens a restricted game with.
+const MAX_POLICY_SEED_ACTIONS: usize = 8;
+
+/// How many of the strongest actions open the restricted game of one node.
+fn policy_seed_actions(candidates: usize) -> usize {
+    (candidates / ACTIONS_PER_SEED).clamp(1, MAX_POLICY_SEED_ACTIONS)
+}
 
 /// Entry point behind [`super::solve`].
 ///
@@ -425,12 +447,30 @@ pub(super) fn stop_warnings(
     warnings
 }
 
-/// Cells that one worker can prefetch before a best-response check.
+/// Cells that one worker can prefetch before a best-response check of a leaf
+/// matrix, where one cell costs one turn simulation.
 ///
-/// A larger value fills more of the matrix, and it gives each worker more work.
-/// Two cells for each worker keep the pool busy through one check without a
-/// large amount of speculative work.
-const PREFETCH_JOBS_PER_WORKER: usize = 2;
+/// A best-response check reads its cells one at a time, so that its bound test
+/// can abandon an action. Only the prefetch holds work for the pool, so a small
+/// prefetch leaves the pool idle through most of a check. A doubles depth-1
+/// solve returned 10.5k turns for each second on 22 workers against 9.2k turns
+/// on one worker before this value rose. It now returns 42.8k.
+///
+/// The waste stays cheap here, because a prefetched cell that the check
+/// abandons cost one turn simulation.
+const PREFETCH_JOBS_PER_WORKER: usize = 32;
+
+/// Cells that one worker can prefetch before a best-response check of an
+/// interior matrix, where one cell costs a whole subtree.
+///
+/// One cell of a depth-2 doubles matrix costs a complete depth-1 solve, which is
+/// thousands of turn simulations. Speculation is then thousands of times more
+/// expensive than it is at a leaf. A rate of 32 lowered the depth-2 turn rate
+/// from 18.2k for each second to 12.7k, because the check abandoned most of what
+/// the prefetch built.
+///
+/// Two subtrees for each worker keep the pool busy without that waste.
+const PREFETCH_SUBTREES_PER_WORKER: usize = 2;
 
 /// Adds one worker's counters to a statistics snapshot.
 fn add_counters(stats: &mut SolveStats, other: &SolveStats) {
@@ -589,6 +629,21 @@ struct SearchOracle<'ctx, 'cfg, 'pos> {
     report: Option<RootReport<'pos>>,
 }
 
+impl SearchOracle<'_, '_, '_> {
+    /// Jobs that one worker takes from a prefetch batch.
+    ///
+    /// A cell of a leaf matrix costs one turn simulation, and a cell of an
+    /// interior matrix costs a whole subtree. Speculation therefore has a very
+    /// different price at the two depths, and each takes its own rate.
+    fn prefetch_rate(&self) -> usize {
+        if self.depth <= 1 {
+            PREFETCH_JOBS_PER_WORKER
+        } else {
+            PREFETCH_SUBTREES_PER_WORKER
+        }
+    }
+}
+
 impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
     fn cell(&mut self, row: usize, col: usize) -> f64 {
         self.ctx.cell_value(
@@ -624,12 +679,13 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
 
         // The calling thread runs the batch as worker 0, so it needs no permit.
         // A worker also costs a transposition table, so the request asks for one
-        // worker for each `PREFETCH_JOBS_PER_WORKER` jobs. A small batch then
-        // starts no thread that it cannot keep busy.
-        let wanted = self
-            .helpers
-            .len()
-            .min(jobs.len() / PREFETCH_JOBS_PER_WORKER);
+        // worker for each `prefetch_rate` jobs. A small batch then starts no
+        // thread that it cannot keep busy.
+        //
+        // The rate must match the rate of `batch_limit`. A request that divided
+        // a deep batch by the leaf rate asked for one worker and left the pool
+        // idle through a depth-2 solve.
+        let wanted = self.helpers.len().min(jobs.len() / self.prefetch_rate());
         let permits = pool::shared().acquire(wanted);
 
         let values = {
@@ -665,7 +721,7 @@ impl matrix::CellOracle for SearchOracle<'_, '_, '_> {
         if self.helpers.is_empty() {
             return 1;
         }
-        (self.helpers.len() + 1) * PREFETCH_JOBS_PER_WORKER
+        (self.helpers.len() + 1) * self.prefetch_rate()
     }
 
     fn stop_requested(&mut self) -> bool {
@@ -1018,9 +1074,12 @@ impl<'a> SearchContext<'a> {
             beta = beta.min(upper);
         }
 
-        // No seed below the root: the seed indexes the root action set, and it
-        // means nothing at any other position. No report below the root either:
-        // a round of a child position answers a different question.
+        // No `RootSeed` below the root: that seed indexes the root action set,
+        // and it means nothing at any other position. A child position opens its
+        // restricted game from its own policy ranking instead, which
+        // [`SearchContext::double_oracle`] builds.
+        // No report below the root: a round of a child position answers a
+        // different question.
         // No worker below the root: one solve has one level of parallelism.
         if !self.try_record_node() {
             return self.score(battle);
@@ -1157,14 +1216,57 @@ impl<'a> SearchContext<'a> {
         solution
     }
 
+    /// Rank each player's actions by the trained policy, strongest first.
+    ///
+    /// Returns `None` for a side when [`SolveConfig::policy_order`] is off, and
+    /// then the run keeps index order.
+    ///
+    /// The ranking is a pure function of the position and the action list, as
+    /// [`RootSeed`] requires of anything that names an action by index. Equal
+    /// scores keep index order, so the result never depends on sort stability.
+    fn policy_ranking(
+        &self,
+        state: &MatchState,
+        p1: &JointActions,
+        p2: &JointActions,
+    ) -> (Option<Vec<usize>>, Option<Vec<usize>>) {
+        if !self.cfg.policy_order {
+            return (None, None);
+        }
+        let Some(battle) = as_battle(state) else {
+            return (None, None);
+        };
+        let ctx = EvalContext::new(self.pokemon_dex, self.move_dex);
+        let weights = eval::fitted_policy_weights();
+        let rank = |player, actions: &[Vec<BattleCommand>]| {
+            let scores: Vec<f64> = actions
+                .iter()
+                .map(|action| eval::policy_score(battle, player, action, &ctx, weights))
+                .collect();
+            let mut order: Vec<usize> = (0..actions.len()).collect();
+            order.sort_by(|&left, &right| {
+                scores[right]
+                    .total_cmp(&scores[left])
+                    .then_with(|| left.cmp(&right))
+            });
+            order
+        };
+        (
+            Some(rank(Player::P1, &p1.actions)),
+            Some(rank(Player::P2, &p2.actions)),
+        )
+    }
+
     /// Algorithm 3: solve the matrix without building all of it.
     ///
     /// [`matrix::double_oracle`] holds the algorithm. This method supplies the
     /// cell oracle and folds the returned counters into the search statistics.
     ///
     /// `seed`, when present, replaces the one-by-one start with the previous
-    /// deepening pass's root support. See [`RootSeed`] for why that cannot move
-    /// the value.
+    /// deepening pass's root support. Only the root call supplies it. Every
+    /// other node opens its restricted game from its own policy ranking, and
+    /// that ranking also orders both best-response checks. See [`RootSeed`] for
+    /// why neither can move the value.
     #[allow(clippy::too_many_arguments)]
     fn double_oracle(
         &mut self,
@@ -1185,9 +1287,34 @@ impl<'a> SearchContext<'a> {
             low: LOSS,
             high: WIN,
         };
+        // One ranking serves both jobs. It orders each best-response check, and
+        // its strongest few actions open the restricted game. Neither use can
+        // move the value: the check still reads every action, and double oracle
+        // still stops on a best response over the complete set. See
+        // [`RootSeed`] for the same argument about the seed.
+        let (row_order, col_order) = self.policy_ranking(state, p1, p2);
+        let order = OracleOrder {
+            rows: row_order.as_deref(),
+            cols: col_order.as_deref(),
+        };
+        // The root keeps the support of the previous deepening pass, which is a
+        // measured answer rather than a prediction. Every other node has no
+        // previous pass, so the policy prefix opens it.
+        let seed_rows: Option<Vec<usize>> = match seed {
+            Some(seed) => Some(seed.rows.clone()),
+            None => row_order
+                .as_ref()
+                .map(|order| order[..policy_seed_actions(order.len()).min(order.len())].to_vec()),
+        };
+        let seed_cols: Option<Vec<usize>> = match seed {
+            Some(seed) => Some(seed.cols.clone()),
+            None => col_order
+                .as_ref()
+                .map(|order| order[..policy_seed_actions(order.len()).min(order.len())].to_vec()),
+        };
         let seed = matrix::OracleSeed {
-            rows: seed.map(|seed| seed.rows.as_slice()),
-            cols: seed.map(|seed| seed.cols.as_slice()),
+            rows: seed_rows.as_deref(),
+            cols: seed_cols.as_deref(),
         };
         // The oracle owns the context for the whole run, so one type serves the
         // cell calls and the round calls. Two closures cannot, because both
@@ -1203,6 +1330,7 @@ impl<'a> SearchContext<'a> {
             p1.actions.len(),
             p2.actions.len(),
             seed,
+            order,
             limits,
             SearchOracle {
                 seed: self.worker_seed(),
@@ -1603,6 +1731,473 @@ impl<'a> SearchContext<'a> {
             self.cfg.replacement_depth,
         )
     }
+}
+
+/// How a refinement pass ends, and what it verified.
+pub(super) struct RefineReport {
+    /// Actions that the pass verified at the refined depth, for each player.
+    pub verified: [usize; 2],
+    /// Actions that the position offers, for each player.
+    pub total: [usize; 2],
+    /// Restricted games that the pass solved.
+    pub rounds: usize,
+}
+
+/// Solves one position at a base depth, then spends the rest of the budget
+/// raising the cells that decide the answer to a deeper one.
+///
+/// A doubles position offers about 470 joint actions for each player. A
+/// best-response check at the refined depth must read every one of them, and one
+/// refined cell costs a whole base solve. One check is therefore millions of turn
+/// simulations, and a complete depth-2 equilibrium is minutes of work.
+///
+/// The equilibrium support is small. A measured doubles position used 5 actions
+/// of 290 and 5 of 370. The cells that decide the answer are a few dozen, not a
+/// few hundred thousand.
+///
+/// This pass does three things in order.
+///
+/// 1. It solves the position exactly at `base_depth`.
+/// 2. It raises the cells of the base support to `config.depth`.
+/// 3. It admits one more action at a time while the budget lasts.
+///
+/// The candidate order comes from a best-response check at the base depth. A
+/// base cell costs one turn simulation, so that check ranks every action for
+/// about the price of one refined cell. The order decides which action the pass
+/// reads next. It never removes an action, and it never decides the answer: the
+/// admitted action enters the restricted game with refined cells, and the matrix
+/// solver gives it a probability or does not.
+///
+/// The pass converges to the exact equilibrium of the refined game as the budget
+/// grows. Below that, `SolveWarning::ActionsUnverified` reports how many actions
+/// it read at the base depth alone.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn refine_run(
+    state: &MatchState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: &SolveConfig,
+    base_depth: u8,
+    progress: Option<super::RootProgress<'_>>,
+    cancel: Option<&CancelFlag>,
+) -> Result<(SolveResult, RefineReport), SolveError> {
+    match state {
+        MatchState::TeamPreviewState(_) => return Err(SolveError::TeamPreviewUnsupported),
+        MatchState::GameOverState { winner, .. } => {
+            return Err(SolveError::GameAlreadyOver { winner: *winner });
+        }
+        MatchState::BattleState(_) => {}
+    }
+
+    let started = Instant::now();
+    let refined_depth = config.depth.max(1);
+    let base_depth = base_depth.max(1).min(refined_depth);
+
+    // The two passes read a different depth, and a context borrows one
+    // configuration, so each pass needs its own context. Their transposition
+    // tables stay separate at no cost: a table key already holds the depth, so
+    // the two passes could never share an entry.
+    let base_cfg = SolveConfig {
+        depth: base_depth,
+        iterative_deepening: false,
+        ..*config
+    };
+
+    let mut base_ctx = SearchContext::new(pokemon_dex, move_dex, &base_cfg, started, cancel);
+    let mut base_helpers: Vec<Option<SearchContext<'_>>> =
+        (1..worker_count(&base_cfg)).map(|_| None).collect();
+    let (base_root_depth, base_chain) =
+        super::root_descent(actions::phase_of(state), base_depth, base_cfg.replacement_depth);
+    base_ctx.record_node();
+    // The base pass is a root call, and `SearchContext::double_oracle` records
+    // its no-round fallback only for a root call. It recognises one by the
+    // presence of a report, so this pass carries a report whose hook does
+    // nothing. Without it a base pass that completed no round would return the
+    // uniform strategy it started from and never report `NoCompletedRound`.
+    let silent = |_: super::RootRound| {};
+    let base = base_ctx.solve_position(
+        state,
+        base_root_depth,
+        base_chain,
+        LOSS,
+        WIN,
+        None,
+        Some(RootReport {
+            hook: &silent,
+            depth: base_depth,
+        }),
+        &mut base_helpers,
+    );
+    for helper in base_helpers.iter().flatten() {
+        base_ctx.add_counters(helper);
+    }
+    drop(base_helpers);
+
+    let totals = [base.p1.actions.len(), base.p2.actions.len()];
+    let base_stopped = base_ctx.stopped();
+    let mut warnings = stop_warnings(&base_ctx, &base_cfg, base_stopped, base_depth, base_depth);
+    let mut stats = base_ctx.stats.clone();
+    drop(base_ctx);
+
+    // A base pass that stopped early has no support worth refining, and a
+    // refined depth equal to the base depth has nothing to raise.
+    if base_stopped || base_depth == refined_depth {
+        stats.elapsed = started.elapsed();
+        let value = base.value.clamp(LOSS, WIN);
+        let report = RefineReport {
+            verified: totals,
+            total: totals,
+            rounds: 0,
+        };
+        return Ok((
+            SolveResult {
+                value,
+                p1_win_odds: value,
+                p2_win_odds: WIN - value,
+                p1_strategy: strategy_of(&base.p1, &base.row_strategy, EPS),
+                p2_strategy: strategy_of(&base.p2, &base.col_strategy, EPS),
+                depth_reached: base_depth,
+                stats,
+                warnings,
+            },
+            report,
+        ));
+    }
+
+    // ── The refined pass ────────────────────────────────────────────────────
+    let mut ctx = SearchContext::new(pokemon_dex, move_dex, config, started, cancel);
+    let mut helpers: Vec<Option<SearchContext<'_>>> =
+        (1..worker_count(config)).map(|_| None).collect();
+    let (refined_root_depth, refined_chain) = super::root_descent(
+        actions::phase_of(state),
+        refined_depth,
+        config.replacement_depth,
+    );
+
+    // The restricted game starts on the support of the base equilibrium.
+    let mut rows: Vec<usize> = played_or_first(&base.row_strategy);
+    let mut cols: Vec<usize> = played_or_first(&base.col_strategy);
+    let mut verified: [Vec<bool>; 2] = [vec![false; totals[0]], vec![false; totals[1]]];
+    for &row in &rows {
+        verified[0][row] = true;
+    }
+    for &col in &cols {
+        verified[1][col] = true;
+    }
+
+    let mut refined: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut base_cells: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut solution = matrix::MatrixSolution {
+        value: base.value,
+        row_strategy: base.row_strategy.clone(),
+        col_strategy: base.col_strategy.clone(),
+        used_lp: false,
+    };
+    let mut rounds = 0usize;
+    // Alternate, so neither player runs ahead of the other on a small budget.
+    let mut turn_of_p1 = true;
+
+    loop {
+        let missing: Vec<(usize, usize)> = rows
+            .iter()
+            .flat_map(|&row| cols.iter().map(move |&col| (row, col)))
+            .filter(|pair| !refined.contains_key(pair))
+            .collect();
+
+        if !missing.is_empty() {
+            let stopped_before = ctx.stopped();
+            let values = refined_cells(
+                &mut ctx,
+                &mut helpers,
+                pokemon_dex,
+                move_dex,
+                config,
+                cancel,
+                started,
+                state,
+                &base,
+                refined_root_depth,
+                refined_chain,
+                rounds,
+                &missing,
+            );
+            // A limit that fell inside this fill left some of these cells as
+            // static scores rather than searched values. A matrix of static
+            // scores often ties everywhere, and the solver then returns a
+            // uniform strategy that no search produced. Keep the last complete
+            // answer instead, as a deepening pass keeps its last complete depth.
+            if !stopped_before && ctx.stopped() {
+                break;
+            }
+            for (pair, value) in missing.iter().zip(values) {
+                refined.insert(*pair, value);
+            }
+
+            let sub: Vec<Vec<f64>> = rows
+                .iter()
+                .map(|&row| {
+                    cols.iter()
+                        .map(|&col| refined[&(row, col)])
+                        .collect::<Vec<f64>>()
+                })
+                .collect();
+            let restricted = matrix::solve_matrix_game(&sub);
+            if restricted.used_lp {
+                ctx.stats.lps_solved += 1;
+            }
+            solution = matrix::MatrixSolution {
+                value: restricted.value,
+                row_strategy: lift_into(&restricted.row_strategy, &rows, totals[0]),
+                col_strategy: lift_into(&restricted.col_strategy, &cols, totals[1]),
+                used_lp: restricted.used_lp,
+            };
+            rounds += 1;
+
+            if let Some(hook) = progress {
+                let mut round_stats = ctx.stats.clone();
+                add_counters(&mut round_stats, &stats);
+                round_stats.elapsed = started.elapsed();
+                hook(super::RootRound {
+                    depth: refined_depth,
+                    value: solution.value,
+                    p1_strategy: strategy_of(&base.p1, &solution.row_strategy, EPS),
+                    p2_strategy: strategy_of(&base.p2, &solution.col_strategy, EPS),
+                    stats: round_stats,
+                });
+            }
+        }
+
+        if ctx.stopped() {
+            break;
+        }
+        if verified[0].iter().all(|seen| *seen) && verified[1].iter().all(|seen| *seen) {
+            break;
+        }
+
+        // Rank the unverified actions of one player at the base depth, against
+        // the current strategy of the other. A base cell is one turn simulation,
+        // so this reads hundreds of actions for about the price of one refined
+        // cell.
+        let picked = next_candidate(
+            &mut ctx,
+            state,
+            &base,
+            base_root_depth,
+            base_chain,
+            &mut base_cells,
+            &solution,
+            &verified,
+            turn_of_p1,
+        );
+        turn_of_p1 = !turn_of_p1;
+        match picked {
+            Some((player, index)) => {
+                let slot = usize::from(player == Player::P2);
+                verified[slot][index] = true;
+                if player == Player::P1 {
+                    rows.push(index);
+                } else {
+                    cols.push(index);
+                }
+            }
+            // The other player may still hold an unverified action, so keep
+            // looping until both are done or a limit stops the pass.
+            None => {
+                if verified[usize::from(turn_of_p1)].iter().all(|seen| *seen) {
+                    break;
+                }
+            }
+        }
+    }
+
+    for helper in helpers.iter().flatten() {
+        ctx.add_counters(helper);
+    }
+    let refined_stopped = ctx.stopped();
+    warnings.extend(stop_warnings(
+        &ctx,
+        config,
+        refined_stopped,
+        refined_depth,
+        refined_depth,
+    ));
+    warnings.dedup();
+    let verified_counts = [
+        verified[0].iter().filter(|seen| **seen).count(),
+        verified[1].iter().filter(|seen| **seen).count(),
+    ];
+    for (slot, player) in [Player::P1, Player::P2].into_iter().enumerate() {
+        if verified_counts[slot] < totals[slot] {
+            warnings.push(SolveWarning::ActionsUnverified {
+                player,
+                verified: verified_counts[slot],
+                total: totals[slot],
+            });
+        }
+    }
+
+    add_counters(&mut stats, &ctx.stats);
+    stats.elapsed = started.elapsed();
+    let value = solution.value.clamp(LOSS, WIN);
+    let report = RefineReport {
+        verified: verified_counts,
+        total: totals,
+        rounds,
+    };
+    Ok((
+        SolveResult {
+            value,
+            p1_win_odds: value,
+            p2_win_odds: WIN - value,
+            p1_strategy: strategy_of(&base.p1, &solution.row_strategy, EPS),
+            p2_strategy: strategy_of(&base.p2, &solution.col_strategy, EPS),
+            depth_reached: refined_depth,
+            stats,
+            warnings,
+        },
+        report,
+    ))
+}
+
+/// The actions a strategy plays, and never an empty list.
+///
+/// A restricted game needs one action for each player. A degenerate strategy can
+/// name none, and an empty side would make the matrix empty.
+fn played_or_first(strategy: &[f64]) -> Vec<usize> {
+    let support = support_of(strategy);
+    if support.is_empty() { vec![0] } else { support }
+}
+
+/// Writes a restricted strategy back onto the full action indices.
+fn lift_into(restricted: &[f64], indices: &[usize], full: usize) -> Vec<f64> {
+    let mut strategy = vec![0.0; full];
+    for (slot, &index) in indices.iter().enumerate() {
+        strategy[index] = restricted[slot];
+    }
+    strategy
+}
+
+/// Evaluates a list of cells at the refined depth, over the worker pool.
+#[allow(clippy::too_many_arguments)]
+fn refined_cells<'a>(
+    ctx: &mut SearchContext<'a>,
+    helpers: &mut [Option<SearchContext<'a>>],
+    pokemon_dex: &'a HashMap<Species, PokemonData>,
+    move_dex: &'a HashMap<PokemonMove, MoveData>,
+    config: &'a SolveConfig,
+    cancel: Option<&'a CancelFlag>,
+    started: Instant,
+    state: &MatchState,
+    base: &Position,
+    depth: u8,
+    chain: u8,
+    round: usize,
+    pairs: &[(usize, usize)],
+) -> Vec<f64> {
+    let nodes = Arc::clone(&ctx.nodes);
+    let mut oracle = SearchOracle {
+        ctx,
+        helpers,
+        seed: WorkerSeed {
+            pokemon_dex,
+            move_dex,
+            cfg: config,
+            cancel,
+            started,
+            nodes,
+        },
+        state,
+        p1: &base.p1,
+        p2: &base.p2,
+        depth,
+        chain,
+        root: hash_state(state),
+        report: None,
+    };
+    let jobs: Vec<CellJob> = pairs
+        .iter()
+        .map(|&(row, col)| CellJob { round, row, col })
+        .collect();
+    matrix::CellOracle::cells(&mut oracle, &jobs)
+}
+
+/// The next action to verify at the refined depth, and its player.
+///
+/// The rank comes from a best-response check at the base depth against the
+/// current strategy of the other player. That check reads base cells, which cost
+/// one turn simulation each.
+///
+/// Returns `None` when this player has no unverified action left.
+#[allow(clippy::too_many_arguments)]
+fn next_candidate(
+    ctx: &mut SearchContext<'_>,
+    state: &MatchState,
+    base: &Position,
+    depth: u8,
+    chain: u8,
+    base_cells: &mut HashMap<(usize, usize), f64>,
+    solution: &matrix::MatrixSolution,
+    verified: &[Vec<bool>; 2],
+    for_p1: bool,
+) -> Option<(Player, usize)> {
+    let (player, slot) = if for_p1 {
+        (Player::P1, 0usize)
+    } else {
+        (Player::P2, 1usize)
+    };
+    let against: Vec<usize> = if for_p1 {
+        played_or_first(&solution.col_strategy)
+    } else {
+        played_or_first(&solution.row_strategy)
+    };
+    let weights = if for_p1 {
+        &solution.col_strategy
+    } else {
+        &solution.row_strategy
+    };
+
+    let mut best: Option<(f64, usize)> = None;
+    for index in 0..verified[slot].len() {
+        if verified[slot][index] {
+            continue;
+        }
+        if ctx.stopped() {
+            break;
+        }
+        let mut value = 0.0;
+        for &other in &against {
+            let pair = if for_p1 {
+                (index, other)
+            } else {
+                (other, index)
+            };
+            let cell = match base_cells.get(&pair) {
+                Some(cell) => *cell,
+                None => {
+                    let cell = ctx.cell_value(
+                        state,
+                        &PlayerCommand::Battle(base.p1.actions[pair.0].clone()),
+                        &PlayerCommand::Battle(base.p2.actions[pair.1].clone()),
+                        depth,
+                        chain,
+                    );
+                    base_cells.insert(pair, cell);
+                    cell
+                }
+            };
+            value += weights[other] * cell;
+        }
+        // P1 wants the largest payoff and P2 wants the smallest.
+        let better = match best {
+            None => true,
+            Some((incumbent, _)) if for_p1 => value > incumbent,
+            Some((incumbent, _)) => value < incumbent,
+        };
+        if better {
+            best = Some((value, index));
+        }
+    }
+    best.map(|(_, index)| (player, index))
 }
 
 /// Evaluates single matrix cells of one root position.
