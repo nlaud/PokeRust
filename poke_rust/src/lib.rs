@@ -5,6 +5,7 @@ pub mod benchmarking;
 pub mod data;
 pub mod information;
 pub mod meta;
+pub mod selfplay;
 pub mod simulator;
 pub mod solver;
 pub mod state;

@@ -359,6 +359,98 @@ value.
 It holds that loss under a limit.
 Nash stays the default of every search.
 
+## Measuring the evaluator
+
+`solve` scores its own horizon with the weights that `bin/train_eval` fitted,
+and `train_eval` fits those weights from labels that `solve` produced. The
+held-out error of that fit measures agreement with the loop. It does not measure
+agreement with a game result, so it cannot accept or reject a weight change.
+
+`benches/eval_calibration` measures the second quantity. Run it from
+`poke_rust/`:
+
+```sh
+cargo bench --bench eval_calibration
+```
+
+The benchmark plays whole doubles games, scores each pre-turn position with
+`eval::heuristic`, `eval::fitted`, and `eval::fitted_mlp`, and records the
+winner. It then prints one table for each evaluator.
+
+`solver::calibration` builds those tables. It holds no input and no output, so
+`cargo test` covers every number that the report prints.
+
+`selfplay` supplies the games. `bin/train_eval` builds its corpus from the same
+module, so both read one matchup distribution. A curve that measured a different
+distribution than the fit could not accept or reject the fit.
+
+`--teamsheet-mix 1` draws every opening from the archived teamsheets, and a seed
+then repeats each matchup exactly. A lower mix draws part of the openings from
+the usage cache. `meta::generate_meta_team` reads a `HashMap` order that changes
+with the process, so those openings change with it.
+
+### How to read the report
+
+Each row is one bucket of predicted win probability, 0.1 wide. `predicted` is
+the mean prediction of the bucket, and `realized` is the share of those
+positions whose game P1 won. A calibrated evaluator keeps the two columns
+together.
+
+The game is the independent unit, not the position. Every position of one game
+carries that one game's result. A bucket that holds 400 positions from 3 games
+therefore holds 3 independent observations. The `games` column reports that
+count.
+
+The summary line holds four statistics. The mean absolute error and the Brier
+score fall as the prediction approaches the result. The log loss punishes a
+confident mistake hardest.
+
+The expected calibration error is the position-weighted mean bucket gap. It
+alone ignores how sharp the predictions are. A constant 0.5 predictor therefore
+scores near zero on a balanced set.
+
+Read the mean absolute error, the Brier score, and the log loss together with
+the expected calibration error. A weight change wins only when it lowers the
+first three without raising the last one.
+
+### The self-check
+
+Each opening plays two games, and the second game exchanges the two sides. Team
+strength therefore cancels, and the reported P1 win rate must sit near 0.500. A
+rate far from 0.500 means the driver or the engine treats one side differently.
+The tables mean nothing until you find the cause.
+
+### The play policies
+
+`--policy policy` is the default. It draws each joint action from a softmax over
+`eval::policy_scores`. It costs no turn simulation, so the whole sweep takes
+about two seconds.
+
+`--policy hand` draws from the same softmax over `eval::HAND_POLICY_WEIGHTS`.
+The crate holds that vector as a constant, so no training run moves it.
+
+`--policy random` draws one uniform legal joint action. This is the policy that
+the training corpus plays.
+
+`--policy search` runs `mcts::search` with a generative transition. It measures
+the same curve under a search. It costs one turn simulation for each iteration
+and each ply. One search returns both root strategies, so `selfplay::play_turn`
+runs it one time for a turn and not one time for each side.
+
+### Which policy a before-and-after comparison needs
+
+`--policy policy` reads `eval::fitted_policy_weights`, which is
+`weights/policy_v1.json`. `bin/train_eval` writes that same file. A training run
+therefore changes the joint actions that this policy draws. The two runs then
+play different games, and their two reports do not compare directly.
+
+`--policy hand` and `--policy random` read no weight file. Two runs of either one
+play the same games before and after a training run.
+
+Use `--policy hand --teamsheet-mix 1` to accept or reject a weight change. It
+holds the games still and it still plays a real policy. Use the default policy
+to see the curve under the current fitted play.
+
 ## Analysis jobs
 
 The server runs the solver as a background job.

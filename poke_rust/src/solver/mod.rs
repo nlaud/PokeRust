@@ -211,6 +211,7 @@
 
 pub mod actions;
 pub mod belief;
+pub mod calibration;
 pub mod chance;
 pub mod eval;
 pub mod exploit;

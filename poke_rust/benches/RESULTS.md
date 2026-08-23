@@ -1203,3 +1203,125 @@ that bench exists.
 - The doubles position binds every budget. Singles stays under 450 turn
   simulations across the whole roll sweep.
 
+
+## 2026-08-23: The evaluator against played games
+
+- Command: `cargo bench --bench eval_calibration -- --teamsheet-mix 1`
+- Games: 400, from 200 openings of two games each
+- Policy: `policy`, a softmax over `eval::policy_scores` with the fitted policy
+  weights
+- Format: Champions doubles, 2 active, 4 brought of 6, tera off, mega on
+- Wall time: 1.9 s for 5,710 resolved turns
+
+`bin/train_eval` fits `eval::fitted` from labels that `solve` produced, and
+`solve` scores its own horizon with those same weights. Its held-out error
+therefore measures agreement with that loop. This is the first measurement of
+agreement with a game result.
+
+### The self-check
+
+P1 won 200 of 400 games, a rate of 0.500. Each opening plays both sides, so team
+strength cancels and this rate belongs near 0.500. Five other seeds gave 0.467,
+0.567, 0.483, 0.500, and 0.550 over 60 games each, so the check has real spread.
+
+The position-weighted realized rate of each table is 0.529. That figure weights
+each game by its position count, so it is a different quantity from the game
+rate above. The gap here is about one standard error of a 400-game sample.
+
+The first version of the driver reported 0.877. P2 read its action draw from a
+shifted seed. Every P2 draw therefore sat under 2 to the power of -17, and P2
+always took the first action of its list. The self-check alone found this bug.
+
+### The three evaluators, 4,365 positions from 400 games
+
+| Evaluator | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|
+| `heuristic` | 0.3716 | 0.1766 | 0.5288 | 0.0581 |
+| `fitted` | 0.3334 | 0.1661 | 0.4980 | 0.0370 |
+| `fitted_mlp` | 0.3375 | 0.1714 | 0.5113 | 0.0337 |
+
+### The `fitted` curve
+
+| Bucket | Positions | Games | Predicted | Realized | Gap |
+|---|---|---|---|---|---|
+| 0.0-0.1 | 474 | 138 | 0.052 | 0.040 | 0.012 |
+| 0.1-0.2 | 377 | 164 | 0.150 | 0.143 | 0.006 |
+| 0.2-0.3 | 376 | 179 | 0.248 | 0.335 | 0.087 |
+| 0.3-0.4 | 412 | 200 | 0.350 | 0.340 | 0.010 |
+| 0.4-0.5 | 531 | 261 | 0.451 | 0.516 | 0.065 |
+| 0.5-0.6 | 541 | 268 | 0.548 | 0.590 | 0.042 |
+| 0.6-0.7 | 385 | 199 | 0.646 | 0.681 | 0.034 |
+| 0.7-0.8 | 369 | 185 | 0.753 | 0.818 | 0.065 |
+| 0.8-0.9 | 426 | 155 | 0.851 | 0.878 | 0.027 |
+| 0.9-1.0 | 474 | 133 | 0.951 | 0.928 | 0.022 |
+
+### The `heuristic` curve
+
+| Bucket | Positions | Games | Predicted | Realized | Gap |
+|---|---|---|---|---|---|
+| 0.0-0.1 | 159 | 81 | 0.069 | 0.044 | 0.025 |
+| 0.1-0.2 | 360 | 161 | 0.151 | 0.125 | 0.026 |
+| 0.2-0.3 | 494 | 211 | 0.254 | 0.182 | 0.071 |
+| 0.3-0.4 | 609 | 252 | 0.351 | 0.397 | 0.046 |
+| 0.4-0.5 | 612 | 266 | 0.450 | 0.438 | 0.012 |
+| 0.5-0.6 | 625 | 274 | 0.547 | 0.635 | 0.088 |
+| 0.6-0.7 | 502 | 232 | 0.651 | 0.749 | 0.098 |
+| 0.7-0.8 | 478 | 192 | 0.748 | 0.826 | 0.079 |
+| 0.8-0.9 | 338 | 148 | 0.847 | 0.914 | 0.067 |
+| 0.9-1.0 | 188 | 74 | 0.936 | 0.963 | 0.027 |
+
+### Run-to-run spread of the default mix
+
+Three runs of `cargo bench --bench eval_calibration`, which draws 20 percent of
+its openings from the usage cache:
+
+| Run | `heuristic` Brier | `fitted` Brier | `fitted_mlp` Brier |
+|---|---|---|---|
+| 1 | 0.1729 | 0.1614 | 0.1653 |
+| 2 | 0.1731 | 0.1637 | 0.1677 |
+| 3 | 0.1710 | 0.1598 | 0.1643 |
+
+### Takeaways
+
+- `fitted` beats `heuristic` on all four statistics. This is the first evidence
+  that the training run improved the evaluator against a game, and not only
+  against its own labels.
+- `fitted_mlp` sits between the two on MAE, Brier, and log loss. It wins the
+  expected calibration error alone. That one statistic ignores sharpness, so it
+  cannot carry a model choice by itself.
+- The `heuristic` curve is compressed. It never predicts above 0.94, and it
+  under-predicts every bucket above 0.5. It does not know how won a won position
+  is. The `fitted` curve fills both tails. 474 positions land above 0.9, against
+  188 for the hand weights.
+- The `fitted` gap column stays under 0.09 everywhere. The largest gap is the
+  0.2-0.3 bucket, where the realized rate is 0.335.
+- Run-to-run spread of a Brier score is about 0.004 under the default mix. The
+  gap between `heuristic` and `fitted` is 0.010 or more, so the ranking survives
+  the noise.
+- Two weight sets need `--policy hand --teamsheet-mix 1` to play the same games.
+  The default policy reads `weights/policy_v1.json`, and a training run rewrites
+  that file. The games would then change with the play policy and not with the
+  evaluator under test. The table below repeats the measurement under
+  `--policy hand`, and the ranking holds.
+- A whole 400-game sweep costs 2 seconds under the default policy. The
+  measurement is cheap enough to run before and after every training run.
+
+### The accept-rule command, 2,638 positions from 400 games
+
+`cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1` plays
+a softmax over `eval::HAND_POLICY_WEIGHTS`. No training run moves that constant,
+so two runs of this command play the same games.
+
+| Evaluator | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|
+| `heuristic` | 0.3918 | 0.1879 | 0.5533 | 0.0475 |
+| `fitted` | 0.3590 | 0.1760 | 0.5190 | 0.0257 |
+| `fitted_mlp` | 0.3640 | 0.1840 | 0.5386 | 0.0363 |
+
+P1 won 193 of 400 games, a rate of 0.482. `fitted` beats `heuristic` on all four
+statistics here as well, so the ranking does not come from the play policy.
+
+A third command, `--policy random --teamsheet-mix 1`, plays uniform joint
+actions. `fitted` wins the mean absolute error there and loses the Brier score
+and the log loss. Uniform play reaches positions that no policy reaches, so
+treat that run as a lower bound and not as the accept rule.

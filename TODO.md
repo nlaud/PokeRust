@@ -60,32 +60,15 @@ A true edge of 55 against 45 is smaller than that error.
 
 ## The plan
 
-Run these six items in order.
-Item 1 decides whether any later item worked.
+Run these items in order.
+`benches/eval_calibration` decides whether any of them worked.
+Read `poke_rust/src/solver/README.md`, section *Measuring the evaluator*.
 
-- [ ] 1. Measure the evaluator against played games.
-
-      Labels come from `solve` at depth 2.
-      `solve` scores its own horizon with the committed weights.
-      The fit therefore chases its own output.
-      Held-out error measures agreement with a bootstrap, not with truth.
-
-      Add a bench that plays whole games from a fixed opening set.
-      Report predicted win probability against realized outcome, in buckets.
-      That curve is the acceptance test for items 2 through 6.
-
-      Held-out error moved from 0.0957 to 0.0978 between two training runs.
-      Only the corpus changed, from generated rosters to archived teams.
-      The number cannot accept or reject a change today.
-
-      This bench is also the only way to accept or reject `SAMPLED_PRESET_DEPTH`.
-      It is 2 today. A 30-second answer holds about 36,800 iterations at depth 1,
-      18,200 at depth 2, and 12,100 at depth 3. A doubles root offers about 290
-      actions, so depth trades lookahead against the visits for each action. No
-      measurement says where that trade turns. Run this item before you move that
-      constant again.
-
-      Done when: a calibration curve exists, and one command produces it.
+That bench is also the only way to accept or reject `bot::SAMPLED_PRESET_DEPTH`.
+It is 2 today. A 30-second answer holds about 36,800 iterations at depth 1,
+18,200 at depth 2, and 12,100 at depth 3. A doubles root offers about 290
+actions, so depth trades lookahead against the visits for each action. Measure
+that trade with `--policy search` before you move the constant again.
 
 - [ ] 2. Let the evaluator read the bench.
 

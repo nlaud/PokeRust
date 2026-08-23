@@ -70,9 +70,11 @@ Run this command to restore the three files:
 git checkout -- weights/eval_v1.json weights/eval_mlp_v1.json weights/policy_v1.json
 ```
 
-## The calibration step
+## The cost calibration step
 
 Measure the label cost before the long run starts.
+This step measures seconds for each label. It is not the calibration curve of
+the accept rule below.
 
 ```sh
 ./target/release/train_eval.exe --calibrate --calibrate-positions 60 --workers 20 --seed 1
@@ -165,12 +167,42 @@ This is correct, and the report marks it.
 
 ## The accept rule
 
-Keep a run only when the fitted weights beat the hand-set weights on the
-held-out split.
-Compare the `value hand` line against the `value fitted` line.
-A lower held-out mean absolute error accepts the run.
+A run must pass two tests.
 
-Restore the weight files and discard the run when the error rises.
+**Test 1. The held-out split.**
+Compare the `value hand` line against the `value fitted` line.
+A lower held-out mean absolute error passes this test.
+
+This test alone cannot accept a run.
+`solve` produced the labels, and `solve` scores its own horizon with the
+committed weights, so the split measures agreement with that loop.
+The number moved from 0.0957 to 0.0978 when only the corpus changed.
+
+**Test 2. The calibration curve.**
+This test compares a predicted win probability against a played game result.
+Run this command from `poke_rust/` before and after the run:
+
+```sh
+cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1
+```
+
+Both flags hold the games still.
+`--teamsheet-mix 1` draws every opening from the archived teamsheets.
+`--policy hand` plays a softmax over `eval::HAND_POLICY_WEIGHTS`, a constant.
+
+Do not drop `--policy hand` here.
+The default policy reads `weights/policy_v1.json`, and this run rewrites that
+file.
+The two reports would then measure two different sets of games.
+
+Read the `fitted` table. The run passes when its mean absolute error, its Brier
+score, and its log loss all fall, and its expected calibration error does not
+rise.
+
+Read `src/solver/README.md`, section *Measuring the evaluator*, for the meaning
+of each column.
+
+Restore the weight files and discard the run when either test fails.
 
 ## What to commit
 

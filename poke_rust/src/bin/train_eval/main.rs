@@ -53,15 +53,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
 
 use poke_rust::VERBOSITY;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
-use poke_rust::meta::{MetaDex, MetaFormat, generate_meta_team, render_teamsheet};
-use poke_rust::simulator::{sample_turn_raw_seeded, team_preview_state_from_team_strings};
+use poke_rust::meta::{MetaDex, MetaFormat};
+use poke_rust::selfplay::{self, MatchupConfig, TeamPool};
 use poke_rust::solver::actions::{self, Phase};
 use poke_rust::solver::chance::ChanceMode;
 use poke_rust::solver::eval::{
@@ -71,12 +68,8 @@ use poke_rust::solver::eval::{
 use poke_rust::solver::mcts::{self, MctsConfig};
 use poke_rust::solver::train::{self, CurvePoint, PolicySample, TrainConfig, ValueSample};
 use poke_rust::solver::{SolveConfig, SolveWarning, solve_seeded};
-use poke_rust::state::battle::{
-    BattleCommand, BattleMechanics, BattleState, MatchState, Player, PlayerCommand,
-    TeamPreviewCommand,
-};
+use poke_rust::state::battle::{BattleCommand, BattleMechanics, BattleState, MatchState, Player};
 use poke_rust::state::dex_data::{parse_learnset_dex, parse_move_dex, parse_pokemon_dex};
-use poke_rust::state::pokemon::parse_team_sheet_str;
 
 /// The value network that this binary fits.
 type ValueNetwork = Mlp<FEATURE_COUNT, MLP_HIDDEN>;
@@ -326,6 +319,17 @@ impl Args {
         }
     }
 
+    /// The matchup that `selfplay` builds for the corpus.
+    fn matchup(&self) -> MatchupConfig {
+        MatchupConfig {
+            active_per_side: self.active_per_side,
+            brought_per_side: self.brought_per_side,
+            roster_size: self.roster_size,
+            mechanics: self.mechanics(),
+            teamsheet_mix: self.teamsheet_mix,
+        }
+    }
+
     /// The training settings of the linear and policy fits.
     fn train_config(&self) -> TrainConfig {
         TrainConfig {
@@ -373,7 +377,15 @@ fn main() {
 
     let pool = match args.teamsheet_dir.as_ref() {
         Some(dir) => match TeamPool::load(dir, args.brought_per_side, &pokemon_dex, &move_dex) {
-            Ok(loaded) => Some(loaded),
+            Ok(loaded) => {
+                println!(
+                    "loaded {} teamsheet(s) from {} ({} dropped as too short)",
+                    loaded.len(),
+                    dir.display(),
+                    loaded.dropped_short(),
+                );
+                Some(loaded)
+            }
             Err(error) => {
                 eprintln!("cannot read the teamsheet directory: {error}");
                 std::process::exit(1);
@@ -583,77 +595,6 @@ struct Position {
 ///
 /// A state hash removes a repeat position, so an early turn that both sides
 /// keep replaying enters the corpus once.
-/// The archived rosters that a matchup can draw from.
-///
-/// One entry is the text of one teamsheet and the count of Pokemon that parsed
-/// out of it. The count comes from the parser rather than the file, because a
-/// paste can name a Pokemon or a move that this dex does not hold, and the
-/// parser drops that block.
-struct TeamPool {
-    sheets: Vec<(String, usize)>,
-}
-
-impl TeamPool {
-    /// Loads every `.txt` file of `dir` that parses into a usable roster.
-    ///
-    /// A roster must hold at least `brought` Pokemon. A shorter one cannot fill
-    /// a team-preview command, so it never reaches a battle.
-    fn load(
-        dir: &Path,
-        brought: u8,
-        pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
-        move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
-    ) -> Result<TeamPool, String> {
-        let listing = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        let mut paths: Vec<PathBuf> = listing
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
-            .collect();
-        // A directory listing has no defined order, and the corpus seed must
-        // pick the same pair on every run.
-        paths.sort();
-
-        let mut sheets = Vec::new();
-        let mut short = 0usize;
-        for path in paths {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let parsed = parse_team_sheet_str(&text, pokemon_dex, move_dex, true);
-            if parsed.len() < brought as usize {
-                short += 1;
-                continue;
-            }
-            sheets.push((text, parsed.len()));
-        }
-        if sheets.is_empty() {
-            return Err(format!("{}: no usable teamsheet", dir.display()));
-        }
-        println!(
-            "loaded {} teamsheet(s) from {} ({} dropped as too short)",
-            sheets.len(),
-            dir.display(),
-            short
-        );
-        Ok(TeamPool { sheets })
-    }
-
-    /// Two rosters, chosen by seed. The pair is distinct when the pool holds
-    /// more than one roster, so a matchup is not a mirror of one team.
-    fn pair(&self, seed: u64) -> (&(String, usize), &(String, usize)) {
-        let count = self.sheets.len();
-        let first = (seed % count as u64) as usize;
-        let second = if count == 1 {
-            first
-        } else {
-            let offset = 1 + (seed / count as u64) % (count as u64 - 1);
-            ((first as u64 + offset) % count as u64) as usize
-        };
-        (&self.sheets[first], &self.sheets[second])
-    }
-}
-
 fn collect_positions(
     args: &Args,
     wanted: usize,
@@ -677,8 +618,8 @@ fn collect_positions(
             .wrapping_add(match_index);
         match_index += 1;
 
-        let Some(mut state) = start_match(
-            args,
+        let Some(mut state) = selfplay::start_match(
+            &args.matchup(),
             meta_dex,
             pool,
             pokemon_dex,
@@ -708,143 +649,14 @@ fn collect_positions(
                 }
             }
 
-            let Some(next) = play_random_turn(&state, move_dex, pokemon_dex, turn_seed) else {
+            let Some(next) = selfplay::play_random_turn(&state, move_dex, pokemon_dex, turn_seed)
+            else {
                 break;
             };
             state = next;
         }
     }
     out
-}
-
-/// Builds one battle position from two generated teams.
-/// Returns `None` when generation or the preview turn fails.
-fn start_match(
-    args: &Args,
-    meta_dex: &MetaDex,
-    pool: Option<&TeamPool>,
-    pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
-    move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
-    learnset_dex: &std::collections::HashMap<Species, HashSet<PokemonMove>>,
-    seed: u64,
-) -> Option<MatchState> {
-    let size = args.roster_size as usize;
-    // The roll is a fixed function of the seed, so a rerun draws the same
-    // matchup from the same source.
-    let archived = pool.filter(|_| {
-        let roll = (seed.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64
-            / (1u64 << 53) as f64;
-        roll < args.teamsheet_mix
-    });
-
-    let (p1_text, p1_len, p2_text, p2_len) = match archived {
-        Some(pool) => {
-            let (first, second) = pool.pair(seed);
-            (first.0.clone(), first.1, second.0.clone(), second.1)
-        }
-        None => {
-            let p1 = generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed).ok()?;
-            let p2 =
-                generate_meta_team(meta_dex, pokemon_dex, learnset_dex, size, seed ^ 0xA5A5_A5A5)
-                    .ok()?;
-            if p1.len() < size || p2.len() < size {
-                return None;
-            }
-            (render_teamsheet(&p1), p1.len(), render_teamsheet(&p2), p2.len())
-        }
-    };
-
-    let mut preview = team_preview_state_from_team_strings(
-        &p1_text,
-        &p2_text,
-        pokemon_dex,
-        move_dex,
-        args.active_per_side,
-        args.brought_per_side,
-        true,
-    );
-    // The builder applies `BattleMechanics::default()`, which enables
-    // Terastallization. Champions has none, so the corpus sets the rules itself.
-    preview.mechanics = args.mechanics();
-
-    // Each side indexes its own roster, and an archived roster can be shorter
-    // than `--roster-size`. Passing `size` here would name a Pokemon that the
-    // sheet does not hold.
-    let p1_picks = random_preview_command(
-        p1_len,
-        args.active_per_side,
-        args.brought_per_side,
-        seed ^ 0xC3C3_C3C3_C3C3_C3C3,
-    );
-    let p2_picks = random_preview_command(
-        p2_len,
-        args.active_per_side,
-        args.brought_per_side,
-        seed ^ 0x3C3C_3C3C_3C3C_3C3C,
-    );
-    let (state, _, _) = sample_turn_raw_seeded(
-        seed,
-        &MatchState::TeamPreviewState(preview),
-        &PlayerCommand::TeamPreview(p1_picks),
-        &PlayerCommand::TeamPreview(p2_picks),
-        move_dex,
-        pokemon_dex,
-        false,
-        1,
-        None,
-    );
-    matches!(state, MatchState::BattleState(_)).then_some(state)
-}
-
-/// Selects one legal team-preview command from a full roster.
-fn random_preview_command(
-    team_len: usize,
-    active_per_side: u8,
-    brought_per_side: u8,
-    seed: u64,
-) -> TeamPreviewCommand {
-    let brought = (brought_per_side as usize).min(team_len);
-    let active = (active_per_side as usize).min(brought);
-    let mut indices: Vec<usize> = (0..team_len).collect();
-    indices.shuffle(&mut StdRng::seed_from_u64(seed));
-    indices.truncate(brought);
-    TeamPreviewCommand {
-        active_indices: indices[..active].to_vec(),
-        back_indices: indices[active..].to_vec(),
-    }
-}
-
-/// Plays one turn with a random legal joint action for each player.
-fn play_random_turn(
-    state: &MatchState,
-    move_dex: &std::collections::HashMap<PokemonMove, poke_rust::state::dex_data::MoveData>,
-    pokemon_dex: &std::collections::HashMap<Species, poke_rust::state::dex_data::PokemonData>,
-    seed: u64,
-) -> Option<MatchState> {
-    let MatchState::BattleState(battle) = state else {
-        return None;
-    };
-    let phase = actions::phase_of(state);
-    let p1 = actions::joint_actions(battle, Player::P1, phase, move_dex, pokemon_dex, None, false);
-    let p2 = actions::joint_actions(battle, Player::P2, phase, move_dex, pokemon_dex, None, false);
-    if p1.actions.is_empty() || p2.actions.is_empty() {
-        return None;
-    }
-
-    let p1_pick = (seed % p1.actions.len() as u64) as usize;
-    let p2_pick = ((seed >> 17) % p2.actions.len() as u64) as usize;
-    let (next, _, _) = sample_turn_raw_seeded(
-        seed,
-        state,
-        &PlayerCommand::Battle(p1.actions[p1_pick].clone()),
-        &PlayerCommand::Battle(p2.actions[p2_pick].clone()),
-        move_dex,
-        pokemon_dex,
-        false,
-        1,
-        None,
-    );
-    Some(next)
 }
 
 /// What one label produced.
@@ -1476,19 +1288,6 @@ mod tests {
         assert_eq!(limited.stage_budget(), Some(Duration::from_secs(3600)));
         assert_eq!(limited.label_deadline(), Some(Duration::from_secs(120)));
         assert_eq!(limited.worker_count(), 4);
-    }
-
-    #[test]
-    fn a_preview_selects_only_the_brought_members_from_the_roster() {
-        let command = random_preview_command(6, 2, 4, 17);
-        assert_eq!(command.active_indices.len(), 2);
-        assert_eq!(command.back_indices.len(), 2);
-        let mut selected = command.active_indices;
-        selected.extend(command.back_indices);
-        selected.sort_unstable();
-        selected.dedup();
-        assert_eq!(selected.len(), 4);
-        assert!(selected.iter().all(|index| *index < 6));
     }
 
     #[test]

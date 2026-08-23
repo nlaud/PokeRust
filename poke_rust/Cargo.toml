@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "depth1_budget"
 harness = false
+
+[[bench]]
+name = "eval_calibration"
+harness = false
