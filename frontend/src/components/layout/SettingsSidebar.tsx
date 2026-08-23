@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import MusicPlayer from './MusicPlayer'
 import { useSettings, type Theme } from '../../store/settingsStore'
 import Select from '../common/Select'
-import SolverControls from '../solver/SolverControls'
+import SolverControls, { DamageRollField } from '../solver/SolverControls'
 import {
   IMPERFECT_SOLVERS,
   PERFECT_SOLVERS,
@@ -96,10 +96,12 @@ export default function SettingsSidebar() {
     setPerfectSolver,
   } = useSettings()
   const [advanced, setAdvanced] = useState(false)
+  // Every preset runs one turn of lookahead, so the detail names the width that
+  // separates them rather than a depth. `SOLVER_PRESETS` holds the values.
   const presets: { value: SolverPreset; label: string; detail: string }[] = [
-    { value: 'fast', label: 'Fast', detail: '10K turns' },
-    { value: 'balanced', label: 'Balanced', detail: '100K turns' },
-    { value: 'competitive', label: 'High', detail: '500K turns' },
+    { value: 'fast', label: 'Fast', detail: '3 rolls · 12 worlds' },
+    { value: 'balanced', label: 'Balanced', detail: '8 rolls · 24 worlds' },
+    { value: 'competitive', label: 'High', detail: '16 rolls · 48 worlds' },
   ]
 
   // Keep the sidebar and MusicPlayer mounted.
@@ -202,6 +204,10 @@ export default function SettingsSidebar() {
                 type="button"
                 onClick={() => setSolverPreset(preset.value)}
                 aria-pressed={solverPreset === preset.value}
+                // The detail line names the limits, and those values change
+                // whenever the preset table changes. Name the button by its
+                // preset alone, so a caller never selects it by a limit.
+                aria-label={`${preset.label} solver preset`}
                 className={`rounded-card border px-2 py-2 text-sm font-medium ${
                   solverPreset === preset.value
                     ? 'border-primary bg-primary-soft text-primary'
@@ -216,6 +222,13 @@ export default function SettingsSidebar() {
           {solverPreset === 'custom' && (
             <p className="mt-2 text-xs font-medium text-primary">Custom solver limits are active.</p>
           )}
+          <p className="mt-3 text-xs text-ink-muted">
+            Every preset searches one turn ahead and scores each outcome with the leaf evaluator.
+            The damage rolls below decide how much of an attack the search reads.
+          </p>
+          <div className="mt-2 text-xs">
+            <DamageRollField settings={solverSettings} onChange={setSolverSettings} />
+          </div>
           <button
             type="button"
             className="mt-3 text-sm font-medium text-ink-muted hover:text-ink"

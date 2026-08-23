@@ -41,7 +41,7 @@ pub enum BotAlgorithm {
 }
 
 impl BotAlgorithm {
-    fn from_wire(scope: &str, name: &str) -> Result<Self, String> {
+    pub(crate) fn from_wire(scope: &str, name: &str) -> Result<Self, String> {
         match name {
             "backwardInduction" => Ok(BotAlgorithm::BackwardInduction),
             "serializedBounds" => Ok(BotAlgorithm::SerializedBounds),
@@ -107,22 +107,160 @@ impl BotAlgorithm {
 /// `analysis::random_seed` draws inside this range for the same reason.
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-pub const FAST_SIMULATION_TURN_BUDGET: u64 = 10_000;
-pub const BALANCED_SIMULATION_TURN_BUDGET: u64 = 100_000;
-pub const COMPETITIVE_SIMULATION_TURN_BUDGET: u64 = 500_000;
-pub const DEFAULT_SIMULATION_TURN_BUDGET: u64 = BALANCED_SIMULATION_TURN_BUDGET;
+/// The limits that one preset name resolves to.
+///
+/// A request field replaces the matching value. An absent field keeps it.
+#[derive(Debug, Clone, Copy)]
+pub struct PresetLimits {
+    /// The budget of a search that finishes by itself.
+    ///
+    /// An exact search and `pimc` stop when the matrix is solved. The budget
+    /// must hold that solve. A budget below it returns a matrix of static
+    /// scores, and a matrix of static scores names no action.
+    pub simulation_turn_budget: u64,
+    /// The budget of a search that never finishes by itself.
+    ///
+    /// `mcts`, `ismcts`, and `mccfr` spend every turn they are given, so the
+    /// budget decides how many seconds one answer takes rather than whether the
+    /// answer is complete. It is therefore a much smaller number than
+    /// `simulation_turn_budget`.
+    pub sampled_simulation_turn_budget: u64,
+    pub depth: u8,
+    pub damage_rolls: u8,
+    pub particles: usize,
+}
 
-pub const DEFAULT_DEPTH: u8 = 3;
+impl PresetLimits {
+    /// The budget that one algorithm takes from this preset.
+    pub fn budget_for_algorithm(&self, algorithm: BotAlgorithm) -> u64 {
+        if algorithm.is_exact() || algorithm == BotAlgorithm::Pimc {
+            self.simulation_turn_budget
+        } else {
+            self.sampled_simulation_turn_budget
+        }
+    }
+}
+
+/// The depth that every preset runs.
+///
+/// A depth of one resolves the turn and scores each outcome with the leaf
+/// evaluator. Depth two costs a whole depth-one solve for each cell of the root
+/// matrix, and `benches/RESULTS.md` records that a doubles position needs about
+/// eight minutes for one round of it. The presets therefore spend their budget
+/// on the width of one turn instead of on a second turn: more damage rolls give
+/// the leaf evaluator a truer outcome distribution, and more worlds give a
+/// belief search a truer opponent.
+///
+/// A request may still ask for a deeper search. `SolverControls` offers the
+/// field, and `refine` reaches a deeper cell without a complete deep pass.
+pub const PRESET_DEPTH: u8 = 1;
 
 /// The depth that a refined profile solves completely before it raises cells.
 ///
 /// One turn of lookahead over the complete action set is the answer that every
 /// later round improves. A doubles position finishes it in about one third of a
-/// second.
+/// second at one damage roll.
+///
+/// Every preset now runs at [`PRESET_DEPTH`], which is this same depth, so a
+/// refined preset has nothing to raise and returns the base answer. Refinement
+/// applies when a request raises the depth itself.
 pub const REFINE_BASE_DEPTH: u8 = 1;
-pub const DEFAULT_DAMAGE_ROLLS: u8 = 1;
-pub const DEFAULT_PARTICLES: usize = 16;
-pub const MAX_PARTICLES: usize = 32;
+
+/// The largest particle count that a request may ask for.
+///
+/// Each world of `pimc` is a complete solve, so this count multiplies the cost
+/// of that search directly. `ismcts` and `mccfr` draw the same number of worlds
+/// and share one budget across them, so the count changes the spread of their
+/// sampling rather than their cost.
+pub const MAX_PARTICLES: usize = 64;
+
+/// The budget of one preset, from the damage rolls that the preset reads.
+///
+/// `cargo bench --bench depth1_budget` measured one depth-one solve of the
+/// cheapest doubles pairing, at 290 actions against 370.
+///
+/// | Damage rolls | Turn simulations | Time on 22 workers |
+/// |---|---|---|
+/// | 3 | 104,576 | 5.9s |
+/// | 8 | 872,971 | 123s |
+/// | 16 | 1,339,655 | 216s |
+///
+/// The budget must hold two of those solves. `pimc::GUARANTEED_WORLDS` is two,
+/// and two searched worlds say more than a full particle set of unsearched
+/// ones. The extra factor of two covers a pairing more costly than this one.
+///
+/// Singles never reaches these numbers. The same sweep measured 432 turn
+/// simulations for a singles position at sixteen rolls, so the budget binds on
+/// doubles alone.
+const fn budget_for(measured_doubles_solve: u64) -> u64 {
+    measured_doubles_solve * 2 * 2
+}
+
+/// The budget of a sampled search, from the seconds that one answer may take.
+///
+/// A sampled search spends every turn that it gets, so no budget makes it
+/// complete. The same sweep measured 6,607 turn simulations for each second on
+/// one thread, at one damage roll, on the same doubles position.
+///
+/// A damage roll lowers that rate, because one turn simulation then builds more
+/// branches. The exact sweep measured the same slowdown, and these are the
+/// factors it reports against one roll.
+///
+/// | Damage rolls | Slower by |
+/// |---|---|
+/// | 3 | 2.4 |
+/// | 8 | 5.9 |
+/// | 16 | 6.9 |
+const fn sampled_budget_for(turns_for_each_second: u64, seconds: u64) -> u64 {
+    turns_for_each_second * seconds
+}
+
+/// Resolves the fastest answer. It is the preset that a live battle can wait on.
+///
+/// Three rolls read the low, middle, and high damage of every attack. That is
+/// the smallest set that separates a roll which faints a target from a roll
+/// which does not.
+pub const FAST_PRESET: PresetLimits = PresetLimits {
+    simulation_turn_budget: budget_for(104_576),
+    sampled_simulation_turn_budget: sampled_budget_for(2_753, 10),
+    depth: PRESET_DEPTH,
+    damage_rolls: 3,
+    particles: 12,
+};
+
+/// The default preset. It reads every other damage roll.
+///
+/// One doubles answer takes minutes here. Use `fast` for a live doubles battle.
+pub const BALANCED_PRESET: PresetLimits = PresetLimits {
+    simulation_turn_budget: budget_for(872_971),
+    sampled_simulation_turn_budget: sampled_budget_for(1_120, 30),
+    depth: PRESET_DEPTH,
+    damage_rolls: 8,
+    particles: 24,
+};
+
+/// The widest preset. It reads every damage roll, so no outcome of an attack
+/// stays out of the leaf distribution.
+///
+/// The measured value moved by 0.002 between two rolls and sixteen, and the
+/// equilibrium support held five actions at every roll count. Read
+/// `benches/RESULTS.md` before you choose this preset for accuracy.
+pub const COMPETITIVE_PRESET: PresetLimits = PresetLimits {
+    simulation_turn_budget: budget_for(1_339_655),
+    sampled_simulation_turn_budget: sampled_budget_for(958, 90),
+    depth: PRESET_DEPTH,
+    damage_rolls: 16,
+    particles: 48,
+};
+
+/// The limits that a request without a preset name takes.
+pub const DEFAULT_PRESET: PresetLimits = BALANCED_PRESET;
+
+// No preset may ask for more worlds than a request may. `check_range` rejects a
+// request above the cap, and a preset never reaches that check.
+const _: () = assert!(FAST_PRESET.particles <= MAX_PARTICLES);
+const _: () = assert!(BALANCED_PRESET.particles <= MAX_PARTICLES);
+const _: () = assert!(COMPETITIVE_PRESET.particles <= MAX_PARTICLES);
 
 /// The profile as the client sends it.
 /// Every field is optional. The server supplies speed-first defaults.
@@ -299,12 +437,12 @@ pub struct BotProfile {
     pub search: BotSearchConfig,
 }
 
-fn preset_limits(scope: &str, preset: Option<&str>) -> Result<(u64, u8, usize), String> {
+fn preset_limits(scope: &str, preset: Option<&str>) -> Result<PresetLimits, String> {
     match preset.unwrap_or("balanced") {
-        "fast" => Ok((FAST_SIMULATION_TURN_BUDGET, 2, 8)),
-        "balanced" => Ok((BALANCED_SIMULATION_TURN_BUDGET, 3, 16)),
-        "competitive" => Ok((COMPETITIVE_SIMULATION_TURN_BUDGET, 4, 32)),
-        "custom" => Ok((DEFAULT_SIMULATION_TURN_BUDGET, DEFAULT_DEPTH, DEFAULT_PARTICLES)),
+        "fast" => Ok(FAST_PRESET),
+        "balanced" => Ok(BALANCED_PRESET),
+        "competitive" => Ok(COMPETITIVE_PRESET),
+        "custom" => Ok(DEFAULT_PRESET),
         name => Err(format!("{scope}.preset: unknown preset {name:?}")),
     }
 }
@@ -339,8 +477,7 @@ fn reject_unused(scope: &str, present: bool, field: &str, reason: &str) -> Resul
 /// passes `botP2`, and the tracker analysis endpoint passes `analysis`.
 ///
 pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, String> {
-    let (preset_budget, preset_depth, preset_particles) =
-        preset_limits(scope, req.preset.as_deref())?;
+    let preset = preset_limits(scope, req.preset.as_deref())?;
     let algorithm = match &req.algorithm {
         Some(name) => BotAlgorithm::from_wire(scope, name)?,
         None => BotAlgorithm::DoubleOracle,
@@ -365,7 +502,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         "refinement applies only to an exact algorithm or to pimc",
     )?;
 
-    let depth = req.depth.unwrap_or(preset_depth);
+    let depth = req.depth.unwrap_or(preset.depth);
     check_range(scope, "depth", depth, 1, 8)?;
     let replacement_depth = match req.replacement_depth {
         Some(value) => {
@@ -374,7 +511,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         }
         None => None,
     };
-    let damage_rolls = req.damage_rolls.unwrap_or(DEFAULT_DAMAGE_ROLLS);
+    let damage_rolls = req.damage_rolls.unwrap_or(preset.damage_rolls);
     check_range(scope, "damageRolls", damage_rolls, 1, 16)?;
     let consider_crit = req.consider_crit.unwrap_or(false);
     let particles = match req.particles {
@@ -382,7 +519,7 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
             check_range(scope, "particles", value, 1, MAX_PARTICLES)?;
             value
         }
-        None => preset_particles,
+        None => preset.particles,
     };
     let exact = algorithm.is_exact();
     let refine = req.refine.unwrap_or(false) && algorithm.supports_refinement();
@@ -390,9 +527,12 @@ pub fn resolve(scope: &str, req: &BotProfileRequest) -> Result<BotProfile, Strin
         check_range(scope, "seed", seed, 0, MAX_SAFE_INTEGER)?;
     }
     let particles = algorithm.uses_particles().then_some(particles);
+    // An exact search and `pimc` finish, so their budget must hold one solve. A
+    // sampled search spends every turn it gets, so its budget sets the seconds
+    // of one answer. `PresetLimits` holds one number for each case.
     let simulation_turn_budget = req
         .simulation_turn_budget
-        .unwrap_or(preset_budget);
+        .unwrap_or_else(|| preset.budget_for_algorithm(algorithm));
     check_range(
         scope,
         "simulationTurnBudget",
@@ -594,9 +734,12 @@ mod current_tests {
     fn an_empty_request_uses_balanced_defaults() {
         let profile = resolve("botP2", &BotProfileRequest::default()).unwrap();
         assert_eq!(profile.view.algorithm, "doubleOracle");
-        assert_eq!(profile.view.simulation_turn_budget, 100_000);
-        assert_eq!(profile.view.depth, 3);
-        assert_eq!(profile.view.damage_rolls, 1);
+        assert_eq!(
+            profile.view.simulation_turn_budget,
+            BALANCED_PRESET.simulation_turn_budget
+        );
+        assert_eq!(profile.view.depth, BALANCED_PRESET.depth);
+        assert_eq!(profile.view.damage_rolls, BALANCED_PRESET.damage_rolls);
         assert!(!profile.view.consider_crit);
         match profile.search {
             BotSearchConfig::Exact(config) => assert_eq!(config.max_actions_per_player, None),
@@ -634,21 +777,91 @@ mod current_tests {
 
     #[test]
     fn each_preset_has_fixed_limits() {
-        for (preset, budget, depth, particles) in [
-            ("fast", 10_000, 2, 8),
-            ("balanced", 100_000, 3, 16),
-            ("competitive", 500_000, 4, 32),
+        for (name, limits) in [
+            ("fast", FAST_PRESET),
+            ("balanced", BALANCED_PRESET),
+            ("competitive", COMPETITIVE_PRESET),
         ] {
             let request = BotProfileRequest {
-                preset: Some(preset.to_string()),
+                preset: Some(name.to_string()),
                 algorithm: Some("ismcts".to_string()),
                 ..BotProfileRequest::default()
             };
             let profile = resolve("botP2", &request).unwrap();
-            assert_eq!(profile.view.simulation_turn_budget, budget);
-            assert_eq!(profile.view.depth, depth);
-            assert_eq!(profile.view.particles, Some(particles));
+            // The request names `ismcts`, which never finishes by itself.
+            assert_eq!(
+                profile.view.simulation_turn_budget,
+                limits.sampled_simulation_turn_budget
+            );
+            assert_eq!(profile.view.depth, limits.depth);
+            assert_eq!(profile.view.damage_rolls, limits.damage_rolls);
+            assert_eq!(profile.view.particles, Some(limits.particles));
         }
+    }
+
+    /// Every preset resolves one turn of lookahead.
+    ///
+    /// A preset spends its budget on the width of one turn rather than on a
+    /// second turn. `PRESET_DEPTH` holds the reason.
+    #[test]
+    fn every_preset_runs_at_depth_one() {
+        for name in ["fast", "balanced", "competitive", "custom"] {
+            let request = BotProfileRequest {
+                preset: Some(name.to_string()),
+                ..BotProfileRequest::default()
+            };
+            let profile = resolve("botP2", &request).unwrap();
+            assert_eq!(profile.view.depth, 1, "{name} must run one turn");
+        }
+    }
+
+    /// A search that finishes takes a budget that holds one whole solve.
+    ///
+    /// A search that never finishes takes a much smaller one, because its budget
+    /// sets the seconds of one answer instead.
+    #[test]
+    fn the_budget_of_a_preset_follows_the_algorithm() {
+        for name in ["fast", "balanced", "competitive"] {
+            let budget = |algorithm: &str| {
+                let request = BotProfileRequest {
+                    preset: Some(name.to_string()),
+                    algorithm: Some(algorithm.to_string()),
+                    ..BotProfileRequest::default()
+                };
+                resolve("botP2", &request)
+                    .unwrap()
+                    .view
+                    .simulation_turn_budget
+            };
+            let finishing = budget("doubleOracle");
+            assert_eq!(finishing, budget("pimc"), "{name}: pimc finishes");
+            for sampled in ["ismcts", "mccfr", "mcts"] {
+                assert!(
+                    budget(sampled) < finishing,
+                    "{name}: {sampled} must take the smaller budget"
+                );
+            }
+        }
+    }
+
+    /// A wider preset must raise every width, and the budget with them.
+    ///
+    /// A damage roll and a world both multiply the turns that one answer needs,
+    /// so a budget that stays flat would stop the wider preset before it
+    /// finishes and would leave it no wider than the preset below.
+    #[test]
+    fn a_wider_preset_raises_every_width_and_its_budget() {
+        let ladder = [FAST_PRESET, BALANCED_PRESET, COMPETITIVE_PRESET];
+        for pair in ladder.windows(2) {
+            let (lower, upper) = (pair[0], pair[1]);
+            assert!(upper.damage_rolls > lower.damage_rolls);
+            assert!(upper.particles > lower.particles);
+            assert!(upper.simulation_turn_budget > lower.simulation_turn_budget);
+            assert!(
+                upper.sampled_simulation_turn_budget > lower.sampled_simulation_turn_budget
+            );
+        }
+        assert_eq!(COMPETITIVE_PRESET.damage_rolls, 16, "the widest preset reads every roll");
     }
 
     #[test]
@@ -660,14 +873,17 @@ mod current_tests {
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
-        assert_eq!(profile.view.simulation_turn_budget, FAST_SIMULATION_TURN_BUDGET);
+        assert_eq!(
+            profile.view.simulation_turn_budget,
+            FAST_PRESET.sampled_simulation_turn_budget
+        );
     }
 
     #[test]
-    fn particles_stop_at_32() {
+    fn particles_stop_at_the_cap() {
         let request = BotProfileRequest {
             algorithm: Some("mccfr".to_string()),
-            particles: Some(33),
+            particles: Some(MAX_PARTICLES + 1),
             ..BotProfileRequest::default()
         };
         assert!(resolve("analysis", &request).unwrap_err().contains("particles"));
@@ -680,7 +896,7 @@ mod current_tests {
             algorithm: Some("ismcts".to_string()),
             simulation_turn_budget: Some(1_000),
             depth: Some(8),
-            particles: Some(32),
+            particles: Some(MAX_PARTICLES),
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
@@ -698,7 +914,7 @@ mod current_tests {
             let profile = resolve("botP2", &request).unwrap();
             assert_eq!(
                 profile.view.simulation_turn_budget,
-                DEFAULT_SIMULATION_TURN_BUDGET
+                DEFAULT_PRESET.simulation_turn_budget
             );
         }
     }
@@ -780,7 +996,10 @@ mod current_tests {
             ..BotProfileRequest::default()
         };
         let profile = resolve("analysis", &request).unwrap();
-        assert_eq!(profile.view.simulation_turn_budget, DEFAULT_SIMULATION_TURN_BUDGET);
+        assert_eq!(
+            profile.view.simulation_turn_budget,
+            DEFAULT_PRESET.simulation_turn_budget
+        );
     }
 
     /// Two techniques stay off by decision, for every preset and every

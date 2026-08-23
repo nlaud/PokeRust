@@ -5,6 +5,7 @@ import {
   DEFAULT_PERFECT_SOLVER,
   DEFAULT_SOLVER_SETTINGS,
   IMPERFECT_SOLVERS,
+  MAX_PARTICLES,
   PERFECT_SOLVERS,
   SOLVER_PRESETS,
   type SolverOption,
@@ -59,17 +60,29 @@ function loadSettings(): Settings {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>
       const legacy = parsed as { solverAlgorithm?: unknown }
+      const storedPreset = parsed.solverPreset ?? 'balanced'
+      // A named preset always reads the current table. The limits of a preset
+      // belong to the build, not to the browser, so a stored copy of an older
+      // table would keep an old depth and an old budget forever. Only a custom
+      // profile restores the numbers that the user typed.
+      const storedSettings: SolverSettings =
+        storedPreset === 'custom'
+          ? {
+              ...DEFAULT_SOLVER_SETTINGS,
+              ...parsed.solverSettings,
+              particles: Math.min(
+                MAX_PARTICLES,
+                Math.max(1, parsed.solverSettings?.particles ?? DEFAULT_SOLVER_SETTINGS.particles),
+              ),
+            }
+          : { ...SOLVER_PRESETS[storedPreset] }
       // Add custom color fields to old stored settings.
       return {
         theme: parsed.theme ?? 'light',
         customBackground: parsed.customBackground ?? DEFAULT_CUSTOM_BACKGROUND,
         customAccent: parsed.customAccent ?? DEFAULT_CUSTOM_ACCENT,
-        solverPreset: parsed.solverPreset ?? 'balanced',
-        solverSettings: {
-          ...DEFAULT_SOLVER_SETTINGS,
-          ...parsed.solverSettings,
-          particles: Math.min(32, Math.max(1, parsed.solverSettings?.particles ?? 16)),
-        },
+        solverPreset: storedPreset,
+        solverSettings: storedSettings,
         // One earlier build stored a single `solverAlgorithm` across both
         // categories. Read it into whichever list holds it, so a user who chose
         // PIMC or Double Oracle then keeps that choice here.
@@ -182,7 +195,10 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     set({ solverPreset, solverSettings })
   },
   setSolverSettings: (solverSettings) => {
-    const safe = { ...solverSettings, particles: Math.min(32, Math.max(1, solverSettings.particles)) }
+    const safe = {
+      ...solverSettings,
+      particles: Math.min(MAX_PARTICLES, Math.max(1, solverSettings.particles)),
+    }
     persist({ ...get(), solverPreset: 'custom', solverSettings: safe })
     set({ solverPreset: 'custom', solverSettings: safe })
   },

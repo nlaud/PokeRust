@@ -279,6 +279,18 @@ It then validates the full command combination.
 
 Return HTTP 422 for an invalid command.
 
+### Presets
+
+Every server preset runs at `bot::PRESET_DEPTH`, which is depth 1.
+The presets differ in damage rolls and particles, not in depth.
+`bot::PresetLimits` holds each row.
+`frontend/src/components/solver/solverSettings.ts` holds the same table.
+Update both together.
+
+A damage roll is the most expensive width.
+The cost comes from replacement searches after a faint, not from the root matrix.
+Read `poke_rust/benches/RESULTS.md` before you raise a roll count.
+
 ### Sessions
 
 Sessions use an in-memory map behind a mutex.

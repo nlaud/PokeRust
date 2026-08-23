@@ -1038,3 +1038,95 @@ improves rather than one answer at the end.
   figure, and the warning carries it.
 - Do not read the sampled error of an MCTS answer as strategy quality. The 0.0008
   figure above sits beside a uniform strategy.
+
+## 2026-08-22: What one depth-1 solve costs
+
+- Command: `cargo bench --bench depth1_budget`
+- Workers: 22
+- Search: double oracle, `policy_order` on, chance mode `Enumerate`
+- Positions: singles pairing 0x1, doubles pairing 10x3
+
+This sweep sizes the server presets. Every preset now runs one turn of
+lookahead, so the question is what one turn costs at each damage-roll count.
+
+### Singles, 18 actions against 18
+
+| Damage rolls | Turns | Nodes | Time | Support | Value |
+|---|---|---|---|---|---|
+| 1 | 200 | 17 | 0.03s | 4 and 4 | 0.4815 |
+| 2 | 306 | 70 | 0.07s | 3 and 3 | 0.4817 |
+| 3 | 348 | 91 | 0.13s | 4 and 4 | 0.4816 |
+| 4 | 378 | 106 | 0.24s | 4 and 4 | 0.4816 |
+| 8 | 432 | 133 | 0.64s | 4 and 4 | 0.4816 |
+| 16 | 432 | 133 | 0.95s | 4 and 4 | 0.4816 |
+
+### Doubles, 290 actions against 370
+
+| Damage rolls | Turns | Nodes | Time | Support | Value |
+|---|---|---|---|---|---|
+| 1 | 14,532 | 4,792 | 0.33s | 5 and 5 | 0.3233 |
+| 2 | 33,246 | 14,788 | 1.34s | 4 and 4 | 0.3290 |
+| 3 | 105,150 | 50,365 | 5.77s | 5 and 5 | 0.3283 |
+| 4 | 269,230 | 132,074 | 20.19s | 5 and 5 | 0.3263 |
+| 6 | 833,325 | 413,658 | 76.20s | 5 and 5 | 0.3273 |
+| 8 | 871,637 | 433,259 | 117.13s | 5 and 5 | 0.3281 |
+| 16 | 1,347,463 | 670,920 | 210.83s | 5 and 5 | 0.3273 |
+
+### Where the cost goes
+
+Turn simulations equal matrix cells in every row. One cell costs one turn.
+
+The turn count still rises 93 times from one roll to sixteen. The root matrix
+does not change size across the sweep, because the action counts do not change.
+The node count rises 140 times instead.
+
+Those extra nodes are forced decisions. A damage roll that faints a Pokemon
+opens a replacement node, and `forced_descent` gives that node the remaining
+depth rather than one less. At depth 1 the replacement therefore runs a whole
+depth-1 search of its own, and each of its cells costs another turn simulation.
+A replacement can faint another Pokemon, and `max_forced_chain` is 8.
+
+More damage rolls make more branches that faint a Pokemon. The replacement work
+grows with them, and the root matrix does not.
+
+### What the extra rolls buy
+
+The measured value moved by 0.0027 between two rolls and sixteen. That is
+smaller than the move between two neighboring rows. The equilibrium support held
+five actions at every roll count in doubles, and four in singles.
+
+A doubles answer at sixteen rolls costs 157 times a one-roll answer. It returns
+a value 0.004 away and the same support size.
+
+Do not raise a damage-roll count for accuracy without measuring it first.
+
+### The sampled rate
+
+| Search | Damage rolls | Budget | Turns | Iterations | Time |
+|---|---|---|---|---|---|
+| `mcts` | 1 | 200,000 | 200,000 | 127,835 | 30.27s |
+
+A sampled search spends every turn it gets, so no budget makes it complete. It
+ran 6,607 turn simulations for each second on one thread.
+
+A budget sized to finish an exact doubles solve is therefore far too large for a
+sampled search. The 3,491,884 of the balanced preset is about nine minutes of
+`mcts` at one roll, and longer at eight. `PresetLimits` holds two budgets for
+this reason: `simulation_turn_budget` covers one whole solve, and
+`sampled_simulation_turn_budget` covers a number of seconds.
+
+### The preset sizing rule
+
+`bot::budget_for` doubles the measured solve two times. One factor covers the
+two worlds that `pimc::GUARANTEED_WORLDS` promises. The other covers a doubles
+pairing more costly than this one, which is the cheapest that `depth2_cost`
+reports.
+
+| Preset | Damage rolls | Particles | Finishing budget | Sampled budget |
+|---|---|---|---|---|
+| `fast` | 3 | 12 | 418,304 | 27,530 |
+| `balanced` | 8 | 24 | 3,491,884 | 33,600 |
+| `competitive` | 16 | 48 | 5,358,620 | 86,220 |
+
+Singles never reaches the finishing budget. The whole singles sweep above stays
+below 450 turn simulations.

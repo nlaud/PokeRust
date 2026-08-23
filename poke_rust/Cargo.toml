@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "doubles_wallclock"
 harness = false
+
+[[bench]]
+name = "depth1_budget"
+harness = false

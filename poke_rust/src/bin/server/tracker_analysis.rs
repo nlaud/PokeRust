@@ -2054,7 +2054,12 @@ Level: 50
     /// this line its answer names no guess at all.
     #[test]
     fn a_preview_rung_discloses_its_drawn_worlds() {
-        for (algorithm, worlds) in [("doubleOracle", 1usize), ("ismcts", 16)] {
+        // An exact profile draws one world. A belief search draws the particle
+        // count of its preset, so read that count rather than a copy of it.
+        for (algorithm, worlds) in [
+            ("doubleOracle", 1usize),
+            ("ismcts", crate::bot::DEFAULT_PRESET.particles),
+        ] {
             let Some(inputs) = preview_inputs(algorithm, 8_000) else {
                 return;
             };

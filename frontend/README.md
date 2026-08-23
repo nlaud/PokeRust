@@ -262,18 +262,47 @@ An `Other actions` row holds the rest of the probability.
 
 The Settings sidebar holds these limits:
 
-- Simulation-turn budget.
+- Damage rolls, beside the presets.
+- One simulation-turn budget for each search class.
 - Main depth and replacement depth.
-- Damage rolls and critical-hit branches.
+- Critical-hit branches.
 - Particles for a belief search.
 
-The Settings sidebar supplies three presets:
+Every preset searches one turn ahead.
+The presets differ in width, not in depth.
 
-- Fast uses 10,000 simulation turns, depth 2, and 8 particles.
-- Balanced uses 100,000 simulation turns, depth 3, and 16 particles.
-- High uses 500,000 simulation turns, depth 4, and 32 particles.
+| Preset | Damage rolls | Particles | Turns, exact | Turns, sampled |
+|---|---|---|---|---|
+| Fast | 3 | 12 | 418,304 | 27,530 |
+| Balanced | 8 | 24 | 3,491,884 | 33,600 |
+| High | 16 | 48 | 5,358,620 | 86,220 |
 
-Advanced limits create a custom preset. The particle limit is 32.
+Each preset holds two turn budgets.
+Double Oracle, Serialized Bounds, Backward Induction, and PIMC stop when the
+matrix is solved, so their budget must hold that solve.
+ISMCTS, MCCFR, and MCTS spend every turn that they get, so their budget sets
+how many seconds one answer takes.
+The Advanced limits hold one field for each budget.
+
+Damage rolls sit outside the advanced limits.
+They are the main precision control of a one-turn search.
+An attack rolls one of sixteen damage values.
+A search that reads fewer of them can miss the roll that faints a target.
+
+Depth two costs a complete depth-one solve for each cell of the root matrix.
+A doubles position needs about eight minutes for one round of that work.
+`poke_rust/benches/RESULTS.md` records the measurements.
+A preset therefore spends its budget on the width of one turn.
+
+More damage rolls cost more than they look.
+A doubles position needs about 14,000 simulation turns at one roll.
+The same position needs about 1,340,000 at sixteen rolls.
+Each extra roll makes more branches that faint a Pokemon.
+Each faint opens a replacement search that costs more turns.
+
+Advanced limits create a custom preset. The particle limit is 64.
+A named preset always reads the table of the current build.
+Only a custom profile restores the numbers from the browser.
 The server never scales the simulation-turn budget by depth or particle count.
 
 These damage settings apply only to solver searches.

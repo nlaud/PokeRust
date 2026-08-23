@@ -102,6 +102,9 @@ test.describe('Simulate mode', () => {
       request.botP2.depth = 1
       request.botP2.replacementDepth = 2
       request.botP2.particles = 2
+      // Pin the roll count too. An absent field takes the preset value, and the
+      // preset table changes.
+      request.botP2.damageRolls = 1
       await route.continue({ postData: JSON.stringify(request) })
     })
     let holdPreviewAnalysis = true
@@ -154,14 +157,14 @@ test.describe('Simulate mode', () => {
     // must therefore reach this line.
     await expect(picker.locator('input[type=number]')).toHaveCount(0)
     await page.getByRole('button', { name: 'Open settings' }).click()
-    await page.getByRole('button', { name: 'Fast 10K turns' }).click()
+    await page.getByRole('button', { name: 'Fast solver preset' }).click()
     await page.getByRole('button', { name: 'Close settings' }).click()
     await expect(picker).toContainText('P2 uses the fast limits from Settings')
 
     // Put the balanced preset back, so the badge below reports the limits that
     // the rest of this test expects.
     await page.getByRole('button', { name: 'Open settings' }).click()
-    await page.getByRole('button', { name: 'Balanced 100K turns' }).click()
+    await page.getByRole('button', { name: 'Balanced solver preset' }).click()
     await page.getByRole('button', { name: 'Close settings' }).click()
     await expect(picker).toContainText('P2 uses the balanced limits from Settings')
     await page.screenshot({

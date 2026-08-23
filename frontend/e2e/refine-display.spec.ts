@@ -23,10 +23,17 @@ test('a refined answer names its refinement and carries its notes', async ({ pag
 
   await page.getByRole('button', { name: 'Open settings' }).click()
   await page.getByRole('button', { name: 'Advanced limits' }).click()
+  // Every preset runs one turn, so a refinement of the preset depth has nothing
+  // to raise. Ask for two turns, which is the depth a refinement reaches.
+  const depth = page.locator('label').filter({ hasText: 'Depth' }).first().locator('input')
+  await depth.fill('2')
+  await depth.blur()
   await page.getByLabel('Refine to depth').check()
   // A budget this small cannot verify every action, so the answer must carry a
   // note that says so.
-  const turns = page.locator('label').filter({ hasText: 'Simulation turns' }).locator('input')
+  // The advanced limits hold one budget for each search class. Double Oracle
+  // reads the exact one.
+  const turns = page.getByRole('spinbutton', { name: 'Simulation turns, exact' })
   await turns.fill('200')
   await turns.blur()
   await page.getByRole('button', { name: 'Close settings' }).click()

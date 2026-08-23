@@ -78,7 +78,17 @@ export function solverHint(algorithm: BotAlgorithm): string {
 }
 
 export interface SolverSettings {
+  /** The budget of a search that finishes by itself.
+   *
+   * Double Oracle, Serialized Bounds, Backward Induction, and PIMC stop when
+   * the matrix is solved, so this must hold that solve. */
   simulationTurnBudget: number
+  /** The budget of a search that never finishes by itself.
+   *
+   * ISMCTS, MCCFR, and MCTS spend every turn they are given, so this sets how
+   * many seconds one answer takes. It is much smaller for that reason.
+   * `PresetLimits` on the server holds the same pair. */
+  sampledSimulationTurnBudget: number
   depth: number
   replacementDepth: number | null
   damageRolls: number
@@ -88,31 +98,58 @@ export interface SolverSettings {
   refine: boolean
 }
 
+/** The depth that every preset runs.
+ *
+ * One turn of lookahead resolves the turn and scores each outcome with the leaf
+ * evaluator. A second turn costs a whole depth-one solve for each cell of the
+ * root matrix, which a doubles position cannot finish. The presets therefore
+ * spend their budget on the width of one turn: more damage rolls give a truer
+ * outcome distribution, and more worlds give a truer opponent.
+ *
+ * `PRESET_DEPTH` in `poke_rust/src/bin/server/bot.rs` holds the same value. The
+ * Depth field below still accepts a deeper request. */
+export const PRESET_DEPTH = 1
+
+/** The largest particle count the server accepts, from `MAX_PARTICLES`. */
+export const MAX_PARTICLES = 64
+
 export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
-  simulationTurnBudget: 100_000,
-  depth: 3,
+  simulationTurnBudget: 3_491_884,
+  sampledSimulationTurnBudget: 33_600,
+  depth: PRESET_DEPTH,
   replacementDepth: null,
-  damageRolls: 1,
+  damageRolls: 8,
   considerCrit: false,
-  particles: 16,
+  particles: 24,
   refine: false,
 }
 
 export type SolverPreset = 'fast' | 'balanced' | 'competitive' | 'custom'
 
+/** The preset table, which mirrors `PresetLimits` on the server.
+ *
+ * Keep both tables equal. The server resolves a preset name by itself, so a
+ * table that drifts shows one set of limits and runs another.
+ *
+ * The budget here is the one that a search which finishes takes. A sampled
+ * search takes a much smaller budget, because it spends every turn it gets and
+ * never finishes. `solverProfile` sends no budget for a named preset, so the
+ * server picks the right one from the algorithm. */
 export const SOLVER_PRESETS: Record<Exclude<SolverPreset, 'custom'>, SolverSettings> = {
   fast: {
     ...DEFAULT_SOLVER_SETTINGS,
-    simulationTurnBudget: 10_000,
-    depth: 2,
-    particles: 8,
+    simulationTurnBudget: 418_304,
+    sampledSimulationTurnBudget: 27_530,
+    damageRolls: 3,
+    particles: 12,
   },
   balanced: { ...DEFAULT_SOLVER_SETTINGS },
   competitive: {
     ...DEFAULT_SOLVER_SETTINGS,
-    simulationTurnBudget: 500_000,
-    depth: 4,
-    particles: 32,
+    simulationTurnBudget: 5_358_620,
+    sampledSimulationTurnBudget: 86_220,
+    damageRolls: 16,
+    particles: 48,
   },
 }
 
@@ -125,7 +162,11 @@ export function solverProfile(
   return {
     preset,
     algorithm,
-    simulationTurnBudget: settings.simulationTurnBudget,
+    // A search that finishes needs a budget that holds one whole solve. A
+    // sampled search spends every turn it gets, so its budget sets the seconds
+    // of one answer. Send the one that matches the algorithm. `PresetLimits`
+    // on the server makes the same choice for a request that sends neither.
+    simulationTurnBudget: budgetFor(algorithm, settings),
     depth: settings.depth,
     replacementDepth: settings.replacementDepth ?? undefined,
     damageRolls: settings.damageRolls,
@@ -133,6 +174,23 @@ export function solverProfile(
     particles: isBeliefSearch(algorithm) ? settings.particles : undefined,
     refine: supportsRefinement(algorithm) ? settings.refine : undefined,
   }
+}
+
+/** The budget that one search reads from these settings.
+ *
+ * `PresetLimits::budget_for_algorithm` on the server holds the same rule. */
+export function budgetFor(algorithm: BotAlgorithm, settings: SolverSettings): number {
+  return finishesByItself(algorithm)
+    ? settings.simulationTurnBudget
+    : settings.sampledSimulationTurnBudget
+}
+
+/** True when this search stops on its own rather than on the budget.
+ *
+ * An exact search and PIMC solve a matrix and then stop. Every other search
+ * walks trajectories until something stops it. */
+export function finishesByItself(algorithm: BotAlgorithm): boolean {
+  return supportsRefinement(algorithm)
 }
 
 /** The searches that can reach their depth by refinement.

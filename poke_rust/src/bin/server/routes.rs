@@ -1436,7 +1436,11 @@ mod tests {
                 "informationMode {name:?} resolved {}, which cannot control P2",
                 profile.view.algorithm
             );
-            let expected = crate::bot::DEFAULT_SIMULATION_TURN_BUDGET;
+            // Each mode resolves its own search, and a preset holds one budget
+            // for a search that finishes and another for a sampled one.
+            let resolved =
+                crate::bot::BotAlgorithm::from_wire(name, &profile.view.algorithm).unwrap();
+            let expected = crate::bot::DEFAULT_PRESET.budget_for_algorithm(resolved);
             assert_eq!(
                 profile.view.simulation_turn_budget, expected,
                 "informationMode {name:?}"

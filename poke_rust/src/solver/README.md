@@ -364,6 +364,59 @@ Nash stays the default of every search.
 The server runs the solver as a background job.
 These files live in `poke_rust/src/bin/server/`.
 
+### Server presets
+
+Every preset runs at `bot::PRESET_DEPTH`, which is depth 1.
+The presets differ in the width of that one turn.
+
+| Preset | Damage rolls | Particles | Turns, exact | Turns, sampled |
+|---|---|---|---|---|
+| `fast` | 3 | 12 | 418,304 | 27,530 |
+| `balanced` | 8 | 24 | 3,491,884 | 33,600 |
+| `competitive` | 16 | 48 | 5,358,620 | 86,220 |
+
+A preset holds two budgets.
+An exact search and `pimc` stop when the matrix is solved.
+Their budget must hold that solve.
+A budget below it returns a matrix of static scores, which names no action.
+
+`mcts`, `ismcts`, and `mccfr` spend every turn that they get.
+Their budget sets the seconds of one answer, so it is a much smaller number.
+`PresetLimits::budget_for_algorithm` picks between the two.
+
+`bot::PresetLimits` holds each row.
+`bot::budget_for` derives each budget from a measured doubles solve.
+The budget holds two of those solves, and a factor of two covers a costlier
+pairing.
+`frontend/src/components/solver/solverSettings.ts` holds the same table.
+Keep both tables equal.
+The server resolves a preset name by itself, so a table that drifts shows one
+set of limits and runs another.
+
+A request field replaces the matching preset value.
+A request may still ask for a deeper search.
+
+Depth 2 costs one complete depth-1 solve for each cell of the root matrix.
+A doubles round of that work takes about eight minutes.
+`benches/RESULTS.md` records the measurement.
+A preset therefore buys width instead of a second turn.
+
+Width is not free.
+A doubles position needs about 14,000 simulation turns at one damage roll.
+The same position needs about 1,340,000 at sixteen rolls.
+The extra cost comes from forced decisions, not from the root matrix.
+Each extra roll makes more branches that faint a Pokemon.
+Each faint opens a replacement search that costs more turn simulations.
+The root matrix keeps its size through the whole sweep.
+
+Measured value moves very little across that range.
+The same doubles position returned 0.3290 at two rolls and 0.3273 at sixteen.
+The equilibrium support held five actions at every roll count.
+Read `benches/RESULTS.md` before you raise a roll count for accuracy.
+
+`competitive` is minutes of work for one doubles answer.
+Use `fast` for a live doubles battle.
+
 ### Simulator bot
 
 `analysis.rs` holds the generation, the running job, and the newest checkpoint.

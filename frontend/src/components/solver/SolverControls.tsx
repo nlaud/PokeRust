@@ -1,8 +1,14 @@
 import type { BotAlgorithm } from '../../api/types'
-import { isBeliefSearch, supportsRefinement, type SolverSettings } from './solverSettings'
+import {
+  MAX_PARTICLES,
+  isBeliefSearch,
+  supportsRefinement,
+  type SolverSettings,
+} from './solverSettings'
 
 function NumberField({
   label,
+  title,
   value,
   min,
   max,
@@ -10,6 +16,7 @@ function NumberField({
   onChange,
 }: {
   label: string
+  title?: string
   value: number
   min: number
   max: number
@@ -17,7 +24,7 @@ function NumberField({
   onChange: (value: number) => void
 }) {
   return (
-    <label className="block min-w-[8rem] flex-1">
+    <label className="block min-w-0" title={title}>
       <span className="mb-0.5 block text-ink-muted">{label}</span>
       <input
         type="number"
@@ -32,6 +39,40 @@ function NumberField({
         className="w-full rounded-card border border-subtle bg-card px-2 py-2 text-ink disabled:opacity-50"
       />
     </label>
+  )
+}
+
+/** The damage rolls that every attack of one search reads.
+ *
+ * An attack rolls one of sixteen damage values. A search that reads fewer of
+ * them scores an attack from a sample of its outcomes, so it can miss the roll
+ * that faints a target and the roll that does not.
+ *
+ * This limit is the main precision control of a depth-one search, so it sits
+ * beside the presets rather than inside the advanced drawer. It is also the
+ * most expensive one: `benches/RESULTS.md` records that a doubles position
+ * needs about 14,000 turn simulations at one roll and about 1,340,000 at
+ * sixteen, because each extra roll makes more branches that faint a Pokemon and
+ * each faint opens a replacement search. */
+export function DamageRollField({
+  settings,
+  disabled,
+  onChange,
+}: {
+  settings: SolverSettings
+  disabled?: boolean
+  onChange: (settings: SolverSettings) => void
+}) {
+  return (
+    <NumberField
+      label="Damage rolls (1-16)"
+      title="An attack rolls one of sixteen damage values. A search that reads fewer of them can miss the roll that faints a target. In doubles this is the most expensive limit: sixteen rolls cost about 93 times one roll."
+      value={settings.damageRolls}
+      min={1}
+      max={16}
+      disabled={disabled}
+      onChange={(value) => onChange({ ...settings, damageRolls: value })}
+    />
   )
 }
 
@@ -60,22 +101,24 @@ export default function SolverControls({
 
   return (
     <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-      <label className="block min-w-[8rem] flex-1">
-        <span className="mb-0.5 block text-ink-muted">Simulation turns</span>
-        <input
-          type="number"
-          value={settings.simulationTurnBudget}
-          min={1}
-          max={1_000_000_000}
-          disabled={disabled}
-          onChange={(event) => {
-            const next = Number(event.target.value)
-            if (Number.isFinite(next))
-              set('simulationTurnBudget', Math.max(1, Math.min(1_000_000_000, Math.trunc(next))))
-          }}
-          className="w-full rounded-card border border-subtle bg-card px-2 py-2 text-ink disabled:opacity-50"
-        />
-      </label>
+      <NumberField
+        label="Simulation turns, exact"
+        title="Double Oracle, Serialized Bounds, Backward Induction, and PIMC stop when the matrix is solved. This budget has to hold that solve. A smaller one returns a matrix of static scores, which names no action."
+        value={settings.simulationTurnBudget}
+        min={1}
+        max={1000000000}
+        disabled={disabled}
+        onChange={(value) => set('simulationTurnBudget', value)}
+      />
+      <NumberField
+        label="Simulation turns, sampled"
+        title="ISMCTS, MCCFR, and MCTS spend every turn they are given, so this sets how many seconds one answer takes rather than whether the answer is complete."
+        value={settings.sampledSimulationTurnBudget}
+        min={1}
+        max={1000000000}
+        disabled={disabled}
+        onChange={(value) => set('sampledSimulationTurnBudget', value)}
+      />
       <NumberField
         label="Depth"
         value={settings.depth}
@@ -84,7 +127,7 @@ export default function SolverControls({
         disabled={disabled}
         onChange={(value) => set('depth', value)}
       />
-      <label className="block min-w-[8rem] flex-1">
+      <label className="block min-w-0">
         <span className="mb-0.5 block text-ink-muted">Replacement depth</span>
         <input
           type="number"
@@ -108,20 +151,12 @@ export default function SolverControls({
           Use remaining depth
         </span>
       </label>
-      <NumberField
-        label="Damage rolls"
-        value={settings.damageRolls}
-        min={1}
-        max={16}
-        disabled={disabled}
-        onChange={(value) => set('damageRolls', value)}
-      />
       {(algorithm === undefined || isBeliefSearch(algorithm)) && (
         <NumberField
           label="Particles"
           value={settings.particles}
           min={1}
-          max={32}
+          max={MAX_PARTICLES}
           disabled={disabled}
           onChange={(value) => set('particles', value)}
         />
