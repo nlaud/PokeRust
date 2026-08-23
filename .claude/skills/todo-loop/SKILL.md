@@ -9,6 +9,7 @@ allowed-tools:
   - PushNotification
   - SendUserFile
   - Read
+  - Bash
 ---
 
 # TODO Loop
@@ -37,6 +38,23 @@ to recurring tasks. The seven-day expiry is the maximum supported time.
 
 The scheduled job enqueues `/todo` as a typed prompt. The user does not need to
 be present for the job to fire.
+
+## Auto-continue
+
+A finished TODO run can start the next item in the same turn. Section 6 of
+`.claude/skills/todo/SKILL.md` holds the rule and the numbers. Follow that
+section. Do not write a second copy of the rule here.
+
+The rule reads `.claude/todo/usage-limits.json` again at the decision. The
+number in the run report is old by then, because the used percentage grows
+during a run. A stale cache stops the chain.
+
+A chained run stops at the plan-approval gate. It commits nothing. The user
+returns to one finished commit and one plan that waits for an approval.
+
+The completion report of each run names the decision on an `Auto-continue:`
+line. It also holds a `Test this by hand` list of the checks that no automated
+test covers.
 
 ## Run one task now
 

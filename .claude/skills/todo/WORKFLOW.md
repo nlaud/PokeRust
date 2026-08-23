@@ -32,6 +32,9 @@ message. Write the facts that the user needs, and write nothing more.
 Keep the report under 20 lines. Put the substance in the report. Do not tell the
 user to read a file for a fact that belongs in the report.
 
+The four blocks below do not count against the 20 lines. Write every block in
+full, even a long manual-test block.
+
 Put a screenshot block directly before the contract line in every report:
 
 ```text
@@ -43,6 +46,29 @@ SCREENSHOTS:
 Write `SCREENSHOTS: none` when the run captured no screenshot. The main thread
 shows each listed file to the user. The screenshot block does not replace the
 contract line. Write both.
+
+Put a manual-test block directly before the next-item block in a `DONE:`
+report:
+
+```text
+MANUAL TESTS:
+1. <the action that the user does> — <the result that proves the change works>
+2. <the action that the user does> — <the result that proves the change works>
+```
+
+Write one line for each change that the user can see or drive. Name the exact
+command, page, or control. Name the result that proves the change works.
+
+Do not repeat a check that `cargo test`, `cargo clippy`, or Playwright already
+runs. This block holds only the checks that no automated test covers.
+
+Write `MANUAL TESTS: none` when the task changed no surface that the user can
+reach. A refactor with full test cover is one example.
+
+Write `MANUAL TESTS: none` in a `PAUSED:` report and in a `BLOCKED:` report.
+Those runs shipped no change.
+
+The manual-test block does not replace the contract line. Write both.
 
 Put a next-item block directly before the screenshot block in a `DONE:` report:
 
@@ -179,7 +205,12 @@ Use these sections:
 - **Files** — each file to change, and the change in one line.
 - **Reuse** — existing functions to call, with their paths.
 - **Verification** — the exact commands, and the expected result.
+- **Manual checks** — what the user does by hand, and what the user must see.
 - **Risks** — what could break, and the invariant that protects it.
+
+Write a manual check for each surface that the user can reach. A CLI flag, a web
+control, and a rendered text line are three examples. Section 12 returns this
+list to the user.
 
 Cover every sub-bullet of the task in the plan. Name the sub-bullet that each
 file change satisfies. A sub-bullet with no plan text is a gap. Close it before
@@ -382,9 +413,10 @@ Set the stage to `finalizing`.
 5. Run `git status --short`. Every remaining line must be a change that you
    chose to leave. If a line names an artifact, remove that file.
 6. Record the final commit hash.
-7. Read the current usage limits.
-8. Set `Now: Done` in the progress log. Add the task-end usage.
-9. Delete `state.json`. The task is now closed.
+7. Write the manual checks that the shipped change needs.
+8. Read the current usage limits.
+9. Set `Now: Done` in the progress log. Add the task-end usage.
+10. Delete `state.json`. The task is now closed.
 
 Step 1 comes first because an artifact hides a real change. Playwright writes
 `frontend/test-results/` during section 10, and that output makes step 2 hard to
@@ -393,7 +425,11 @@ read.
 Keep `.claude/todo/screenshots/` in place. The main thread shows those files to
 the user after you return. The next run deletes the directory.
 
-Step 9 ends the task. A later loop run then starts a new task.
+Step 7 builds the manual-test block of section 12. Take the checks from the
+plan. Remove a check that section 10 already ran with Playwright. Add a check
+for a change that the plan did not predict.
+
+Step 10 ends the task. A later loop run then starts a new task.
 
 ## 12. Report
 
@@ -408,9 +444,9 @@ Return a report with these facts:
 - The task-start and task-end usage limits.
 - Any work that you left undone.
 
-End the report with the next-item block, the screenshot block, and the contract
-line, in that order. Read the section *Return contract* for the shape of each
-block.
+End the report with the manual-test block, the next-item block, the screenshot
+block, and the contract line, in that order. Read the section *Return contract*
+for the shape of each block.
 
 The main thread prints this report and sends the push notification. Return
 `DONE:` as the last line.
@@ -473,6 +509,10 @@ Usage: Daily/5h 72% left | Weekly 59% left
 
 Store the task-start values in `state.json`. Do not replace them when a later
 run resumes an active task.
+
+Report both pairs in a `DONE:` report, even when the two pairs are equal. The
+main thread subtracts them to get the cost of the run. It uses that cost to
+decide whether to start the next item.
 
 ## Progress log
 
