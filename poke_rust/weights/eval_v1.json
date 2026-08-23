@@ -19,7 +19,10 @@
     "terrain_control",
     "tailwind",
     "guard_conditions",
-    "trick_room"
+    "trick_room",
+    "bench_threat",
+    "switch_in_damage",
+    "team_coverage"
   ],
   "values": [
     2.003013234453243,
@@ -41,6 +44,9 @@
     0.06861387282338428,
     0.22537370886414468,
     0.044334084248128215,
-    0.12164171658510226
+    0.12164171658510226,
+    0.1,
+    -0.1,
+    0.08
   ]
 }

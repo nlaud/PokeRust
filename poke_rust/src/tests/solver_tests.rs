@@ -4005,6 +4005,12 @@ fn side_swap_symmetry() {
 
 /// Every feature sums over slots or over slot pairs, so exchanging the two
 /// active slots of both sides cannot move the score.
+///
+/// The bench features are the exception that the rule has to cover. A switch-in
+/// owns no slot, so `eval::entry_slot` names the slot that it would enter, and
+/// the damage call reads the ally of that slot. The Friend Guard ally below
+/// makes that reading visible: a constant slot index counts it in one order and
+/// drops it in the other.
 #[test]
 fn slot_order_symmetry() {
     let mut state = battle_state_from_lists(
@@ -4012,14 +4018,16 @@ fn slot_order_symmetry() {
             mon(Species::Pikachu, &[PokemonMove::Thunderbolt]),
             mon(Species::Gyarados, &[PokemonMove::Waterfall]),
         ],
-        vec![],
+        vec![mon(Species::Skarmory, &[PokemonMove::BraveBird])],
         vec![
             mon(Species::Snorlax, &[PokemonMove::BodySlam]),
             mon(Species::Gengar, &[PokemonMove::ShadowBall]),
         ],
-        vec![],
+        vec![mon(Species::Clefable, &[PokemonMove::Moonblast])],
     );
     state.p1_active_mons[0].hp /= 2;
+    state.p1_active_mons[1].ability = crate::data::ability::Ability::FriendGuard;
+    state.p2_active_mons[1].ability = crate::data::ability::Ability::FriendGuard;
 
     let mut exchanged = state.clone();
     exchanged.p1_active_mons.swap(0, 1);

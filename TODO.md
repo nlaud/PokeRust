@@ -31,7 +31,7 @@ Only the fourth stage is a guess.
 | 5 | Average the branches and solve the matrix | Yes |
 
 Stage 4 is `eval::fitted`.
-It builds an antisymmetric vector of 20 features.
+It builds an antisymmetric vector of 23 features.
 It takes a dot product with trained weights.
 It pushes the result through a logistic function to get a win probability.
 
@@ -70,29 +70,6 @@ It is 2 today. A 30-second answer holds about 36,800 iterations at depth 1,
 actions, so depth trades lookahead against the visits for each action. Measure
 that trade with `--policy search` before you move the constant again.
 
-- [ ] 2. Let the evaluator read the bench.
-
-      `eval::matchup_features` reads active against active only.
-      A benched Pokemon contributes `alive_score` and `status_penalty` alone.
-      Its typing, its moves, and its matchup are all invisible.
-
-      Champions doubles brings four Pokemon and leads two.
-      Half of each team therefore scores as a health bar.
-
-      Add these features:
-
-      1. The best incoming matchup of the bench against the opposing active.
-      2. The damage that the best switch-in takes on entry.
-      3. The coverage of the remaining team against the opposing remaining team.
-
-      This is the largest block of information that the position holds and the
-      model does not read.
-
-      `MLP_HIDDEN` equals `FEATURE_COUNT`, so a new feature invalidates the
-      shipped network. Retrain both fits together.
-
-      Done when: the calibration curve of item 1 improves.
-
 - [ ] 3. Replace the bootstrap labels.
 
       Depth-2 labels suited a depth-3 search.
@@ -105,6 +82,10 @@ that trade with `--policy search` before you move the constant again.
 
       One doubles depth-2 label costs minutes, so a rollout is now the cheaper
       source as well as the more honest one.
+
+      This item also owns the three bench features of the old item 2. They
+      ship with hand-set weights, and an untrained column cannot move the
+      calibration curve on its own.
 
       Done when: the fit trains on terminal outcomes, and item 1 improves.
 
@@ -153,7 +134,7 @@ that trade with `--policy search` before you move the constant again.
 
 - [ ] 6. Retire the dead features.
 
-      Three of the twenty features carry no signal in the current corpus.
+      Three features carry no signal in the current corpus.
       They cost work on every leaf and return a constant.
 
       | Feature | Variance |

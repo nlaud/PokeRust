@@ -173,8 +173,13 @@ changes the hidden-layer width. A record from the earlier width cannot be
 reshaped, and `MlpRecord::to_network` refuses it.
 
 The script writes the hand-seeded network at the current width when the widths
-disagree. The linear file needs no repair. `resolve` fills one name at a time,
-so a name that the file does not hold keeps its hand-set value.
+disagree.
+
+The reset also repairs the linear file. `resolve` in `src/solver/eval.rs` fills
+one name at a time, so a name that the file omits already keeps its hand-set
+value in memory. The shipped file must still name every feature, because
+`the_fitted_weights_parse_and_hold_one_value_for_each_feature` reads the file
+directly. `extend_linear` appends each missing name at its hand-set value.
 
 ## Stage 4: the build
 
@@ -282,8 +287,8 @@ Two directories stay out of Git:
 
 ## The field features
 
-This runbook trains a 20-feature evaluator. The last seven features read the
-field and the side conditions:
+This runbook trains a 23-feature evaluator. Seven features read the field and
+the side conditions:
 
 | Feature | What it counts |
 |---|---|
@@ -294,6 +299,23 @@ field and the side conditions:
 | `tailwind` | Tailwind on one side, scaled by the turns it has left. |
 | `guard_conditions` | Safeguard, Mist, and Lucky Chant on one side. |
 | `trick_room` | The remaining Trick Room clock, for the slower side. |
+
+## The bench features
+
+The last three features read the bench:
+
+| Feature | What it counts |
+|---|---|
+| `bench_threat` | What the best switch-in does to the opposing actives. |
+| `switch_in_damage` | What the opposing actives do to that switch-in. |
+| `team_coverage` | The type reach of one living team against the other. |
+
+`eval::best_switch_in` names the Pokemon that the first two features describe.
+It ranks each living bench Pokemon by a type-chart proxy. The damage
+calculation then runs for the winner alone.
+
+These three features raise the leaf cost. Read the section *The bench features*
+in `poke_rust/benches/RESULTS.md` before you add a fourth one.
 
 ### Why a field feature counts a side, not the field
 

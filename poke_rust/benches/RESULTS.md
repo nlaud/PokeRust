@@ -1325,3 +1325,117 @@ A third command, `--policy random --teamsheet-mix 1`, plays uniform joint
 actions. `fitted` wins the mean absolute error there and loses the Brier score
 and the log loss. Uniform play reaches positions that no policy reaches, so
 treat that run as a lower bound and not as the accept rule.
+
+## The bench features, 2026-08-23
+
+`eval::features` now returns 23 values. Three of them read the bench.
+
+| Feature | What it counts |
+|---|---|
+| `bench_threat` | What the best switch-in does to the opposing actives. |
+| `switch_in_damage` | What the opposing actives do to that switch-in. |
+| `team_coverage` | The type reach of one living team against the other. |
+
+`eval::best_switch_in` picks one bench Pokemon with a type-chart proxy. The
+damage calculation then runs for that Pokemon alone. Bench size does not
+multiply the expensive work.
+
+The three columns carry their hand-set values. No training run has moved them
+yet. `TODO.md` item 3 owns that run.
+
+### Evaluator cost
+
+`cargo bench --bench solver_speed -- --leaf-cost`, 16 damage rolls, the same
+singles position as the run of 2026-08-16.
+
+| Evaluator | One leaf, before | One leaf, now |
+|---|---|---|
+| `even` | 2 ns | 2 ns |
+| legacy weights | 5860 ns | 25097 ns |
+| `heuristic` | 5919 ns | 25015 ns |
+| `fitted` | 5909 ns | 24804 ns |
+| `fitted_mlp` | 6099 ns | 25505 ns |
+
+The leaf costs 4.2 times as much. Two parts explain the rise.
+
+1. The switch-in adds 8 damage calculations for each side. The threat features
+   ran 4 on this position, so the damage work is 3 times as large.
+2. `team_coverage` costs 5.7 microseconds. A stub that returns zero drops the
+   `heuristic` row to 19349 ns.
+
+One turn resolution costs about 50 microseconds on this position, so the leaf
+holds a margin of 2. The margin was 8.5 before.
+
+This position is singles, which is the worst case for the ratio. A singles
+position holds one active pair, so the threat features run 4 damage
+calculations against the 16 that the bench adds. A doubles position holds four
+active pairs. The threat features then run 16, and the bench adds 16, so the
+damage work grows by a factor of 2 and not 4.
+
+| Evaluator | Depth-2 solve | Turns | Value |
+|---|---|---|---|
+| legacy weights | 154.44 ms | 1.7k | 0.5642 |
+| `fitted` | 346.99 ms | 3.5k | 0.7573 |
+
+### The accept-rule command, 2,638 positions from 400 games
+
+`cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1`. The
+play policy reads a constant, so this run plays the same 400 games as the run
+of 2026-08-22.
+
+| Evaluator | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|
+| `heuristic`, before | 0.3918 | 0.1879 | 0.5533 | 0.0475 |
+| `heuristic`, now | 0.3889 | 0.1868 | 0.5507 | 0.0480 |
+| `fitted`, before | 0.3590 | 0.1760 | 0.5190 | 0.0257 |
+| `fitted`, now | 0.3567 | 0.1751 | 0.5167 | 0.0275 |
+| `fitted_mlp`, before | 0.3640 | 0.1840 | 0.5386 | 0.0363 |
+| `fitted_mlp`, now | 0.3935 | 0.1874 | 0.5526 | 0.0541 |
+
+`fitted` improves the mean absolute error, the Brier score, and the log loss.
+The expected calibration error rises by 0.0018. The Brier score decomposes into
+a calibration part and a refinement part, and the Brier score falls, so the
+change is not a calibration loss.
+
+The run is a no-regression check and not an improvement check. Three untrained
+columns carry hand-set weights, so they cannot move the curve on their own.
+
+`fitted_mlp` loses on all four statistics. This is expected. The `reset` stage
+reseeded `weights/eval_mlp_v1.json` at width 23, which discards the trained
+network and leaves the hand seed. `eval::fitted` is the default evaluator, so
+play does not change.
+
+### The entry slot and the move type, 2026-08-23
+
+A switch-in owns no slot. The first version of `bench_features` gave the damage
+call the constant slot zero. The call reads the ally of that slot, so a Friend
+Guard ally counted in one slot order and not in the other. `eval::entry_slot`
+now reads the occupant of each slot, so the choice follows the Pokemon through
+an exchange. `solver_tests::slot_order_symmetry` covers the bench columns.
+
+`eval::type_edge` read `MoveData::pokemon_type`. The damage call reads
+`effective_move_type`, so a Pixilate Hyper Voice rated neutral against a
+Dragon-type defender. `type_edge` now reads the same type.
+
+`cargo bench --bench solver_speed -- --leaf-cost` on the singles position of the
+row above. This machine reads a lower floor than that row, so both columns come
+from one sitting.
+
+| Evaluator | Before the two fixes | After |
+|---|---|---|
+| `even` | 2 ns | 2 ns |
+| legacy weights | 23255 ns | 23353 ns |
+| `heuristic` | 22810 ns | 23488 ns |
+| `fitted` | 23560 ns | 23592 ns |
+| `fitted_mlp` | 23271 ns | 23652 ns |
+
+Both fixes cost about 3 percent of one leaf at most, which the run-to-run
+spread of this bench already covers.
+
+The depth-2 solve of the same position moved from 0.7573 to 0.7561 for
+`fitted`, and from 3.5k turns to 3.6k. The move-type fix changes what
+`team_coverage` reports, so the value moves with it.
+
+The accept-rule table above holds the run that came after both fixes. The
+move-type fix moved `fitted` by 0.0001 on the mean absolute error and by 0.0003
+on the expected calibration error.

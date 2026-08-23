@@ -229,9 +229,29 @@ Each feature must be a P1 quantity minus the matching P2 quantity.
 That form gives side-swap symmetry for every weight vector.
 A test asserts this property, so a one-sided feature fails the test suite.
 
+A feature may read a Pokemon that is not on the field.
+`eval::bench_features` reads the bench, and `eval::MoveSelection::Bench` gives
+it the move list of an off-field attacker.
+A switch clears Disable and a Choice lock, so every move with PP is selectable
+there.
+An off-field Pokemon owns no slot, so `eval::entry_slot` names the slot that it
+would enter.
+A slot index is a label, and `slot_order_symmetry` refuses a feature that moves
+when the two active slots exchange.
+`entry_slot` therefore reads the occupant of each slot and not the index.
+
+An off-field feature costs damage calculations, and a leaf must stay far below
+one turn resolution.
+Measure it with `cargo bench --bench solver_speed -- --leaf-cost`.
+
 The old linear weight file stays readable after step 2.
 `resolve` fills one name at a time, and a missing name keeps its hand-set
 value.
+
+The shipped file must still name every feature.
+`the_fitted_weights_parse_and_hold_one_value_for_each_feature` reads the file
+directly, so a silent fallback fails the test suite.
+The `reset` stage appends each missing name at its hand-set value.
 
 The old network file does not stay readable.
 `MLP_HIDDEN` equals `FEATURE_COUNT`, so a new feature changes the hidden-layer

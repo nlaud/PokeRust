@@ -282,8 +282,8 @@ def reseed_network(names, weights, scale):
     `MLP_HIDDEN` equals `FEATURE_COUNT`, so a feature addition changes the
     hidden-layer width as well as the column count. A record from the earlier
     width cannot be reshaped, and `MlpRecord::to_network` correctly refuses it.
-    The linear file does not have this problem: `resolve` fills one name at a
-    time, so a name it does not find keeps its hand-set value.
+
+    `extend_linear` repairs the linear file, which has a different problem.
 
     This mirrors `Mlp::seed` in `src/solver/eval.rs`.
     """
@@ -299,6 +299,47 @@ def reseed_network(names, weights, scale):
     path = os.path.join(POKE_RUST, "weights", "eval_mlp_v1.json")
     with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump({"features": names, "hidden": hidden, "output": output}, handle, indent=2)
+        handle.write("\n")
+
+
+def extend_linear(names, weights):
+    """Adds a missing feature to `weights/eval_v1.json` at its hand-set value.
+
+    `resolve` in `src/solver/eval.rs` fills one name at a time, so a name that
+    the file omits already keeps its hand-set value in memory. The shipped file
+    must still name every feature: a silent fallback would hide a training run
+    that never touched the new column, and
+    `the_fitted_weights_parse_and_hold_one_value_for_each_feature` refuses it.
+
+    The trained values sit on their own scale, so a new column starts small
+    against them. The next training run sets its real size.
+    """
+    path = os.path.join(POKE_RUST, "weights", "eval_v1.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with io.open(path, encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (ValueError, OSError):
+        log("! could not read weights/eval_v1.json; leaving it alone")
+        return
+
+    stored_names = list(stored.get("names", []))
+    stored_values = list(stored.get("values", []))
+    if len(stored_names) != len(stored_values):
+        log("! weights/eval_v1.json names and values disagree; leaving it alone")
+        return
+
+    missing = [name for name in names if name not in stored_names]
+    if not missing:
+        return
+    for name in missing:
+        stored_names.append(name)
+        stored_values.append(weights[names.index(name)])
+    log("linear file gained %d hand-set feature(s): %s"
+        % (len(missing), ", ".join(missing)))
+    with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump({"names": stored_names, "values": stored_values}, handle, indent=2)
         handle.write("\n")
 
 
@@ -348,6 +389,7 @@ def stage_reset(args):
         log("network file holds %d feature(s), the frame holds %d; reseeding"
             % (len(stored), len(names)))
         reseed_network(names, weights, scale)
+    extend_linear(names, weights)
     log("feature frame: %d features (%s)" % (len(names), ", ".join(names)))
 
 

@@ -29,6 +29,22 @@
 //!
 //! A side condition is already stored per side, so it needs no re-expression.
 //!
+//! # The bench
+//!
+//! A benched Pokemon scores through `health` and `status` alone in the first
+//! twenty features. Champions doubles brings four Pokemon and leads two, so
+//! half of each team would otherwise score as a health bar.
+//!
+//! [`bench_features`] adds three values that read the bench:
+//!
+//! - `bench_threat` — what the best switch-in does to the opposing actives.
+//! - `switch_in_damage` — what the opposing actives do to that switch-in.
+//! - `team_coverage` — the type reach of the whole living team.
+//!
+//! [`best_switch_in`] picks one Pokemon with a type-chart proxy, and the damage
+//! calculation then runs for that Pokemon alone. Bench size therefore does not
+//! multiply the expensive work.
+//!
 //! # Three scorers
 //!
 //! [`heuristic`] uses the hand-set weights in [`HAND_WEIGHTS`].
@@ -77,7 +93,8 @@ use crate::information::unknowns::UnknownBattleState;
 use crate::simulator::{DamageConfig, get_possible_commands_for_active_slot};
 use crate::simulator::helpers::{
     accuracy_hit_probability, calculate_damage_outcomes_for_target, current_terrain,
-    current_weather, effective_move_priority, effective_speed_for_slot, pokemon_is_grounded,
+    current_weather, effective_move_priority, effective_move_type, effective_speed_for_slot,
+    move_type_effectiveness_with_attacker, pokemon_is_grounded,
 };
 use crate::state::battle::{
     BattleCommand, BattleState, FieldSlot, Player, try_mega_evolution,
@@ -151,7 +168,7 @@ pub fn score_batch(
 // ── The feature frame ───────────────────────────────────────────────────────
 
 /// How many features the value model holds.
-pub const FEATURE_COUNT: usize = 20;
+pub const FEATURE_COUNT: usize = 23;
 
 /// Names the features in index order.
 /// `weights/eval_v1.json` stores a value against each name.
@@ -176,6 +193,9 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "tailwind",
     "guard_conditions",
     "trick_room",
+    "bench_threat",
+    "switch_in_damage",
+    "team_coverage",
 ];
 
 /// One value for each feature, in the order of [`FEATURE_NAMES`].
@@ -186,7 +206,8 @@ pub type Features = [f64; FEATURE_COUNT];
 /// The first five entries reproduce the health, status, boost, and hazard terms
 /// of the original evaluator.
 /// The next eight are initial values for the matchup features.
-/// The last seven are initial values for the field and side-condition features.
+/// The next seven are initial values for the field and side-condition features.
+/// The last three are initial values for the bench features.
 pub const HAND_WEIGHTS: Features = [
     1.0,  // health
     -1.0, // status
@@ -208,6 +229,9 @@ pub const HAND_WEIGHTS: Features = [
     0.14, // tailwind
     0.05, // guard_conditions
     0.06, // trick_room
+    0.10, // bench_threat
+    -0.10, // switch_in_damage
+    0.08, // team_coverage
 ];
 
 /// Fraction of a Pokémon score that does not depend on remaining HP.
@@ -272,8 +296,9 @@ pub fn score_with(state: &BattleState, ctx: &EvalContext<'_>, weights: &Features
 ///
 /// Each entry is a P1 quantity minus the matching P2 quantity.
 pub fn features(state: &BattleState, ctx: &EvalContext<'_>) -> Features {
-    let p1 = side_features(state, Player::P1, ctx);
-    let p2 = side_features(state, Player::P2, ctx);
+    let commands = ActiveCommands::build(state, ctx);
+    let p1 = side_features(state, Player::P1, ctx, &commands);
+    let p2 = side_features(state, Player::P2, ctx, &commands);
     let mut out = [0.0; FEATURE_COUNT];
     for ((slot, own), theirs) in out.iter_mut().zip(p1.iter()).zip(p2.iter()) {
         *slot = own - theirs;
@@ -291,7 +316,12 @@ fn dot(weights: &Features, values: &Features) -> f64 {
 }
 
 /// One side's own quantities, before the subtraction.
-fn side_features(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> Features {
+fn side_features(
+    state: &BattleState,
+    player: Player,
+    ctx: &EvalContext<'_>,
+    commands: &ActiveCommands,
+) -> Features {
     let (active, bench, side_conditions, condition_turns, has_tera, has_mega) = match player {
         Player::P1 => (
             &state.p1_active_mons,
@@ -349,29 +379,43 @@ fn side_features(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> 
     out[18] = guard_conditions(side_conditions, condition_turns);
 
     let (threat, guaranteed, possible, speed, trick_room) =
-        matchup_features(state, player, ctx);
+        matchup_features(state, player, ctx, commands);
     out[5] = threat;
     out[6] = guaranteed;
     out[7] = possible;
     out[8] = speed;
     out[19] = trick_room;
+
+    let (bench_threat, switch_in_damage, team_coverage) =
+        bench_features(state, player, ctx, commands);
+    out[20] = bench_threat;
+    out[21] = switch_in_damage;
+    out[22] = team_coverage;
     out
 }
 
 /// Scores one Pokémon from health alone.
 fn alive_score(mon: &PokemonState) -> f64 {
-    if mon.fainted || mon.hp == 0 {
+    if !is_alive(mon) {
         return 0.0;
     }
+    ALIVE_SHARE + (1.0 - ALIVE_SHARE) * hp_fraction(mon)
+}
+
+/// Whether one Pokémon can still act.
+fn is_alive(mon: &PokemonState) -> bool {
+    !mon.fainted && mon.hp > 0
+}
+
+/// Remaining HP as a fraction of maximum HP, from zero through one.
+fn hp_fraction(mon: &PokemonState) -> f64 {
     let max_hp = mon.stats[0];
-    let hp_fraction = if max_hp == 0 {
+    if max_hp == 0 {
         // Not reachable through normal team construction; scoring it as healthy
         // beats dividing by zero.
-        1.0
-    } else {
-        (f64::from(mon.hp) / f64::from(max_hp)).clamp(0.0, 1.0)
-    };
-    ALIVE_SHARE + (1.0 - ALIVE_SHARE) * hp_fraction
+        return 1.0;
+    }
+    (f64::from(mon.hp) / f64::from(max_hp)).clamp(0.0, 1.0)
 }
 
 /// Returns the score cost of a nonvolatile status.
@@ -709,12 +753,14 @@ fn protect_pressure(mon: &PokemonState, ctx: &EvalContext<'_>) -> f64 {
 /// active slot. Targeting falls out of that loop: a side that threatens both
 /// opposing slots scores both pairs.
 ///
-/// Each attacker asks for its legal commands once, outside the defender loop.
-/// That call is the largest single cost of one leaf.
+/// [`ActiveCommands`] holds the legal commands of each attacker. That call is
+/// the largest single cost of one leaf, so [`features`] makes it one time for
+/// all four active slots.
 fn matchup_features(
     state: &BattleState,
     player: Player,
     ctx: &EvalContext<'_>,
+    commands: &ActiveCommands,
 ) -> (f64, f64, f64, f64, f64) {
     let (attackers, defenders) = match player {
         Player::P1 => (&state.p1_active_mons, &state.p2_active_mons),
@@ -740,13 +786,7 @@ fn matchup_features(
             player,
             slot_index: attacker_index as u8,
         };
-        let legal_commands = get_possible_commands_for_active_slot(
-            state,
-            player,
-            attacker_index,
-            ctx.move_dex,
-            ctx.pokemon_dex,
-        );
+        let legal_commands = commands.of(player, attacker_index);
         for (defender_index, defender) in defenders.iter().enumerate() {
             if defender.fainted || defender.hp == 0 {
                 continue;
@@ -777,7 +817,10 @@ fn matchup_features(
                 defender,
                 user_slot,
                 target_slot,
-                &legal_commands,
+                MoveSelection::Commands {
+                    commands: legal_commands,
+                    match_target: true,
+                },
                 ctx,
             ) {
                 threat += best.expected_fraction;
@@ -788,6 +831,372 @@ fn matchup_features(
     }
 
     (threat, guaranteed, possible, speed, room_edge)
+}
+
+
+// -- The bench --------------------------------------------------------------
+
+/// The smallest type edge that [`type_edge`] returns, in log2 units.
+///
+/// A quarter multiplier reads this value. An immunity and an attacker with no
+/// damaging move read it too, because neither can take HP away.
+const TYPE_EDGE_FLOOR: f64 = -2.0;
+
+/// The largest type edge that [`type_edge`] returns, in log2 units.
+/// A quadruple multiplier reads this value.
+const TYPE_EDGE_CEILING: f64 = 2.0;
+
+/// The bench features of one side, as
+/// `(bench_threat, switch_in_damage, team_coverage)`.
+///
+/// [`best_switch_in`] names the one bench Pokemon that the first two values
+/// describe. This follows the rule that [`best_attack`] already holds for the
+/// three threat features: the values describe one choice, not a sum over every
+/// choice.
+///
+/// The first two values are zero when the side has no living bench Pokemon.
+///
+/// Entry hazard damage stays out of `switch_in_damage`. The `hazards` feature
+/// already holds it, and adding it twice would double its weight.
+fn bench_features(
+    state: &BattleState,
+    player: Player,
+    ctx: &EvalContext<'_>,
+    commands: &ActiveCommands,
+) -> (f64, f64, f64) {
+    let coverage = team_coverage(state, player, ctx);
+    let defenders = match player {
+        Player::P1 => &state.p2_active_mons,
+        Player::P2 => &state.p1_active_mons,
+    };
+    let Some(switch_in) = best_switch_in(state, player, ctx) else {
+        return (0.0, 0.0, coverage);
+    };
+
+    let entry_slot = entry_slot(state, player);
+    let opponent = other_player(player);
+
+    let mut threat = 0.0;
+    let mut incoming = 0.0;
+    for (defender_index, defender) in defenders.iter().enumerate() {
+        if !is_alive(defender) {
+            continue;
+        }
+        let defender_slot = FieldSlot {
+            player: opponent,
+            slot_index: defender_index as u8,
+        };
+        if let Some(best) = best_attack(
+            state,
+            switch_in,
+            defender,
+            entry_slot,
+            defender_slot,
+            MoveSelection::Bench,
+            ctx,
+        ) {
+            threat += best.expected_fraction;
+        }
+        if let Some(best) = best_attack(
+            state,
+            defender,
+            switch_in,
+            defender_slot,
+            entry_slot,
+            MoveSelection::Commands {
+                commands: commands.of(opponent, defender_index),
+                match_target: false,
+            },
+            ctx,
+        ) {
+            incoming += best.expected_fraction;
+        }
+    }
+
+    (threat, incoming, coverage)
+}
+
+/// The active slot that a switch-in enters.
+///
+/// The Pokemon is off the field, so it owns no slot, and no position says which
+/// active it replaces. The damage call still reads a slot. `berry_env` reads the
+/// occupant of the slot, `friend_guard_mult` and `has_plus_minus_partner` read
+/// the other slots of the same side, and the screens read the whole side.
+///
+/// A slot index is a label alone. Exchanging the two active slots of a side must
+/// not move a feature, and `solver_tests::slot_order_symmetry` asserts that rule
+/// for the whole frame. A constant index breaks it: a Friend Guard ally counts
+/// in one order and not in the other.
+///
+/// Every key of this choice therefore travels with the Pokemon and not with the
+/// index. The slot is the one whose occupant is least able to stay in: a
+/// fainted occupant first, then the smallest HP fraction, then the smallest
+/// `mon_id`. `mon_id` is unique inside one team, so the order is total and the
+/// chosen Pokemon follows an exchange into its new slot.
+///
+/// Returns the first slot when the side holds no active slot at all.
+fn entry_slot(state: &BattleState, player: Player) -> FieldSlot {
+    let active = match player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    let slot_index = active
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            is_alive(left)
+                .cmp(&is_alive(right))
+                .then_with(|| hp_fraction(left).total_cmp(&hp_fraction(right)))
+                .then_with(|| left.mon_id.cmp(&right.mon_id))
+        })
+        .map_or(0, |(index, _)| index as u8);
+    FieldSlot { player, slot_index }
+}
+
+/// The bench Pokemon that reads the best type-chart proxy against the opposing
+/// actives.
+///
+/// The proxy is `coverage_out - coverage_in`, summed over the living opposing
+/// actives. It costs type-chart reads alone, so bench size does not multiply
+/// the damage calculation that [`bench_features`] then runs.
+///
+/// A larger HP fraction breaks a tie. The party index breaks a second tie.
+///
+/// Returns `None` when the side has no living bench Pokemon.
+fn best_switch_in<'a>(
+    state: &'a BattleState,
+    player: Player,
+    ctx: &EvalContext<'_>,
+) -> Option<&'a PokemonState> {
+    let (bench, defenders) = match player {
+        Player::P1 => (&state.p1_back_mons, &state.p2_active_mons),
+        Player::P2 => (&state.p2_back_mons, &state.p1_active_mons),
+    };
+    let mut best: Option<(&PokemonState, f64, f64)> = None;
+    for mon in bench.iter().filter(|mon| is_alive(mon)) {
+        let mut proxy = 0.0;
+        for defender in defenders.iter().filter(|mon| is_alive(mon)) {
+            proxy += type_edge(state, mon, defender, ctx);
+            proxy -= type_edge(state, defender, mon, ctx);
+        }
+        let health = hp_fraction(mon);
+        let better = match best {
+            None => true,
+            Some((_, stored_proxy, stored_health)) => {
+                proxy > stored_proxy || (proxy == stored_proxy && health > stored_health)
+            }
+        };
+        if better {
+            best = Some((mon, proxy, health));
+        }
+    }
+    best.map(|(mon, _, _)| mon)
+}
+
+/// The type reach of one living team against the other living team.
+///
+/// Each opposing Pokemon, active and benched, contributes the best type edge
+/// that any living own Pokemon holds against it. The value is the mean over the
+/// opposing Pokemon, so team size does not change its scale.
+///
+/// The value is zero when either side has no living Pokemon.
+fn team_coverage(state: &BattleState, player: Player, ctx: &EvalContext<'_>) -> f64 {
+    let (own_active, own_bench, their_active, their_bench) = match player {
+        Player::P1 => (
+            &state.p1_active_mons,
+            &state.p1_back_mons,
+            &state.p2_active_mons,
+            &state.p2_back_mons,
+        ),
+        Player::P2 => (
+            &state.p2_active_mons,
+            &state.p2_back_mons,
+            &state.p1_active_mons,
+            &state.p1_back_mons,
+        ),
+    };
+    let attackers: Vec<&PokemonState> = own_active
+        .iter()
+        .chain(own_bench.iter())
+        .filter(|mon| is_alive(mon))
+        .collect();
+    if attackers.is_empty() {
+        return 0.0;
+    }
+
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for defender in their_active
+        .iter()
+        .chain(their_bench.iter())
+        .filter(|mon| is_alive(mon))
+    {
+        let mut best = TYPE_EDGE_FLOOR;
+        for attacker in attackers.iter() {
+            let edge = type_edge(state, attacker, defender, ctx);
+            if edge > best {
+                best = edge;
+            }
+        }
+        total += best;
+        count += 1;
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    total / count as f64
+}
+
+/// The best type multiplier of one attacker against one defender, in log2 units.
+///
+/// The value is `log2(multiplier)`, clamped to the range [`TYPE_EDGE_FLOOR`]
+/// through [`TYPE_EDGE_CEILING`]. Neutral therefore reads zero, and the map is
+/// odd in the multiplier, so a resisted matchup and a super-effective one are
+/// worth the same amount with opposite signs.
+///
+/// The reading is a proxy. It skips base power, the attacking stats, and PP, so
+/// it costs the type chart alone.
+///
+/// The move type is the one that the damage calculation would use.
+/// `effective_move_type` holds Weather Ball, Terrain Pulse, Aura Wheel, an -ate
+/// ability, Liquid Voice, and Electrify, so a Pixilate Hyper Voice reads Fairy
+/// here as well as in `single_move_value`. Reading `MoveData::pokemon_type`
+/// instead would rate that attacker neutral against a Dragon-type defender.
+fn type_edge(
+    state: &BattleState,
+    attacker: &PokemonState,
+    defender: &PokemonState,
+    ctx: &EvalContext<'_>,
+) -> f64 {
+    let mut best = TYPE_EDGE_FLOOR;
+    for move_data in attacker
+        .moves
+        .iter()
+        .flatten()
+        .filter_map(|name| ctx.move_dex.get(name))
+    {
+        if matches!(move_data.category, MoveCategory::Status) {
+            continue;
+        }
+        let multiplier = move_type_effectiveness_with_attacker(
+            state,
+            &effective_move_type(state, attacker, move_data),
+            Some(attacker),
+            defender,
+        );
+        let edge = multiplier.log2().clamp(TYPE_EDGE_FLOOR, TYPE_EDGE_CEILING);
+        if edge > best {
+            best = edge;
+        }
+    }
+    best
+}
+
+/// Which move slots one attacker may pick.
+///
+/// An attacker that stands in an active slot reads a legal-command list. A move
+/// without PP, a disabled move, and a move that a Choice item locks away are all
+/// absent from that list, so none of them scores as a threat.
+///
+/// An attacker that sits on the bench has no slot and no list. A switch clears
+/// Disable and a Choice lock, so every move that still holds PP is selectable.
+#[derive(Debug, Clone, Copy)]
+enum MoveSelection<'a> {
+    /// The legal commands of one active slot.
+    ///
+    /// Set `match_target` when the target stands on the field. Clear it when the
+    /// target sits on the bench, because no command names a bench slot and the
+    /// check would then refuse every targeted move.
+    Commands {
+        commands: &'a [BattleCommand],
+        match_target: bool,
+    },
+    /// The attacker sits on the bench.
+    Bench,
+}
+
+impl MoveSelection<'_> {
+    /// Whether the attacker may pick the move in `move_slot`.
+    fn allows(&self, move_slot: usize, attacker: &PokemonState, target_slot: FieldSlot) -> bool {
+        match self {
+            MoveSelection::Commands {
+                commands,
+                match_target,
+            } => commands.iter().any(|command| {
+                let BattleCommand::Attack(attack) = command else {
+                    return false;
+                };
+                attack.move_slot == move_slot
+                    && !attack.terastallize
+                    && !attack.mega_evolve
+                    && (!*match_target
+                        || attack.target.is_none_or(|target| target == target_slot))
+            }),
+            MoveSelection::Bench => attacker
+                .move_pp
+                .get(move_slot)
+                .is_some_and(|left| *left > 0),
+        }
+    }
+}
+
+/// The legal commands of every active slot of one position.
+///
+/// [`matchup_features`] reads the list of each own active, and
+/// [`bench_features`] reads the list of each opposing active. Both sides need
+/// both lists, so [`features`] builds all four one time. The call count of one
+/// leaf therefore stays at four.
+///
+/// A fainted slot holds an empty list. No feature reads it.
+struct ActiveCommands {
+    p1: Vec<Vec<BattleCommand>>,
+    p2: Vec<Vec<BattleCommand>>,
+}
+
+impl ActiveCommands {
+    /// Builds the list of each living active slot.
+    fn build(state: &BattleState, ctx: &EvalContext<'_>) -> ActiveCommands {
+        ActiveCommands {
+            p1: Self::for_side(state, Player::P1, ctx),
+            p2: Self::for_side(state, Player::P2, ctx),
+        }
+    }
+
+    fn for_side(
+        state: &BattleState,
+        player: Player,
+        ctx: &EvalContext<'_>,
+    ) -> Vec<Vec<BattleCommand>> {
+        let active = match player {
+            Player::P1 => &state.p1_active_mons,
+            Player::P2 => &state.p2_active_mons,
+        };
+        active
+            .iter()
+            .enumerate()
+            .map(|(index, mon)| {
+                if !is_alive(mon) {
+                    return Vec::new();
+                }
+                get_possible_commands_for_active_slot(
+                    state,
+                    player,
+                    index,
+                    ctx.move_dex,
+                    ctx.pokemon_dex,
+                )
+            })
+            .collect()
+    }
+
+    /// The list of one slot, or an empty list when the slot does not exist.
+    fn of(&self, player: Player, slot_index: usize) -> &[BattleCommand] {
+        let side = match player {
+            Player::P1 => &self.p1,
+            Player::P2 => &self.p2,
+        };
+        side.get(slot_index).map_or(&[], |list| list.as_slice())
+    }
 }
 
 /// What one attack does to one target.
@@ -808,9 +1217,8 @@ struct AttackValue {
 /// then describe that same move, so the three threat features always describe
 /// one choice.
 ///
-/// `legal_commands` holds the commands that the slot may still pick. A move
-/// without PP, a disabled move, and a move that a Choice item locks away are
-/// all absent from that list, so none of them scores as a threat.
+/// `selection` decides which move slots the attacker may pick. Read
+/// [`MoveSelection`] for the two cases.
 ///
 /// The plain form of each move supplies the estimate. Terastallization and Mega
 /// Evolution change the user, and neither is free, so the threat features price
@@ -823,23 +1231,14 @@ fn best_attack(
     defender: &PokemonState,
     user_slot: FieldSlot,
     target_slot: FieldSlot,
-    legal_commands: &[BattleCommand],
+    selection: MoveSelection<'_>,
     ctx: &EvalContext<'_>,
 ) -> Option<AttackValue> {
     let mut best: Option<AttackValue> = None;
     for (move_slot, name) in attacker.moves.iter().enumerate().filter_map(|(slot, name)| {
         name.as_ref().map(|name| (slot, name))
     }) {
-        let selectable = legal_commands.iter().any(|command| {
-            let BattleCommand::Attack(attack) = command else {
-                return false;
-            };
-            attack.move_slot == move_slot
-                && !attack.terastallize
-                && !attack.mega_evolve
-                && attack.target.is_none_or(|target| target == target_slot)
-        });
-        if !selectable {
+        if !selection.allows(move_slot, attacker, target_slot) {
             continue;
         }
         let Some(move_data) = ctx.move_dex.get(name) else {
@@ -1449,6 +1848,290 @@ mod tests {
             vec![mon(Species::Pikachu, pokemon_dex, move_dex)],
             vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
         );
+        assert!((heuristic(&state, &ctx()) - 0.5).abs() < 1e-9);
+    }
+
+    /// Builds a Pokemon with a named move set.
+    fn mon_with_moves(
+        species: Species,
+        moves: [Option<PokemonMove>; 4],
+        pokemon_dex: &HashMap<Species, PokemonData>,
+        move_dex: &HashMap<PokemonMove, MoveData>,
+    ) -> PokemonState {
+        build_pokemon_state(
+            species,
+            pokemon_dex,
+            move_dex,
+            Some(50),
+            Some(moves),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// One named feature of one side, before the subtraction.
+    ///
+    /// The bench features read one side alone, so a test that reads the
+    /// subtracted vector would also move with the other side.
+    fn own(state: &BattleState, player: Player, name: &str) -> f64 {
+        let ctx = ctx();
+        let commands = ActiveCommands::build(state, &ctx);
+        side_features(state, player, &ctx, &commands)[feature(name)]
+    }
+
+    /// One move on one bench Pokemon, against one opposing active.
+    fn bench_position(bench_move: PokemonMove) -> BattleState {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        battle_state_from_lists(
+            vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
+            vec![mon_with_moves(
+                Species::Pikachu,
+                [Some(bench_move), None, None, None],
+                pokemon_dex,
+                move_dex,
+            )],
+            vec![mon(Species::Gyarados, pokemon_dex, move_dex)],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_super_effective_bench_move_raises_bench_threat() {
+        // Thunderbolt is four times effective against Water and Flying.
+        let weak = own(&bench_position(PokemonMove::Tackle), Player::P1, "bench_threat");
+        let strong = own(
+            &bench_position(PokemonMove::Thunderbolt),
+            Player::P1,
+            "bench_threat",
+        );
+        assert!(weak > 0.0, "a neutral bench move must still threaten");
+        assert!(
+            strong > weak,
+            "bench_threat must rise: {strong} against {weak}"
+        );
+    }
+
+    /// One move on one opposing active, against one bench Pokemon.
+    fn incoming_position(active_move: PokemonMove) -> BattleState {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        battle_state_from_lists(
+            vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
+            vec![mon(Species::Gyarados, pokemon_dex, move_dex)],
+            vec![mon_with_moves(
+                Species::Pikachu,
+                [Some(active_move), None, None, None],
+                pokemon_dex,
+                move_dex,
+            )],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_super_effective_opposing_move_raises_switch_in_damage() {
+        let weak = own(
+            &incoming_position(PokemonMove::Tackle),
+            Player::P1,
+            "switch_in_damage",
+        );
+        let strong = own(
+            &incoming_position(PokemonMove::Thunderbolt),
+            Player::P1,
+            "switch_in_damage",
+        );
+        assert!(weak > 0.0, "a neutral opposing move must still hurt");
+        assert!(
+            strong > weak,
+            "switch_in_damage must rise: {strong} against {weak}"
+        );
+    }
+
+    #[test]
+    fn an_empty_bench_reads_zero_for_both_bench_features() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, pokemon_dex, move_dex)],
+            vec![],
+            vec![mon(Species::Gyarados, pokemon_dex, move_dex)],
+            vec![],
+        );
+        assert_eq!(own(&state, Player::P1, "bench_threat"), 0.0);
+        assert_eq!(own(&state, Player::P1, "switch_in_damage"), 0.0);
+
+        // A fainted bench Pokemon cannot come in, so it reads the same way.
+        let mut fainted = bench_position(PokemonMove::Thunderbolt);
+        fainted.p1_back_mons[0].hp = 0;
+        fainted.p1_back_mons[0].fainted = true;
+        assert_eq!(own(&fainted, Player::P1, "bench_threat"), 0.0);
+        assert_eq!(own(&fainted, Player::P1, "switch_in_damage"), 0.0);
+    }
+
+    #[test]
+    fn covering_the_opposing_team_raises_team_coverage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let covered = |own_move: PokemonMove| {
+            battle_state_from_lists(
+                vec![mon_with_moves(
+                    Species::Snorlax,
+                    [Some(own_move), None, None, None],
+                    pokemon_dex,
+                    move_dex,
+                )],
+                vec![],
+                vec![mon(Species::Gyarados, pokemon_dex, move_dex)],
+                vec![],
+            )
+        };
+        let neutral = own(&covered(PokemonMove::Tackle), Player::P1, "team_coverage");
+        let strong = own(
+            &covered(PokemonMove::Thunderbolt),
+            Player::P1,
+            "team_coverage",
+        );
+        // Neutral is one times, and four times is two doublings.
+        assert!((neutral - 0.0).abs() < 1e-9, "neutral read {neutral}");
+        assert!((strong - 2.0).abs() < 1e-9, "four times read {strong}");
+    }
+
+    /// A slot index is a label, so exchanging the two active slots of both sides
+    /// must not move a feature.
+    ///
+    /// The bench features read a slot that no Pokemon owns. A constant index
+    /// there reads the ally of slot zero, which an exchange moves.
+    #[test]
+    fn exchanging_the_active_slots_does_not_move_the_bench_features() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        // The switch-in holds Minus and one special move, so a Plus ally raises
+        // `bench_threat`. A Friend Guard ally lowers `switch_in_damage`. Both
+        // readings come from the ally of the entry slot.
+        let position = |ally: Ability| {
+            let mut state = battle_state_from_lists(
+                vec![
+                    mon(Species::Pikachu, pokemon_dex, move_dex),
+                    mon(Species::Clefable, pokemon_dex, move_dex),
+                ],
+                vec![mon_with_moves(
+                    Species::Snorlax,
+                    [Some(PokemonMove::Thunderbolt), None, None, None],
+                    pokemon_dex,
+                    move_dex,
+                )],
+                vec![
+                    mon(Species::Gyarados, pokemon_dex, move_dex),
+                    mon(Species::Gengar, pokemon_dex, move_dex),
+                ],
+                vec![],
+            );
+            state.p1_active_mons[1].ability = ally;
+            state.p1_back_mons[0].ability = Ability::Minus;
+            state
+        };
+        let exchanged = |state: &BattleState| {
+            let mut out = state.clone();
+            out.p1_active_mons.swap(0, 1);
+            out.p2_active_mons.swap(0, 1);
+            out
+        };
+
+        // The ally must reach both readings, or the invariance below holds for
+        // no reason.
+        let plain = position(Ability::CuteCharm);
+        assert!(
+            own(&position(Ability::Plus), Player::P1, "bench_threat")
+                > own(&plain, Player::P1, "bench_threat"),
+            "a Plus ally did not reach bench_threat"
+        );
+        assert!(
+            own(&position(Ability::FriendGuard), Player::P1, "switch_in_damage")
+                < own(&plain, Player::P1, "switch_in_damage"),
+            "a Friend Guard ally did not reach switch_in_damage"
+        );
+
+        for ally in [Ability::CuteCharm, Ability::Plus, Ability::FriendGuard] {
+            let state = position(ally.clone());
+            let swapped = exchanged(&state);
+            for name in ["bench_threat", "switch_in_damage", "team_coverage"] {
+                let before = own(&state, Player::P1, name);
+                let after = own(&swapped, Player::P1, name);
+                assert!(
+                    (before - after).abs() < 1e-12,
+                    "{name} moved from {before} to {after} with a {ally:?} ally"
+                );
+            }
+            let before = heuristic(&state, &ctx());
+            let after = heuristic(&swapped, &ctx());
+            assert!(
+                (before - after).abs() < 1e-12,
+                "the score moved from {before} to {after} with a {ally:?} ally"
+            );
+        }
+    }
+
+    /// The type-chart proxy must read the move type that the damage calculation
+    /// reads.
+    #[test]
+    fn a_type_changing_ability_reaches_the_type_edge() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let position = |ability: Ability| {
+            let mut state = battle_state_from_lists(
+                vec![mon_with_moves(
+                    Species::Sylveon,
+                    [Some(PokemonMove::HyperVoice), None, None, None],
+                    pokemon_dex,
+                    move_dex,
+                )],
+                vec![],
+                vec![mon(Species::Dragonite, pokemon_dex, move_dex)],
+                vec![],
+            );
+            state.p1_active_mons[0].ability = ability;
+            state
+        };
+        // Hyper Voice is Normal, which Dragon and Flying both take neutrally.
+        let plain = own(&position(Ability::CuteCharm), Player::P1, "team_coverage");
+        // Pixilate makes it Fairy, and Dragon takes Fairy for double damage.
+        let converted = own(&position(Ability::Pixilate), Player::P1, "team_coverage");
+        assert!((plain - 0.0).abs() < 1e-9, "Normal read {plain}");
+        assert!((converted - 1.0).abs() < 1e-9, "Fairy read {converted}");
+    }
+
+    #[test]
+    fn a_mirrored_doubles_position_with_a_bench_is_even() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let side = || {
+            vec![
+                mon(Species::Pikachu, pokemon_dex, move_dex),
+                mon(Species::Gyarados, pokemon_dex, move_dex),
+            ]
+        };
+        let bench = || {
+            vec![
+                mon(Species::Snorlax, pokemon_dex, move_dex),
+                mon(Species::Skarmory, pokemon_dex, move_dex),
+            ]
+        };
+        let state = battle_state_from_lists(side(), bench(), side(), bench());
+        let values = features(&state, &ctx());
+        for name in ["bench_threat", "switch_in_damage", "team_coverage"] {
+            assert!(
+                values[feature(name)].abs() < 1e-12,
+                "{name} read {}",
+                values[feature(name)]
+            );
+        }
         assert!((heuristic(&state, &ctx()) - 0.5).abs() < 1e-9);
     }
 
