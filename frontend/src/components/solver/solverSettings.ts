@@ -89,12 +89,37 @@ export interface SolverSettings {
    * many seconds one answer takes. It is much smaller for that reason.
    * `PresetLimits` on the server holds the same pair. */
   sampledSimulationTurnBudget: number
+  /** The depth of a search that enumerates every branch of a turn.
+   *
+   * Such a search multiplies its tree for each ply, so this stays at
+   * `PRESET_DEPTH`. `PresetLimits::depth` on the server holds the same value. */
   depth: number
+  /** The depth of a belief search.
+   *
+   * ISMCTS and MCCFR draw one outcome for each ply, so one more ply costs one
+   * more draw and not a whole subtree. Lookahead is what dilutes the error of
+   * the leaf evaluator, so a fog-of-war search spends its budget here.
+   * `PresetLimits::sampled_depth` on the server holds the same value. */
+  sampledDepth: number
   replacementDepth: number | null
+  /** The damage rolls of a search that enumerates every branch of a turn.
+   *
+   * Each roll multiplies the branch set, so this is the most expensive limit of
+   * an exact search. `PresetLimits::exact_damage_rolls` holds the same value. */
   damageRolls: number
+  /** The damage rolls of a belief search.
+   *
+   * Such a search draws one outcome for each turn whatever this number is, so a
+   * roll widens the set that the draw comes from rather than multiplying the
+   * work. Sixteen rolls cost 1.6 times one roll here, against 3,400 times for
+   * MCTS. `PresetLimits::sampled_damage_rolls` holds the same value. */
+  sampledDamageRolls: number
   considerCrit: boolean
   particles: number
-  /** Reaches the depth by refinement instead of by a complete search. */
+  /** Reaches the depth by refinement instead of by a complete search.
+   *
+   * The server rejects this flag unless the depth is above the refine base
+   * depth of 1, because a request at that depth has nothing to raise. */
   refine: boolean
 }
 
@@ -110,15 +135,36 @@ export interface SolverSettings {
  * Depth field below still accepts a deeper request. */
 export const PRESET_DEPTH = 1
 
+/** The depth that a belief preset runs.
+ *
+ * ISMCTS and MCCFR descend one sampled path for each iteration, so one more ply
+ * costs one more draw rather than a whole subtree. That makes depth a linear
+ * cost for a fog-of-war search and an exponential one for an exact search, so
+ * the two families do not share a depth.
+ *
+ * One turn budget buys about the same seconds at every depth. It buys fewer and
+ * deeper iterations instead. A 30-second answer holds about 36,800 iterations at
+ * depth 1, 18,200 at depth 2, and 12,100 at depth 3.
+ *
+ * Depth stops at two. Lookahead dilutes the error of the leaf evaluator, and a
+ * doubles root offers about 290 actions, so the visits for each action matter
+ * too. No measurement says whether depth 2 or depth 3 plays better.
+ *
+ * `SAMPLED_PRESET_DEPTH` in `poke_rust/src/bin/server/bot.rs` holds the same
+ * value. */
+export const SAMPLED_PRESET_DEPTH = 2
+
 /** The largest particle count the server accepts, from `MAX_PARTICLES`. */
 export const MAX_PARTICLES = 64
 
 export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
-  simulationTurnBudget: 3_491_884,
-  sampledSimulationTurnBudget: 33_600,
+  simulationTurnBudget: 132_904,
+  sampledSimulationTurnBudget: 56_220,
   depth: PRESET_DEPTH,
+  sampledDepth: SAMPLED_PRESET_DEPTH,
   replacementDepth: null,
-  damageRolls: 8,
+  damageRolls: 2,
+  sampledDamageRolls: 16,
   considerCrit: false,
   particles: 24,
   refine: false,
@@ -138,17 +184,17 @@ export type SolverPreset = 'fast' | 'balanced' | 'competitive' | 'custom'
 export const SOLVER_PRESETS: Record<Exclude<SolverPreset, 'custom'>, SolverSettings> = {
   fast: {
     ...DEFAULT_SOLVER_SETTINGS,
-    simulationTurnBudget: 418_304,
-    sampledSimulationTurnBudget: 27_530,
-    damageRolls: 3,
-    particles: 12,
+    simulationTurnBudget: 57_928,
+    sampledSimulationTurnBudget: 9_370,
+    damageRolls: 1,
+    particles: 16,
   },
   balanced: { ...DEFAULT_SOLVER_SETTINGS },
   competitive: {
     ...DEFAULT_SOLVER_SETTINGS,
-    simulationTurnBudget: 5_358_620,
-    sampledSimulationTurnBudget: 86_220,
-    damageRolls: 16,
+    simulationTurnBudget: 421_728,
+    sampledSimulationTurnBudget: 224_880,
+    damageRolls: 3,
     particles: 48,
   },
 }
@@ -167,13 +213,49 @@ export function solverProfile(
     // of one answer. Send the one that matches the algorithm. `PresetLimits`
     // on the server makes the same choice for a request that sends neither.
     simulationTurnBudget: budgetFor(algorithm, settings),
-    depth: settings.depth,
+    // Depth and damage rolls also split by family. An enumerating search
+    // multiplies its tree for each ply and for each roll, and a belief search
+    // pays one draw for each ply and nothing for a roll.
+    depth: depthFor(algorithm, settings),
     replacementDepth: settings.replacementDepth ?? undefined,
-    damageRolls: settings.damageRolls,
+    damageRolls: damageRollsFor(algorithm, settings),
     considerCrit: settings.considerCrit,
     particles: isBeliefSearch(algorithm) ? settings.particles : undefined,
-    refine: supportsRefinement(algorithm) ? settings.refine : undefined,
+    // The server rejects a refine flag that has nothing to raise, so send it
+    // only when the depth is above the refine base depth.
+    refine:
+      supportsRefinement(algorithm) && depthFor(algorithm, settings) > PRESET_DEPTH
+        ? settings.refine
+        : undefined,
   }
+}
+
+/** The depth that one search reads from these settings.
+ *
+ * `PresetLimits::depth_for_algorithm` on the server holds the same rule. */
+export function depthFor(algorithm: BotAlgorithm, settings: SolverSettings): number {
+  return enumeratesTurnBranches(algorithm) ? settings.depth : settings.sampledDepth
+}
+
+/** The damage rolls that one search reads from these settings.
+ *
+ * `PresetLimits::damage_rolls_for_algorithm` on the server holds the same
+ * rule. */
+export function damageRollsFor(algorithm: BotAlgorithm, settings: SolverSettings): number {
+  return enumeratesTurnBranches(algorithm) ? settings.damageRolls : settings.sampledDamageRolls
+}
+
+/** True when this search builds every branch of a turn before it descends.
+ *
+ * The exact searches, PIMC, and MCTS enumerate a turn, so each damage roll
+ * multiplies their work and each ply multiplies their tree.
+ *
+ * ISMCTS and MCCFR draw one outcome for each turn instead. A roll only widens
+ * the set that the draw comes from, and a ply adds one draw.
+ *
+ * `BotAlgorithm::enumerates_turn_branches` on the server holds the same rule. */
+export function enumeratesTurnBranches(algorithm: BotAlgorithm): boolean {
+  return algorithm !== 'ismcts' && algorithm !== 'mccfr'
 }
 
 /** The budget that one search reads from these settings.

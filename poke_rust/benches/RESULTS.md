@@ -1039,15 +1039,14 @@ improves rather than one answer at the end.
 - Do not read the sampled error of an MCTS answer as strategy quality. The 0.0008
   figure above sits beside a uniform strategy.
 
-## 2026-08-22: What one depth-1 solve costs
+## 2026-08-22: The two search families do not share a cost model
 
 - Command: `cargo bench --bench depth1_budget`
-- Workers: 22
-- Search: double oracle, `policy_order` on, chance mode `Enumerate`
+- Workers: 22 for the exact sweep, 1 for every sampled row
 - Positions: singles pairing 0x1, doubles pairing 10x3
 
-This sweep sizes the server presets. Every preset now runs one turn of
-lookahead, so the question is what one turn costs at each damage-roll count.
+This sweep replaces the preset table. The earlier run sized every preset from
+one cost model. There are two, and they disagree on damage rolls and on depth.
 
 ### Singles, 18 actions against 18
 
@@ -1055,78 +1054,152 @@ lookahead, so the question is what one turn costs at each damage-roll count.
 |---|---|---|---|---|---|
 | 1 | 200 | 17 | 0.03s | 4 and 4 | 0.4815 |
 | 2 | 306 | 70 | 0.07s | 3 and 3 | 0.4817 |
-| 3 | 348 | 91 | 0.13s | 4 and 4 | 0.4816 |
+| 3 | 348 | 91 | 0.14s | 4 and 4 | 0.4816 |
 | 4 | 378 | 106 | 0.24s | 4 and 4 | 0.4816 |
-| 8 | 432 | 133 | 0.64s | 4 and 4 | 0.4816 |
-| 16 | 432 | 133 | 0.95s | 4 and 4 | 0.4816 |
+| 6 | 414 | 124 | 0.42s | 4 and 4 | 0.4816 |
+| 8 | 432 | 133 | 0.66s | 4 and 4 | 0.4816 |
+| 16 | 432 | 133 | 0.98s | 4 and 4 | 0.4816 |
 
 ### Doubles, 290 actions against 370
 
 | Damage rolls | Turns | Nodes | Time | Support | Value |
 |---|---|---|---|---|---|
-| 1 | 14,532 | 4,792 | 0.33s | 5 and 5 | 0.3233 |
-| 2 | 33,246 | 14,788 | 1.34s | 4 and 4 | 0.3290 |
-| 3 | 105,150 | 50,365 | 5.77s | 5 and 5 | 0.3283 |
-| 4 | 269,230 | 132,074 | 20.19s | 5 and 5 | 0.3263 |
-| 6 | 833,325 | 413,658 | 76.20s | 5 and 5 | 0.3273 |
-| 8 | 871,637 | 433,259 | 117.13s | 5 and 5 | 0.3281 |
-| 16 | 1,347,463 | 670,920 | 210.83s | 5 and 5 | 0.3273 |
+| 1 | 14,482 | 4,767 | 0.36s | 5 and 5 | 0.3233 |
+| 2 | 33,226 | 14,778 | 1.71s | 4 and 4 | 0.3290 |
+| 3 | 105,432 | 50,506 | 7.17s | 5 and 5 | 0.3283 |
+| 4 | 268,912 | 131,915 | 25.32s | 5 and 5 | 0.3263 |
+| 6 | 833,279 | 413,635 | 94.85s | 5 and 5 | 0.3273 |
+| 8 | 871,351 | 433,116 | 145.59s | 5 and 5 | 0.3281 |
+| 16 | 1,337,061 | 665,719 | 251.92s | 5 and 5 | 0.3273 |
+
+An exact doubles solve at 8 rolls takes 145 seconds. The goal permits 30.
+
+The value moved by 0.006 across the whole sweep. The support held five actions
+at every roll count. A high roll count buys no measured accuracy here.
 
 ### Where the cost goes
 
 Turn simulations equal matrix cells in every row. One cell costs one turn.
 
-The turn count still rises 93 times from one roll to sixteen. The root matrix
-does not change size across the sweep, because the action counts do not change.
-The node count rises 140 times instead.
+The turn count rises 92 times from one roll to sixteen. The root matrix keeps
+its size, because the action counts do not change. The node count rises 140
+times instead.
 
 Those extra nodes are forced decisions. A damage roll that faints a Pokemon
 opens a replacement node, and `forced_descent` gives that node the remaining
-depth rather than one less. At depth 1 the replacement therefore runs a whole
-depth-1 search of its own, and each of its cells costs another turn simulation.
-A replacement can faint another Pokemon, and `max_forced_chain` is 8.
+depth rather than one less. At depth 1 the replacement runs a whole depth-1
+search of its own, and each of its cells costs another turn simulation.
 
-More damage rolls make more branches that faint a Pokemon. The replacement work
-grows with them, and the root matrix does not.
+Two branches that differ only in the health of the survivors reach the same
+replacement decision, and each one pays for its own subtree. `TODO.md` item 4
+holds the fix.
 
-### What the extra rolls buy
+### An enumerating sampled search: `mcts`
 
-The measured value moved by 0.0027 between two rolls and sixteen. That is
-smaller than the move between two neighboring rows. The equilibrium support held
-five actions at every roll count in doubles, and four in singles.
+`mcts` resolves a turn with `TransitionMode::Enumerated`. It builds every branch
+of the turn and then draws one.
 
-A doubles answer at sixteen rolls costs 157 times a one-roll answer. It returns
-a value 0.004 away and the same support size.
-
-Do not raise a damage-roll count for accuracy without measuring it first.
-
-### The sampled rate
-
-| Search | Damage rolls | Budget | Turns | Iterations | Time |
+| Damage rolls | Budget | Turns | Iterations | Time | Turns for each second |
 |---|---|---|---|---|---|
-| `mcts` | 1 | 200,000 | 200,000 | 127,835 | 30.27s |
+| 1 | 100,000 | 100,000 | 65,689 | 14.65s | 6,826 |
+| 4 | 8,000 | 8,000 | 7,532 | 87.13s | 92 |
+| 16 | 600 | 600 | 567 | 277.67s | 2 |
 
-A sampled search spends every turn it gets, so no budget makes it complete. It
-ran 6,607 turn simulations for each second on one thread.
+The rate falls 3,400 times between one roll and sixteen. The exact search falls
+92 times over the same range.
 
-A budget sized to finish an exact doubles solve is therefore far too large for a
-sampled search. The 3,491,884 of the balanced preset is about nine minutes of
-`mcts` at one roll, and longer at eight. `PresetLimits` holds two budgets for
-this reason: `simulation_turn_budget` covers one whole solve, and
-`sampled_simulation_turn_budget` covers a number of seconds.
+`mcts` pays the full branch build and then descends into one branch, so the
+enumeration is waste. The exact search spends the same build across a whole
+matrix cell, so it takes value from it.
 
-### The preset sizing rule
+A budget of 86,220 turns at 16 rolls is about 12 hours of `mcts`. Give `mcts`
+the exact roll count. `BotAlgorithm::enumerates_turn_branches` holds that rule.
 
-`bot::budget_for` doubles the measured solve two times. One factor covers the
-two worlds that `pimc::GUARANTEED_WORLDS` promises. The other covers a doubles
-pairing more costly than this one, which is the cheapest that `depth2_cost`
-reports.
+### A belief search: `ismcts`
 
-| Preset | Damage rolls | Particles | Finishing budget | Sampled budget |
+`ismcts` and `mccfr` ignore `MctsConfig::transition`. They always call
+`sample_transition`, which draws one outcome without building the rest.
+
+Depth 1, 24 worlds, 100,000 turns of budget:
+
+| Damage rolls | Turns | Iterations | Time | Turns for each second |
 |---|---|---|---|---|
-| `fast` | 3 | 12 | 418,304 | 27,530 |
-| `balanced` | 8 | 24 | 3,491,884 | 33,600 |
-| `competitive` | 16 | 48 | 5,358,620 | 86,220 |
+| 1 | 100,000 | 55,779 | 28.31s | 3,532 |
+| 4 | 100,000 | 56,523 | 32.39s | 3,088 |
+| 16 | 100,000 | 56,783 | 45.69s | 2,189 |
 
-Singles never reaches the finishing budget. The whole singles sweep above stays
-below 450 turn simulations.
+Sixteen rolls cost 1.61 times one roll. The same step costs `mcts` 3,400 times.
+The two rates are two orders of magnitude apart, and one preset value cannot
+serve both.
+
+The iteration count holds near 56,000 in every row. One turn simulation is one
+iteration at depth 1, whatever the rolls. The extra time is inside one draw.
+
+A roll is not free here, but keep all sixteen. One roll makes every attack deal
+its average damage, so the search cannot tell a roll that faints a target from a
+roll that does not. A doubles bot decides on that threshold.
+
+### Depth for a belief search
+
+An exact search multiplies its tree by the branch count of a turn for each ply.
+`depth2_cost` measures about eight minutes for one doubles round of depth 2.
+
+A belief search descends one sampled path, so one more ply costs one more draw.
+
+16 rolls, 24 worlds, 100,000 turns of budget:
+
+| Depth | Turns | Iterations | Time | Iterations for each second |
+|---|---|---|---|---|
+| 1 | 100,000 | 56,783 | 46.23s | 1,228 |
+| 2 | 100,000 | 32,415 | 53.36s | 607 |
+| 3 | 100,000 | 22,440 | 55.65s | 403 |
+| 4 | 100,000 | 17,081 | 56.94s | 300 |
+
+Wall time holds near 50 seconds across the whole range. One turn budget buys the
+same seconds at every depth. It buys fewer and deeper iterations instead.
+
+This is what 30 seconds buys:
+
+| Depth | Iterations in 30s | Visits for each root action |
+|---|---|---|
+| 1 | 36,800 | 127 |
+| 2 | 18,200 | 63 |
+| 3 | 12,100 | 42 |
+| 4 | 9,000 | 31 |
+
+`SAMPLED_PRESET_DEPTH` is 2. Depth 1 makes every number the leaf evaluator
+through one turn, and `TODO.md` records that error at about 0.10 of win
+probability. Depth 3 leaves 42 visits for each of 290 root actions.
+
+No measurement says whether depth 2 or depth 3 plays better. `TODO.md` item 1
+adds the bench that can answer it. Take the depth that keeps more visits until
+that bench exists.
+
+### The preset table
+
+| Preset | Rolls, exact | Rolls, sampled | Depth, exact | Depth, sampled | Worlds |
+|---|---|---|---|---|---|
+| `fast` | 1 | 16 | 1 | 2 | 16 |
+| `balanced` | 2 | 16 | 1 | 2 | 24 |
+| `competitive` | 3 | 16 | 1 | 2 | 48 |
+
+| Preset | Budget, exact | Budget, sampled | Seconds, belief |
+|---|---|---|---|
+| `fast` | 57,928 | 9,370 | 5 |
+| `balanced` | 132,904 | 56,220 | 30 |
+| `competitive` | 421,728 | 224,880 | 120 |
+
+`bot::BELIEF_TURNS_FOR_EACH_SECOND` is 1,874. That is the depth-2 row above.
+
+### Takeaways
+
+- Do not size a fog-of-war budget from an `mcts` measurement. The earlier table
+  did that, and it set the wrong clock.
+- Measure a belief rate at the depth and the rolls that the preset runs. The
+  rate falls with both. A depth-1 rate runs 22 seconds long at depth 2.
+- A damage roll costs `ismcts` 1.61 times and `mcts` 3,400 times.
+- Depth is linear in wall time for a belief search and exponential for an exact
+  one. The two families cannot share one depth.
+- The doubles position binds every budget. Singles stays under 450 turn
+  simulations across the whole roll sweep.
+

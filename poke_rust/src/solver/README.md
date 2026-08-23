@@ -366,14 +366,30 @@ These files live in `poke_rust/src/bin/server/`.
 
 ### Server presets
 
-Every preset runs at `bot::PRESET_DEPTH`, which is depth 1.
-The presets differ in the width of that one turn.
+A preset holds two values for each limit.
+The two search families have different cost models.
+`BotAlgorithm::enumerates_turn_branches` holds the split.
 
-| Preset | Damage rolls | Particles | Turns, exact | Turns, sampled |
-|---|---|---|---|---|
-| `fast` | 3 | 12 | 418,304 | 27,530 |
-| `balanced` | 8 | 24 | 3,491,884 | 33,600 |
-| `competitive` | 16 | 48 | 5,358,620 | 86,220 |
+An exact search, `pimc`, and `mcts` resolve a turn with
+`TransitionMode::Enumerated`.
+They build every branch of the turn and then read or draw from the set.
+Each damage roll multiplies that build.
+Each ply multiplies the tree.
+
+`ismcts` and `mccfr` ignore `MctsConfig::transition`.
+They always call `sample_transition`, which draws one outcome.
+A damage roll only widens the set that the draw comes from.
+A ply adds one draw.
+
+The goal is a doubles answer under fog of war in about 30 seconds.
+Only a belief search can play that goal, so the belief limits are the ones that
+decide how the bot plays.
+
+| Preset | Rolls, exact | Rolls, sampled | Depth, exact | Depth, sampled | Worlds |
+|---|---|---|---|---|---|
+| `fast` | 1 | 16 | 1 | 2 | 16 |
+| `balanced` | 2 | 16 | 1 | 2 | 24 |
+| `competitive` | 3 | 16 | 1 | 2 | 48 |
 
 A preset holds two budgets.
 An exact search and `pimc` stop when the matrix is solved.
@@ -381,30 +397,50 @@ Their budget must hold that solve.
 A budget below it returns a matrix of static scores, which names no action.
 
 `mcts`, `ismcts`, and `mccfr` spend every turn that they get.
-Their budget sets the seconds of one answer, so it is a much smaller number.
+Their budget sets the seconds of one answer.
 `PresetLimits::budget_for_algorithm` picks between the two.
 
+Do not size a belief budget from an `mcts` measurement.
+At 16 damage rolls `mcts` runs 2 turns for each second.
+`ismcts` runs 2,189 turns for each second.
+An earlier table sized the fog-of-war budget from the `mcts` rate, and that set
+the wrong clock.
+
+Measure a belief rate at the depth and the rolls that the preset runs.
+The rate falls with both, so a rate from another row sets the wrong clock.
+
 `bot::PresetLimits` holds each row.
-`bot::budget_for` derives each budget from a measured doubles solve.
-The budget holds two of those solves, and a factor of two covers a costlier
-pairing.
 `frontend/src/components/solver/solverSettings.ts` holds the same table.
 Keep both tables equal.
 The server resolves a preset name by itself, so a table that drifts shows one
 set of limits and runs another.
 
 A request field replaces the matching preset value.
-A request may still ask for a deeper search.
 
+An exact search stays at depth 1.
 Depth 2 costs one complete depth-1 solve for each cell of the root matrix.
 A doubles round of that work takes about eight minutes.
-`benches/RESULTS.md` records the measurement.
-A preset therefore buys width instead of a second turn.
 
-Width is not free.
-A doubles position needs about 14,000 simulation turns at one damage roll.
-The same position needs about 1,340,000 at sixteen rolls.
-The extra cost comes from forced decisions, not from the root matrix.
+A belief search runs at `bot::SAMPLED_PRESET_DEPTH`, which is depth 2.
+Depth costs one more sampled step for each ply there.
+One turn budget buys about the same seconds at every depth.
+It buys fewer and deeper iterations instead.
+
+Lookahead is the one thing that dilutes the error of the leaf evaluator.
+`TODO.md` records that error at about 0.10 of win probability.
+
+Depth stops at two, because the visits for each root action also matter.
+A doubles root offers about 290 actions against 370.
+A 30-second answer holds about 18,200 iterations at depth 2 and 12,100 at depth 3.
+No measurement says which of the two plays better.
+
+A damage roll costs `ismcts` 1.61 times between one roll and sixteen.
+It costs `mcts` 3,400 times over the same range.
+
+A damage roll is the most expensive limit of an exact search.
+A doubles position needs about 14,000 simulation turns at one roll.
+The same position needs about 1,337,000 at sixteen rolls.
+The extra cost comes from forced decisions and not from the root matrix.
 Each extra roll makes more branches that faint a Pokemon.
 Each faint opens a replacement search that costs more turn simulations.
 The root matrix keeps its size through the whole sweep.
@@ -414,8 +450,8 @@ The same doubles position returned 0.3290 at two rolls and 0.3273 at sixteen.
 The equilibrium support held five actions at every roll count.
 Read `benches/RESULTS.md` before you raise a roll count for accuracy.
 
-`competitive` is minutes of work for one doubles answer.
-Use `fast` for a live doubles battle.
+`competitive` takes minutes for one doubles answer.
+Use `balanced` for a live doubles battle.
 
 ### Simulator bot
 

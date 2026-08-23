@@ -1,6 +1,8 @@
 import type { BotAlgorithm } from '../../api/types'
 import {
   MAX_PARTICLES,
+  PRESET_DEPTH,
+  enumeratesTurnBranches,
   isBeliefSearch,
   supportsRefinement,
   type SolverSettings,
@@ -48,30 +50,47 @@ function NumberField({
  * them scores an attack from a sample of its outcomes, so it can miss the roll
  * that faints a target and the roll that does not.
  *
- * This limit is the main precision control of a depth-one search, so it sits
- * beside the presets rather than inside the advanced drawer. It is also the
- * most expensive one: `benches/RESULTS.md` records that a doubles position
- * needs about 14,000 turn simulations at one roll and about 1,340,000 at
- * sixteen, because each extra roll makes more branches that faint a Pokemon and
- * each faint opens a replacement search. */
+ * What a roll costs depends on the search, so this field edits one of two
+ * values and `algorithm` decides which.
+ *
+ * An exact search, PIMC, and MCTS build every branch of a turn, so each roll
+ * multiplies the work. `benches/RESULTS.md` records a doubles position at
+ * 14,482 turn simulations for one roll and 1,347,463 for sixteen, because each
+ * extra roll makes more branches that faint a Pokemon and each faint opens a
+ * replacement search.
+ *
+ * ISMCTS and MCCFR draw one outcome for each turn, so a roll only widens the
+ * set that the draw comes from. Sixteen rolls cost those searches 1.6 times one
+ * roll, against 3,400 times for MCTS, so every preset reads all sixteen there. */
 export function DamageRollField({
+  algorithm,
   settings,
   disabled,
   onChange,
 }: {
+  algorithm?: BotAlgorithm
   settings: SolverSettings
   disabled?: boolean
   onChange: (settings: SolverSettings) => void
 }) {
+  const sampled = algorithm !== undefined && !enumeratesTurnBranches(algorithm)
   return (
     <NumberField
-      label="Damage rolls (1-16)"
-      title="An attack rolls one of sixteen damage values. A search that reads fewer of them can miss the roll that faints a target. In doubles this is the most expensive limit: sixteen rolls cost about 93 times one roll."
-      value={settings.damageRolls}
+      label={sampled ? 'Damage rolls, sampled (1-16)' : 'Damage rolls, exact (1-16)'}
+      title={
+        sampled
+          ? 'ISMCTS and MCCFR draw one outcome for each turn, so a damage roll widens the set that the draw comes from rather than multiplying the work. Sixteen rolls cost these searches 1.6 times one roll, against 3,400 times for MCTS. One roll makes every attack deal its average damage, so the search cannot tell a roll that faints a target from one that does not.'
+          : 'An attack rolls one of sixteen damage values. A search that reads fewer of them can miss the roll that faints a target. For a search that enumerates a turn this is the most expensive limit: sixteen rolls cost about 93 times one roll in doubles.'
+      }
+      value={sampled ? settings.sampledDamageRolls : settings.damageRolls}
       min={1}
       max={16}
       disabled={disabled}
-      onChange={(value) => onChange({ ...settings, damageRolls: value })}
+      onChange={(value) =>
+        onChange(
+          sampled ? { ...settings, sampledDamageRolls: value } : { ...settings, damageRolls: value },
+        )
+      }
     />
   )
 }
@@ -120,12 +139,22 @@ export default function SolverControls({
         onChange={(value) => set('sampledSimulationTurnBudget', value)}
       />
       <NumberField
-        label="Depth"
+        label="Depth, exact"
+        title="The turns of lookahead for Double Oracle, Serialized Bounds, Backward Induction, PIMC, and MCTS. Each ply multiplies the tree by the branch count of a turn, so a doubles position cannot finish depth 2."
         value={settings.depth}
         min={1}
         max={8}
         disabled={disabled}
         onChange={(value) => set('depth', value)}
+      />
+      <NumberField
+        label="Depth, sampled"
+        title="The turns of lookahead for ISMCTS and MCCFR. These searches draw one outcome for each ply, so one budget buys about the same seconds at every depth. It buys fewer and deeper iterations instead. A 30-second answer holds about 36,800 iterations at depth 1, 18,200 at depth 2, and 12,100 at depth 3."
+        value={settings.sampledDepth}
+        min={1}
+        max={8}
+        disabled={disabled}
+        onChange={(value) => set('sampledDepth', value)}
       />
       <label className="block min-w-0">
         <span className="mb-0.5 block text-ink-muted">Replacement depth</span>
@@ -173,12 +202,19 @@ export default function SolverControls({
       {(showRefine ?? (algorithm === undefined || supportsRefinement(algorithm))) && (
         <label
           className="flex items-center gap-2 self-center"
-          title="Solves depth 1 over every action, then raises only the cells that decide the answer to the chosen depth. A doubles position cannot finish a complete depth-2 search, and this does reach depth 2 on the cells that matter. The answer reports how many actions it verified."
+          title={
+            settings.depth > PRESET_DEPTH
+              ? 'Solves depth 1 over every action, then raises only the cells that decide the answer to the chosen depth. A doubles position cannot finish a complete depth-2 search, and this does reach depth 2 on the cells that matter. The answer reports how many actions it verified.'
+              : 'Refinement raises the cells of the support from depth 1 to a deeper one, so it needs an exact depth above 1. Raise the exact depth to use it.'
+          }
         >
           <input
             type="checkbox"
-            checked={settings.refine}
-            disabled={disabled}
+            checked={settings.refine && settings.depth > PRESET_DEPTH}
+            // Refinement solves depth 1 and then raises the cells of the
+            // support. A request at depth 1 has nothing to raise, and the server
+            // rejects the flag there. Do not offer a switch that cannot act.
+            disabled={disabled || settings.depth <= PRESET_DEPTH}
             onChange={(event) => set('refine', event.target.checked)}
           />
           Refine to depth

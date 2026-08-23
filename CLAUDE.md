@@ -18,12 +18,40 @@ Use strict mode unless the user requests another mode.
 
 ## Project state
 
-PokeRust is a probabilistic Pokémon Champions battle simulator.
+PokeRust is a probabilistic Pokemon Champions battle simulator.
 The backend has extensive mechanics, inference, determinizer, and solver tests.
 Current development focuses on the frontend.
 
 `TODO.md` tracks planned work.
 It is not a mechanics reference.
+
+## The goal
+
+Build the best doubles VGC bot with these three limits:
+
+1. It plays doubles. A doubles turn offers about 290 actions against 370.
+2. It answers one turn in about 30 seconds. This holds for a complex state.
+3. It reads a belief and not the true position. The opponent stays hidden.
+
+Rank every solver decision against these three limits.
+
+Limit 3 selects the search.
+Only `ismcts`, `mccfr`, and `pimc` read a belief.
+`BotSearchConfig::searches_belief` names them.
+An exact search and `mcts` read the true position, so they cannot play the goal.
+`pimc` has strategy fusion, so it stays a baseline.
+`ismcts` is the default of every information mode except Perfect Information.
+
+Limit 2 makes a budget a clock and not a work count.
+Size a belief budget from a measured belief rate.
+Do not size it from an `mcts` rate. The two searches do not share a rate.
+
+Limit 1 makes doubles the position that every measurement must use.
+A singles position costs about 400 turn simulations for one depth-1 solve.
+A doubles position costs about 14,000 at the same depth and one damage roll.
+A measurement on singles proves nothing about the goal.
+
+Read `poke_rust/benches/RESULTS.md` before you change a preset.
 
 ## Mechanics research
 
@@ -281,15 +309,36 @@ Return HTTP 422 for an invalid command.
 
 ### Presets
 
-Every server preset runs at `bot::PRESET_DEPTH`, which is depth 1.
-The presets differ in damage rolls and particles, not in depth.
+A preset holds two values for each limit.
+The two search families have different cost models.
+`BotAlgorithm::enumerates_turn_branches` holds the split.
+
+An exact search, `pimc`, and `mcts` build every branch of a turn.
+Each damage roll multiplies that work.
+Each ply multiplies the tree.
+These searches run at `bot::PRESET_DEPTH`, which is depth 1.
+They read a low damage-roll count.
+
+`ismcts` and `mccfr` draw one outcome for each turn.
+They ignore `MctsConfig::transition` and always call `sample_transition`.
+A damage roll only widens the set that the draw comes from.
+A ply adds one draw.
+These searches run at `bot::SAMPLED_PRESET_DEPTH`, which is depth 2.
+They read all 16 damage rolls.
+
+Do not size a fog-of-war budget from the `mcts` rate.
+At 16 damage rolls `mcts` runs 2 turns for each second.
+`ismcts` runs 2,189.
+
+Measure a belief rate at the depth and the rolls that the preset runs.
+The rate falls with both.
+A depth-1 rate sets a clock that runs 22 seconds long at depth 2.
+
 `bot::PresetLimits` holds each row.
 `frontend/src/components/solver/solverSettings.ts` holds the same table.
 Update both together.
 
-A damage roll is the most expensive width.
-The cost comes from replacement searches after a faint, not from the root matrix.
-Read `poke_rust/benches/RESULTS.md` before you raise a roll count.
+Read `poke_rust/benches/RESULTS.md` before you raise a roll count or a depth.
 
 ### Sessions
 

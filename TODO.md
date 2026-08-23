@@ -10,8 +10,14 @@ and the analysis jobs.
 
 ## Why this is the whole problem now
 
-Every server preset runs one turn of lookahead.
+An exact preset runs one turn of lookahead.
 `bot::PRESET_DEPTH` holds that depth.
+A belief preset now runs two, because a sampled ply costs one draw.
+`bot::SAMPLED_PRESET_DEPTH` holds that depth.
+
+Depth dilutes the evaluator but does not fix it.
+A depth-3 sampled path still scores its last state with `eval::fitted`.
+The items below stay open for both families.
 
 A depth-1 solve runs five stages.
 Only the fourth stage is a guess.
@@ -71,6 +77,13 @@ Item 1 decides whether any later item worked.
       Held-out error moved from 0.0957 to 0.0978 between two training runs.
       Only the corpus changed, from generated rosters to archived teams.
       The number cannot accept or reject a change today.
+
+      This bench is also the only way to accept or reject `SAMPLED_PRESET_DEPTH`.
+      It is 2 today. A 30-second answer holds about 36,800 iterations at depth 1,
+      18,200 at depth 2, and 12,100 at depth 3. A doubles root offers about 290
+      actions, so depth trades lookahead against the visits for each action. No
+      measurement says where that trade turns. Run this item before you move that
+      constant again.
 
       Done when: a calibration curve exists, and one command produces it.
 
@@ -190,10 +203,14 @@ The repo already measured each one.
   The learning curve is flat.
   A corpus from 4,800 to 19,200 samples moved held-out error by 0.0002.
 
-- Do not search deeper by default.
+- Do not search an exact algorithm deeper by default.
   One doubles depth-2 round costs about eight minutes.
   A certified depth-2 equilibrium needs several rounds.
   `refine` already reaches depth 2 on the cells that decide the answer.
   The Refine switch stays available when a request raises the depth.
+
+  This rule holds for an exact search alone.
+  A belief search pays one draw for each ply, so depth is cheap there.
+  `bot::SAMPLED_PRESET_DEPTH` is 2 for that reason.
 
 # New features

@@ -3,32 +3,41 @@ import { seedTeam } from './helpers'
 
 // Captures the preset row and the damage-roll control.
 //
-// Every preset runs one turn of lookahead, so the presets differ in width
-// rather than in depth. Damage rolls are the main precision control of a
-// one-turn search, so the sidebar shows that field beside the presets instead
-// of inside the advanced limits.
+// A preset holds two values for each limit, because the two search families
+// have different cost models. The sidebar shows the value of the fog-of-war
+// search, which is the one that every information mode except Perfect
+// Information runs.
+//
+// A belief search draws one outcome for each turn, so a damage roll costs it
+// almost nothing and every preset reads all sixteen. A search that enumerates a
+// turn pays for each roll, so it reads far fewer.
 
 test('the sidebar shows damage rolls beside the presets', async ({ page }) => {
   await seedTeam(page)
   await page.goto('/simulate')
   await page.getByRole('button', { name: 'Open settings' }).click()
 
-  // The field must be reachable without opening the advanced limits.
+  // The field must be reachable without opening the advanced limits. It names
+  // the family it edits, because the two families take different counts.
   const rolls = page.locator('label').filter({ hasText: 'Damage rolls' }).locator('input')
   await expect(rolls).toBeVisible()
+  await expect(page.getByText('Damage rolls, sampled (1-16)')).toBeVisible()
 
-  // Each preset sets its own width. The presets differ in rolls and worlds.
-  await page.getByRole('button', { name: 'Fast solver preset' }).click()
-  await expect(rolls).toHaveValue('3')
-  await page.getByRole('button', { name: 'High solver preset' }).click()
-  await expect(rolls).toHaveValue('16')
-  await page.getByRole('button', { name: 'Balanced solver preset' }).click()
-  await expect(rolls).toHaveValue('8')
+  // A roll is close to free for a belief search, so no preset gives up a roll.
+  // The presets differ in the seconds of one answer and in the worlds they draw.
+  for (const preset of ['Fast', 'High', 'Balanced']) {
+    await page.getByRole('button', { name: `${preset} solver preset` }).click()
+    await expect(rolls).toHaveValue('16')
+  }
 
-  // The advanced limits still hold the depth, and it reads one turn.
+  // The advanced limits hold one depth for each family.
   await page.getByRole('button', { name: 'Advanced limits' }).click()
-  const depth = page.locator('label').filter({ hasText: 'Depth' }).first().locator('input')
-  await expect(depth).toHaveValue('1')
+  const exactDepth = page.locator('label').filter({ hasText: 'Depth, exact' }).locator('input')
+  const sampledDepth = page.locator('label').filter({ hasText: 'Depth, sampled' }).locator('input')
+  // An exact search multiplies its tree for each ply, so it stays at one turn.
+  await expect(exactDepth).toHaveValue('1')
+  // A belief search adds one draw for each ply, so it can afford lookahead.
+  await expect(sampledDepth).toHaveValue('2')
 
   // Editing a limit makes the profile custom.
   await rolls.fill('12')

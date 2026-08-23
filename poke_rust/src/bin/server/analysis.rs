@@ -1500,8 +1500,11 @@ fn warning_line(warning: &solver::SolveWarning) -> String {
         solver::SolveWarning::Cancelled => {
             "The search was cancelled, so the answer holds only the work that finished.".to_string()
         }
-        // The world count is a limit that the client already holds through the
-        // profile, so this line carries no new data about either side.
+        // This count is the worlds that the search finished, and the profile
+        // holds the worlds that it drew. `PresetLimits::pimc_particles` lowers
+        // a preset draw to what the budget can finish, so for a preset the two
+        // agree. A request that sets its own particle count can still draw more
+        // worlds than it finishes, and then this line is the honest number.
         solver::SolveWarning::StrategyFusion { worlds } => format!(
             "The search solved {worlds} world(s) separately and averaged the strategies. Each \
              world played as if the hidden data were known (strategy fusion), so the answer \

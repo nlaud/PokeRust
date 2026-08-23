@@ -24,7 +24,9 @@ use std::time::Instant;
 use poke_rust::benchmarking::battle_position;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
+use poke_rust::solver::belief::{Particle, ParticleBelief};
 use poke_rust::solver::chance::ChanceMode;
+use poke_rust::solver::ismcts::{self, IsmctsConfig};
 use poke_rust::solver::mcts::{self, MctsConfig};
 use poke_rust::solver::{
     CancelFlag, JointActionProb, SolveConfig, SolverAlgorithm, pool, solve_seeded_cancellable,
@@ -151,9 +153,17 @@ fn sweep(
 /// whether it finishes. It decides how many seconds the answer takes. This
 /// reports the rate that converts one into the other.
 ///
-/// `mcts` reads the true position, and `ismcts` runs the same iteration over a
-/// drawn world. The rate is therefore the rate of both, and `ismcts` adds one
-/// determinization for each particle.
+/// The two sampled searches do not share a rate, and a preset that assumes they
+/// do sizes the fog-of-war budget from the wrong search.
+///
+/// `mcts` resolves a turn with `TransitionMode::Enumerated`, so it builds every
+/// branch of the turn and then draws one. A damage roll multiplies that build.
+///
+/// `ismcts` and `mccfr` ignore `transition` and always call `sample_transition`,
+/// which draws one outcome without building the rest. A damage roll only widens
+/// the set that the one draw comes from, so it should cost close to nothing.
+///
+/// This reports both rates so the presets can size each from its own search.
 fn sampled_rate(
     state: &MatchState,
     seed: u64,
@@ -164,7 +174,11 @@ fn sampled_rate(
     println!();
     println!("| Damage rolls | Budget | Turns | Iterations | Time | Turns for each second |");
     println!("|---|---|---|---|---|---|");
-    for (rolls, budget) in [(1u8, 200_000u64), (4, 200_000), (16, 200_000)] {
+    // Each budget is sized so one row takes about a minute. A rate needs a
+    // stable sample and not a fixed turn count, and this search becomes far
+    // slower for each turn as the rolls rise. One 16-roll turn of a doubles
+    // position builds a very large branch set, so that row reads few turns.
+    for (rolls, budget) in [(1u8, 100_000u64), (4, 8_000), (16, 600)] {
         let config = MctsConfig {
             iterations: u32::MAX,
             depth: 1,
@@ -194,8 +208,170 @@ fn sampled_rate(
     println!();
 }
 
+/// Measures the turn rate of the fog-of-war searches.
+///
+/// A belief search is the one that a fog-of-war session actually runs, so its
+/// rate is the one that `bot::sampled_budget_for` needs.
+///
+/// The belief here holds copies of one concrete world. That isolates the
+/// iteration rate from the determinizer, which draws one time for each particle
+/// before the first iteration and never again.
+fn belief_rate(
+    state: &MatchState,
+    seed: u64,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) {
+    println!("### ISMCTS at depth 1, 24 worlds");
+    println!();
+    println!("| Damage rolls | Budget | Turns | Iterations | Time | Turns for each second |");
+    println!("|---|---|---|---|---|---|");
+    // The question is whether a roll changes the rate at all. Three points
+    // across the whole range answer it.
+    for rolls in [1u8, 4, 16] {
+        let particles: Vec<Particle> = (0..24)
+            .map(|_| Particle {
+                state: state.clone(),
+                weight: 1.0 / 24.0,
+            })
+            .collect();
+        let belief = ParticleBelief::from_particles(particles).expect("24 worlds is a belief");
+        let config = IsmctsConfig {
+            search: MctsConfig {
+                iterations: u32::MAX,
+                depth: 1,
+                replacement_depth: None,
+                damage_rolls: rolls,
+                consider_crit: false,
+                max_actions_per_player: None,
+                ..MctsConfig::default()
+            },
+            particles: 24,
+            ..IsmctsConfig::default()
+        };
+        let budget = 100_000u64;
+        let flag = CancelFlag::with_simulation_turn_budget(budget);
+        let start = Instant::now();
+        let result =
+            ismcts::search_cancellable(seed, &belief, pokemon_dex, move_dex, &config, Some(&flag));
+        let elapsed = start.elapsed().as_secs_f64();
+        match result {
+            Ok(found) => println!(
+                "| {rolls} | {budget} | {} | {} | {:.2}s | {:.0} |",
+                found.stats.turns_simulated,
+                found.stats.iterations,
+                elapsed,
+                found.stats.turns_simulated as f64 / elapsed.max(1e-9),
+            ),
+            Err(error) => println!("| {rolls} | {budget} | error: {error:?} | | | |"),
+        }
+        std::io::stdout().flush().ok();
+    }
+    println!();
+}
+
+/// Measures how depth scales for the fog-of-war search.
+///
+/// This is the question that decides the preset depth, and the two search
+/// families answer it differently.
+///
+/// An exact search multiplies its tree by the branch count of a turn for each
+/// ply, so depth 2 costs a whole depth-1 solve for each cell of the root matrix.
+/// `depth2_cost` measures that, and it is why `PRESET_DEPTH` is 1.
+///
+/// A belief search draws one outcome per ply, so one iteration costs one
+/// `sample_transition` for each ply. Depth should therefore cost a constant
+/// factor here, not an exponential one. If it does, a fog-of-war preset can
+/// afford lookahead that an exact preset cannot.
+fn belief_depth_scaling(
+    state: &MatchState,
+    seed: u64,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) {
+    println!("### ISMCTS depth scaling, 16 rolls, 24 worlds, 30s of budget");
+    println!();
+    println!("| Depth | Turns | Iterations | Time | Iterations for each second |");
+    println!("|---|---|---|---|---|");
+    for depth in [1u8, 2, 3, 4] {
+        let particles: Vec<Particle> = (0..24)
+            .map(|_| Particle {
+                state: state.clone(),
+                weight: 1.0 / 24.0,
+            })
+            .collect();
+        let belief = ParticleBelief::from_particles(particles).expect("24 worlds is a belief");
+        let config = IsmctsConfig {
+            search: MctsConfig {
+                iterations: u32::MAX,
+                depth,
+                replacement_depth: None,
+                damage_rolls: 16,
+                consider_crit: false,
+                max_actions_per_player: None,
+                ..MctsConfig::default()
+            },
+            particles: 24,
+            ..IsmctsConfig::default()
+        };
+        // One fixed budget, so the rows compare what the same spend buys.
+        let flag = CancelFlag::with_simulation_turn_budget(100_000);
+        let start = Instant::now();
+        let result =
+            ismcts::search_cancellable(seed, &belief, pokemon_dex, move_dex, &config, Some(&flag));
+        let elapsed = start.elapsed().as_secs_f64();
+        match result {
+            Ok(found) => println!(
+                "| {depth} | {} | {} | {:.2}s | {:.0} |",
+                found.stats.turns_simulated,
+                found.stats.iterations,
+                elapsed,
+                found.stats.iterations as f64 / elapsed.max(1e-9),
+            ),
+            Err(error) => println!("| {depth} | error: {error:?} | | | |"),
+        }
+        std::io::stdout().flush().ok();
+    }
+    println!();
+}
+
+/// Which sections one run reports.
+///
+/// The exact sweep takes about eight minutes, and the belief sections take
+/// about four. A run that only needs one of them passes `exact` or `belief` as
+/// the first argument. No argument runs everything.
+///
+/// ```sh
+/// cargo bench --bench depth1_budget -- belief
+/// ```
+#[derive(PartialEq)]
+enum Sections {
+    All,
+    Exact,
+    Belief,
+}
+
+impl Sections {
+    fn from_args() -> Sections {
+        match std::env::args().nth(1).as_deref() {
+            Some("exact") => Sections::Exact,
+            Some("belief") => Sections::Belief,
+            _ => Sections::All,
+        }
+    }
+
+    fn runs_exact(&self) -> bool {
+        *self != Sections::Belief
+    }
+
+    fn runs_belief(&self) -> bool {
+        *self != Sections::Exact
+    }
+}
+
 fn main() {
     poke_rust::VERBOSITY.set(0).ok();
+    let sections = Sections::from_args();
     let (pokemon_dex, move_dex) = dexes();
     let paths = teamsheet_paths();
     let workers = pool::shared().capacity();
@@ -222,9 +398,13 @@ fn main() {
             println!("{label}: the pairing did not produce a battle position");
             continue;
         };
-        sweep(label, &state, seed, &pokemon_dex, &move_dex, workers);
-        if active == 2 {
+        if sections.runs_exact() {
+            sweep(label, &state, seed, &pokemon_dex, &move_dex, workers);
+        }
+        if active == 2 && sections.runs_belief() {
             sampled_rate(&state, seed, &pokemon_dex, &move_dex);
+            belief_rate(&state, seed, &pokemon_dex, &move_dex);
+            belief_depth_scaling(&state, seed, &pokemon_dex, &move_dex);
         }
     }
 }

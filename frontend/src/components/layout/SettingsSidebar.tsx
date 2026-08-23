@@ -6,6 +6,7 @@ import SolverControls, { DamageRollField } from '../solver/SolverControls'
 import {
   IMPERFECT_SOLVERS,
   PERFECT_SOLVERS,
+  SAMPLED_PRESET_DEPTH,
   solverHint,
   supportsRefinement,
   type SolverOption,
@@ -96,12 +97,14 @@ export default function SettingsSidebar() {
     setPerfectSolver,
   } = useSettings()
   const [advanced, setAdvanced] = useState(false)
-  // Every preset runs one turn of lookahead, so the detail names the width that
-  // separates them rather than a depth. `SOLVER_PRESETS` holds the values.
+  // The fog-of-war search is the one that a session runs under every
+  // information mode except Perfect Information, so the detail names the seconds
+  // that its answer takes and the worlds it draws. `SOLVER_PRESETS` holds the
+  // limits themselves, and it mirrors `PresetLimits` on the server.
   const presets: { value: SolverPreset; label: string; detail: string }[] = [
-    { value: 'fast', label: 'Fast', detail: '3 rolls · 12 worlds' },
-    { value: 'balanced', label: 'Balanced', detail: '8 rolls · 24 worlds' },
-    { value: 'competitive', label: 'High', detail: '16 rolls · 48 worlds' },
+    { value: 'fast', label: 'Fast', detail: '5s · 16 worlds' },
+    { value: 'balanced', label: 'Balanced', detail: '30s · 24 worlds' },
+    { value: 'competitive', label: 'High', detail: '2min · 48 worlds' },
   ]
 
   // Keep the sidebar and MusicPlayer mounted.
@@ -223,11 +226,17 @@ export default function SettingsSidebar() {
             <p className="mt-2 text-xs font-medium text-primary">Custom solver limits are active.</p>
           )}
           <p className="mt-3 text-xs text-ink-muted">
-            Every preset searches one turn ahead and scores each outcome with the leaf evaluator.
-            The damage rolls below decide how much of an attack the search reads.
+            A fog-of-war search reads every damage roll and looks {SAMPLED_PRESET_DEPTH} turns
+            ahead, because it draws one outcome for each turn rather than building them all. A
+            search that enumerates a turn reads fewer rolls and looks one turn ahead, because each
+            roll multiplies its work.
           </p>
           <div className="mt-2 text-xs">
-            <DamageRollField settings={solverSettings} onChange={setSolverSettings} />
+            <DamageRollField
+              algorithm={imperfectSolver}
+              settings={solverSettings}
+              onChange={setSolverSettings}
+            />
           </div>
           <button
             type="button"
