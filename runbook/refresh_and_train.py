@@ -17,6 +17,11 @@ resumes without repeating the work that already finished.
 5. calibrate Measure the label cost and size the training run from it.
 6. train     Collect the corpus, label it, fit the weights, write the report.
 
+`--labels` chooses the label source. The default `rollout` plays whole games and
+labels each recorded position with the result of its own game. `search` labels
+each position with a depth-2 solve instead. `poke_rust/src/solver/TRAINING.md`
+holds the option table of each source.
+
 The standard library is the only dependency, which matches
 `meta_scraper/update_meta.py`.
 
@@ -394,35 +399,76 @@ def stage_reset(args):
 
 
 def train_command(args, positions, deadline, time_budget):
-    """The training invocation, shared by the calibrate and the train stages."""
+    """The training invocation, shared by the calibrate and the train stages.
+
+    `train_eval` refuses an option that its label source ignores, so each source
+    passes its own options and nothing else.
+    """
     command = [
         BINARY,
+        "--labels", args.labels,
         "--teamsheet-dir", os.path.relpath(TEAMSHEET_DIR, POKE_RUST),
         "--teamsheet-mix", str(args.teamsheet_mix),
         "--meta-root", os.path.relpath(META_ROOT, POKE_RUST),
-        "--label-depth", str(args.label_depth),
-        "--min-label-depth", "1",
-        "--label-chance", args.label_chance,
-        "--label-max-actions", str(args.label_max_actions),
-        "--iterative-deepening",
         "--workers", str(args.workers),
         "--seed", str(args.seed),
         "--positions", str(positions),
     ]
-    if deadline:
-        command += ["--label-deadline", "%.1f" % deadline]
+    if args.labels == "rollout":
+        command += [
+            "--rollout-iterations", str(args.rollout_iterations),
+            "--rollout-depth", str(args.rollout_depth),
+            "--turn-cap", str(args.turn_cap),
+        ]
+    else:
+        command += [
+            "--label-depth", str(args.label_depth),
+            "--min-label-depth", "1",
+            "--label-chance", args.label_chance,
+            "--label-max-actions", str(args.label_max_actions),
+            "--iterative-deepening",
+        ]
+        # A rollout has no per-label deadline. A game runs to `--turn-cap`.
+        if deadline:
+            command += ["--label-deadline", "%.1f" % deadline]
     if time_budget:
         command += ["--time-budget", "%.0f" % time_budget]
     return command
 
 
+# Labels that one rollout opening yields, as a high estimate. The run of
+# 2026-08-23 kept 335,219 labels from 14,397 openings, which is 23 for each
+# opening. The stage stops on the label count, so a high estimate buys more
+# openings. An opening costs about 2.5 seconds on 20 workers.
+ROLLOUT_LABELS_PER_OPENING = 40
+
+# Waves of jobs that the calibration sample must hold.
+CALIBRATION_WAVES = 3
+
+
+def calibration_sample(args):
+    """The `--positions` figure of the calibration stage.
+
+    The sample must hold at least `CALIBRATION_WAVES` waves of jobs. A sample
+    that fits in one wave measures the slowest job and not the rate. The run
+    then sizes the training stage below the real yield, and the training stage
+    runs out of corpus before the clock stops it.
+
+    One search job is one position. One rollout job is one opening, and one
+    opening yields many labels, so the rollout figure converts waves to labels.
+    """
+    wave = args.workers
+    if args.labels == "rollout":
+        wave = args.workers * ROLLOUT_LABELS_PER_OPENING
+    return max(args.calibrate_positions, wave * CALIBRATION_WAVES)
+
+
 def stage_calibrate(args):
     """Measures the label cost and returns (labels per second, max label cost).
 
-    Use at least three times as many positions as workers. A sample that fits in
-    one wave measures the slowest label rather than the rate.
+    `calibration_sample` sizes the sample.
     """
-    positions = max(args.calibrate_positions, args.workers * 3)
+    positions = calibration_sample(args)
     command = train_command(args, positions, deadline=None, time_budget=None)
     command += ["--calibrate", "--calibrate-positions", str(positions)]
     code, output = run(command, cwd=POKE_RUST)
@@ -456,7 +502,16 @@ def stage_calibrate(args):
 
 def calibration_key(args):
     """The settings that change the cost of one label."""
+    if args.labels == "rollout":
+        return {
+            "labels": args.labels,
+            "rollout_iterations": args.rollout_iterations,
+            "rollout_depth": args.rollout_depth,
+            "turn_cap": args.turn_cap,
+            "workers": args.workers,
+        }
     return {
+        "labels": args.labels,
         "label_depth": args.label_depth,
         "label_chance": args.label_chance,
         "label_max_actions": args.label_max_actions,
@@ -487,6 +542,7 @@ def stage_train(args, rate, worst):
     positions = int(rate * seconds * 1.15) + args.workers
     # Above the slowest label seen, so a normal label is never cut short. With
     # iterative deepening a cut label still returns its last complete pass.
+    # A rollout ignores this figure, because a game runs to `--turn-cap`.
     deadline = max(worst * 2.0, 30.0)
 
     log("sizing: %.2f labels/s over %.1f h -> %d positions, %.0f s label deadline"
@@ -506,12 +562,15 @@ def stage_train(args, rate, worst):
     return output, log_path
 
 
-def report(output, log_path):
+def report(output, log_path, labels):
     """Prints the accept decision that `TRAINING.md` defines.
 
     Keep a run only when the fitted weights beat the hand-set weights on the
-    held-out split. A higher held-out error means the step overshot; restore the
+    held-out split. A higher held-out error means the step overshot. Restore the
     weight files and discard the run.
+
+    This is test 1 alone. Test 2 is the calibration curve, which the operator
+    runs by hand. `TRAINING.md` holds that command.
     """
     errors = {}
     for line in output.splitlines():
@@ -526,10 +585,17 @@ def report(output, log_path):
         print("held-out mean absolute error:  hand %.4f   fitted %.4f" % (hand, fitted))
         if fitted < hand:
             print("ACCEPT: the fit beat the hand weights by %.4f." % (hand - fitted))
+            print("Run test 2 before you commit, from poke_rust/:")
+            print("  cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1")
             print("Commit these files from poke_rust/:")
-            for path in WEIGHT_FILES:
+            # A rollout run holds no root mixture, so it writes no policy file.
+            written = [
+                path for path in WEIGHT_FILES
+                if labels != "rollout" or "policy" not in path
+            ]
+            for path in written:
                 print("  %s" % path)
-            print("  benches/RESULTS.md   (record the settings of this run)")
+            print("  benches/RESULTS.md   (record the settings and both seeds)")
         else:
             print("DISCARD: the fit lost by %.4f." % (fitted - hand))
             print("Restore the weights and lower --learning-rate or raise --l2:")
@@ -568,7 +634,13 @@ def parse_args():
         "--workers", type=int, default=max(1, (os.cpu_count() or 4) - 2),
         help="Labeling threads. Default: two below the core count.",
     )
-    parser.add_argument("--seed", type=int, default=1, help="Corpus and label seed.")
+    # `benches/eval_calibration` is the accept rule, and it uses seed 1. Both
+    # build an opening seed with one formula, so seed 1 would give the fit and
+    # the accept rule the same openings.
+    parser.add_argument(
+        "--seed", type=int, default=7,
+        help="Corpus and label seed. Never 1, which the accept-rule bench uses.",
+    )
     parser.add_argument(
         "--skip", action="append", choices=STAGES, default=[],
         help="Skip one stage (repeatable).",
@@ -584,6 +656,22 @@ def parse_args():
     parser.add_argument(
         "--teamsheet-mix", type=float, default=0.8,
         help="Fraction of matchups that use an archived team (default: 0.8).",
+    )
+    parser.add_argument(
+        "--labels", default="rollout", choices=["rollout", "search", "selfplay"],
+        help="Where the value labels come from (default: rollout).",
+    )
+    parser.add_argument(
+        "--rollout-iterations", type=int, default=64,
+        help="Search iterations of each turn of a rollout game.",
+    )
+    parser.add_argument(
+        "--rollout-depth", type=int, default=2,
+        help="Search depth of each turn of a rollout game.",
+    )
+    parser.add_argument(
+        "--turn-cap", type=int, default=120,
+        help="Steps that one rollout game may take.",
     )
     parser.add_argument("--label-depth", type=int, default=2)
     parser.add_argument(
@@ -606,6 +694,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.seed == 1:
+        sys.exit(
+            "--seed 1 gives the fit the openings that the accept-rule bench "
+            "reads. Pick another seed."
+        )
     wanted = set(args.only) if args.only else set(STAGES)
     wanted -= set(args.skip)
 
@@ -642,10 +735,10 @@ def main():
                 rate, worst = stored
                 log("using the stored calibration: %.2f labels/s" % rate)
             else:
-                rate, worst = 0.5, 90.0
+                rate, worst = (183.0, 6.0) if args.labels == "rollout" else (0.5, 90.0)
                 log("no calibration on file; assuming %.2f labels/s" % rate)
         output, log_path = stage_train(args, rate, worst)
-        report(output, log_path)
+        report(output, log_path, args.labels)
 
     log("finished in %.1f minutes" % ((time.time() - started) / 60.0))
 

@@ -45,6 +45,12 @@
 //! calculation then runs for that Pokemon alone. Bench size therefore does not
 //! multiply the expensive work.
 //!
+//! A side with no living bench has no switch-in. `bench_threat` then reads 0,
+//! which is the smallest value that any bench can produce. `switch_in_damage`
+//! reads [`NO_SWITCH_IN_DAMAGE`] for each living opposing active, which is the
+//! largest value that any bench can produce. Both are the worst value of their
+//! own column, so an empty bench never scores above an occupied one.
+//!
 //! # Three scorers
 //!
 //! [`heuristic`] uses the hand-set weights in [`HAND_WEIGHTS`].
@@ -846,6 +852,16 @@ const TYPE_EDGE_FLOOR: f64 = -2.0;
 /// A quadruple multiplier reads this value.
 const TYPE_EDGE_CEILING: f64 = 2.0;
 
+/// The largest `switch_in_damage` that one opposing active can produce.
+///
+/// [`best_attack`] returns an `expected_fraction` from 0 through 1, so one
+/// living opposing active adds at most this much.
+///
+/// A side with no living bench reads this value for each living opposing
+/// active. The weight of the column is negative, so 0 is the best value of the
+/// column and a side that cannot switch at all must not read it.
+const NO_SWITCH_IN_DAMAGE: f64 = 1.0;
+
 /// The bench features of one side, as
 /// `(bench_threat, switch_in_damage, team_coverage)`.
 ///
@@ -854,7 +870,9 @@ const TYPE_EDGE_CEILING: f64 = 2.0;
 /// three threat features: the values describe one choice, not a sum over every
 /// choice.
 ///
-/// The first two values are zero when the side has no living bench Pokemon.
+/// A side with no living bench Pokemon reads the worst value of each of the
+/// first two columns. `bench_threat` reads zero, and `switch_in_damage` reads
+/// [`NO_SWITCH_IN_DAMAGE`] for each living opposing active.
 ///
 /// Entry hazard damage stays out of `switch_in_damage`. The `hazards` feature
 /// already holds it, and adding it twice would double its weight.
@@ -870,7 +888,8 @@ fn bench_features(
         Player::P2 => &state.p1_active_mons,
     };
     let Some(switch_in) = best_switch_in(state, player, ctx) else {
-        return (0.0, 0.0, coverage);
+        let living = defenders.iter().filter(|mon| is_alive(mon)).count();
+        return (0.0, NO_SWITCH_IN_DAMAGE * living as f64, coverage);
     };
 
     let entry_slot = entry_slot(state, player);
@@ -1955,7 +1974,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_bench_reads_zero_for_both_bench_features() {
+    fn an_empty_bench_reads_the_worst_value_of_both_bench_features() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
         let state = battle_state_from_lists(
@@ -1965,14 +1984,82 @@ mod tests {
             vec![],
         );
         assert_eq!(own(&state, Player::P1, "bench_threat"), 0.0);
-        assert_eq!(own(&state, Player::P1, "switch_in_damage"), 0.0);
+        assert_eq!(
+            own(&state, Player::P1, "switch_in_damage"),
+            NO_SWITCH_IN_DAMAGE
+        );
 
         // A fainted bench Pokemon cannot come in, so it reads the same way.
         let mut fainted = bench_position(PokemonMove::Thunderbolt);
         fainted.p1_back_mons[0].hp = 0;
         fainted.p1_back_mons[0].fainted = true;
         assert_eq!(own(&fainted, Player::P1, "bench_threat"), 0.0);
-        assert_eq!(own(&fainted, Player::P1, "switch_in_damage"), 0.0);
+        assert_eq!(
+            own(&fainted, Player::P1, "switch_in_damage"),
+            NO_SWITCH_IN_DAMAGE
+        );
+    }
+
+    #[test]
+    fn an_empty_bench_reads_one_switch_in_damage_for_each_living_opponent() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+        let mut state = battle_state_from_lists(
+            vec![
+                mon(Species::Snorlax, pokemon_dex, move_dex),
+                mon(Species::Skarmory, pokemon_dex, move_dex),
+            ],
+            vec![],
+            vec![
+                mon(Species::Gyarados, pokemon_dex, move_dex),
+                mon(Species::Pikachu, pokemon_dex, move_dex),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            own(&state, Player::P1, "switch_in_damage"),
+            2.0 * NO_SWITCH_IN_DAMAGE
+        );
+
+        // A fainted opponent cannot punish a switch-in, so it stops counting.
+        state.p2_active_mons[1].hp = 0;
+        state.p2_active_mons[1].fainted = true;
+        assert_eq!(
+            own(&state, Player::P1, "switch_in_damage"),
+            NO_SWITCH_IN_DAMAGE
+        );
+    }
+
+    #[test]
+    fn an_empty_bench_never_scores_above_an_occupied_one() {
+        // `best_attack` returns a fraction from 0 through 1, so an occupied
+        // bench cannot reach `NO_SWITCH_IN_DAMAGE` for one opposing active.
+        let occupied = own(
+            &incoming_position(PokemonMove::Thunderbolt),
+            Player::P1,
+            "switch_in_damage",
+        );
+        assert!(
+            occupied < NO_SWITCH_IN_DAMAGE,
+            "an occupied bench read {occupied}"
+        );
+    }
+
+    #[test]
+    fn the_switch_in_damage_weight_stays_negative() {
+        // `NO_SWITCH_IN_DAMAGE` is the worst value of this column only while
+        // the weight is negative. A positive weight turns the sentinel into a
+        // bonus, and a side with no living bench then scores above a side that
+        // can still switch. `bin/train_eval` fits this column, so a run can
+        // write a new value into `weights/eval_v1.json`.
+        let index = feature("switch_in_damage");
+        assert!(
+            HAND_WEIGHTS[index] < 0.0,
+            "the hand weight read {}",
+            HAND_WEIGHTS[index]
+        );
+        let fitted = fitted_weights()[index];
+        assert!(fitted < 0.0, "the committed weight read {fitted}");
     }
 
     #[test]

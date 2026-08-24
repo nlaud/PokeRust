@@ -21,10 +21,109 @@ Rerun the training after any of these changes:
 4. A solver change moves the label value.
 
 A run is one improvement step.
-The labels come from `solve`, and `solve` scores its own horizon with the
-committed weights.
+
+`--labels search` takes each label from `solve`, and `solve` scores its own
+horizon with the committed weights.
 A second run therefore starts from the output of the first run.
 The binary does not converge on its own.
+
+`--labels rollout` takes each label from a played game result, so the label
+holds no evaluator output.
+The play still reads the committed weights, so a run changes the games that the
+next run plays.
+
+## The two label sources
+
+`--labels` chooses the first two stages of the binary.
+
+| Source | The corpus | The label |
+|---|---|---|
+| `search` | Random legal commands | `solve` at `--label-depth` |
+| `selfplay` | Random legal commands | `mcts::search` at `--label-depth` |
+| `rollout` | Whole played games | The result of the game, 1 or 0 |
+
+A depth-1 search asks the evaluator to predict the rest of the game.
+A depth-2 label does not hold that quantity.
+It teaches the evaluator its own output through one turn.
+A game result does hold that quantity.
+Use `--labels rollout` to fit the value model.
+
+A rollout run reads no search-label option, and a search run reads no rollout
+option.
+The binary refuses an option that its source ignores.
+A silent no-op would cost the whole run.
+
+These options belong to the rollout source alone.
+
+| Option | Purpose |
+|---|---|
+| `--rollout-iterations` | Search iterations of each turn of a game |
+| `--rollout-depth` | Search depth of each turn of a game |
+| `--turn-cap` | Steps that one game may take |
+
+One job is one opening, and one opening plays two games.
+The second game exchanges the two sides.
+The pair removes team strength from the aggregate P1 win rate.
+The report prints that rate as a self-check, and it must sit near 0.500.
+
+A game that reaches `--turn-cap` has no winner.
+The rollout drops every position of that game.
+
+`--positions` counts kept labels for this source.
+The rollout plays openings until it holds that many positions, or until
+`--time-budget` expires.
+
+A rollout holds no root mixture, so it writes no policy file.
+A one-hot target of the played action would teach the policy head its own draw.
+`weights/policy_v1.json` keeps its committed values.
+
+## The rollout split
+
+Every position of one game carries the one result of that game.
+Two positions of one game are not independent.
+
+The two games of one opening are not independent either.
+They start from one drawn position, and the second game exchanges the two sides.
+`eval::features` is antisymmetric.
+The first recorded position of the second game is therefore the negated first
+recorded position of the first game.
+
+The held-out split holds whole openings for both reasons.
+A split by sample, or by game, would train on a position that it then holds out.
+The `split` line of the report names the sample count and the opening count of
+each side.
+
+## The rollout seed
+
+`collect_positions`, `play_rollouts`, and `benches/eval_calibration` build an
+opening seed with one formula.
+Seed 1 therefore gives all three the same openings.
+
+`benches/eval_calibration` is test 2 of the accept rule below, and its default
+seed is 1.
+A training run must use another seed.
+The accept rule needs openings that the fit did not read.
+
+`train_eval` refuses `--seed 1`. The default is 7.
+
+Record the corpus seed and the bench seed in `benches/RESULTS.md`.
+A later reader must be able to confirm that the two differ.
+
+## The two roster pools
+
+`TeamPool::load` reads the `.txt` files of one directory.
+It does not descend into a subdirectory.
+
+`teamsheets` holds 14 rosters, and `teamsheets/vgcpastes` holds 758.
+The two pools are disjoint.
+
+`runbook/refresh_and_train.py` gives the corpus `teamsheets/vgcpastes`.
+`benches/eval_calibration` reads `teamsheets` at its default.
+The accept rule therefore measures rosters that the fit never read.
+
+Pass `--teamsheet-dir ../teamsheets/vgcpastes` to the bench to measure the pool
+that the fit did read.
+Record the directory of each run in `benches/RESULTS.md`.
 
 ## The format contract
 
@@ -77,12 +176,24 @@ This step measures seconds for each label. It is not the calibration curve of
 the accept rule below.
 
 ```sh
-./target/release/train_eval.exe --calibrate --calibrate-positions 60 --workers 20 --seed 1
+./target/release/train_eval.exe --labels rollout --calibrate \
+  --calibrate-positions 2400 --workers 20 --seed 7 \
+  --teamsheet-dir ../teamsheets/vgcpastes
 ```
 
-Use at least three times as many positions as workers.
+The sample must hold at least three waves of jobs.
 The rate divides the label count by the stage wall time.
-A sample that fits in one wave measures the slowest label, not the rate.
+A sample that fits in one wave measures the slowest job, not the rate.
+
+One `search` job is one position, so a search sample needs three times as many
+positions as workers.
+One `rollout` job is one opening, and one opening yields about 23 labels.
+A rollout sample therefore needs about 120 labels for each worker.
+`runbook/refresh_and_train.py` sizes both in `calibration_sample`.
+
+The rate counts the same thing that `--positions` counts.
+A `search` run sizes `--positions` by attempted positions.
+A `rollout` run sizes it by kept labels.
 
 The report holds the median, the maximum, and the mean label cost.
 It also holds the label rate and the yield of a 1-hour, 10-hour, and 12-hour
@@ -96,13 +207,37 @@ Read two numbers from the report:
 A corpus that runs dry stops the run early.
 Set `--positions` about 15 percent above the expected yield.
 
-## The overnight command
+## The rollout command
+
+```sh
+./target/release/train_eval.exe \
+  --labels rollout --positions 350000 --time-budget 1800 \
+  --rollout-iterations 64 --rollout-depth 2 --turn-cap 120 \
+  --teamsheet-dir ../teamsheets/vgcpastes --workers 20 --seed 7
+```
+
+| Option | Reason |
+|---|---|
+| `--labels rollout` | A game result is the quantity that a depth-1 leaf predicts |
+| `--positions` | Sized from the calibrated rate, with headroom |
+| `--time-budget` | Stops the play stage on the clock |
+| `--rollout-iterations 64` | The bot that plays the games |
+| `--rollout-depth 2` | One ply of lookahead for each side |
+| `--turn-cap 120` | A doubles game settles well inside this cap |
+| `--workers` | Leaves two cores for the machine |
+| `--seed 7` | Not the seed of the accept-rule bench |
+
+The play stage holds one feature vector for each recorded position.
+It does not hold the position itself.
+A run of 350,000 positions therefore costs about 65 MB for the corpus.
+
+## The search command
 
 ```sh
 ./target/release/train_eval.exe \
   --positions 24000 --label-depth 2 --min-label-depth 1 \
   --label-chance top1 --label-max-actions 24 \
-  --time-budget 36000 --workers 20 --seed 1
+  --time-budget 36000 --workers 20 --seed 7
 ```
 
 Each option has a reason.
@@ -174,9 +309,18 @@ Compare the `value hand` line against the `value fitted` line.
 A lower held-out mean absolute error passes this test.
 
 This test alone cannot accept a run.
+
+For `--labels search` the reason is the loop.
 `solve` produced the labels, and `solve` scores its own horizon with the
 committed weights, so the split measures agreement with that loop.
 The number moved from 0.0957 to 0.0978 when only the corpus changed.
+
+For `--labels rollout` the reason is the noise.
+A label is 1 or 0.
+A perfect predictor of an even position still reads an error of 0.5 there.
+The held-out error therefore sits near 0.42 and not near 0.10.
+Do not compare a rollout number against a search number.
+The two measure different quantities.
 
 **Test 2. The calibration curve.**
 This test compares a predicted win probability against a played game result.
@@ -191,9 +335,13 @@ Both flags hold the games still.
 `--policy hand` plays a softmax over `eval::HAND_POLICY_WEIGHTS`, a constant.
 
 Do not drop `--policy hand` here.
-The default policy reads `weights/policy_v1.json`, and this run rewrites that
-file.
-The two reports would then measure two different sets of games.
+The default policy reads `weights/policy_v1.json`.
+A `--labels search` run rewrites that file, so the two reports would then
+measure two different sets of games.
+
+Do not drop `--teamsheet-mix 1` either.
+The bench uses seed 1, and a training run must use another seed.
+Read the section *The rollout seed* above.
 
 Read the `fitted` table. The run passes when its mean absolute error, its Brier
 score, and its log loss all fall, and its expected calibration error does not
@@ -212,6 +360,9 @@ Commit these files:
 2. `weights/eval_mlp_v1.json`
 3. `weights/policy_v1.json`
 4. `benches/RESULTS.md`
+
+A `--labels rollout` run does not write `weights/policy_v1.json`.
+Commit the first two weight files and `benches/RESULTS.md` for that run.
 
 Commit `src/solver/mod.rs` and `src/solver/mcts.rs` only when the model choice
 changes the default evaluator.
@@ -264,7 +415,7 @@ The `reset` stage of `runbook/refresh_and_train.py` does this for you.
 
 ## How a new mechanic reaches the corpus
 
-The collector plays random legal commands.
+The collector plays random legal commands, and a rollout plays whole games.
 A new mechanic therefore enters the corpus without a change to this binary.
 
 Only a mechanic that needs its own feature needs a code change.

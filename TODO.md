@@ -55,6 +55,12 @@ Four times the corpus moved held-out error by 0.0002.
 Both curves are flat because the features hold no more signal.
 The model does not lack capacity.
 
+The rollout run of 2026-08-23 repeated both results on 0 or 1 labels.
+A hidden layer gained 0.0000 held-out mean absolute error there.
+That curve varies the positions of each game and not the game count, so it
+does not rule out a larger game count.
+Read `benches/RESULTS.md`, section *The learning curve*.
+
 A prediction misses about 10 points of win probability.
 A true edge of 55 against 45 is smaller than that error.
 
@@ -70,24 +76,110 @@ It is 2 today. A 30-second answer holds about 36,800 iterations at depth 1,
 actions, so depth trades lookahead against the visits for each action. Measure
 that trade with `--policy search` before you move the constant again.
 
-- [ ] 3. Replace the bootstrap labels.
+- [ ] 3. Make a rollout fit beat the committed weights.
 
-      Depth-2 labels suited a depth-3 search.
-      The evaluator only had to rank leaves there.
-      A depth-1 search asks the evaluator to predict the rest of the game.
+      `--labels rollout` now ships. It plays whole games with the search bot on
+      both sides, and it labels every position with the game result. The split
+      holds whole games. The three bench columns train in the same run.
+      Read `benches/RESULTS.md`, section *2026-08-23: The rollout label source*.
 
-      Label from played-out results with the current bot on both sides.
-      The last labeling run held 0.81 labels for each second.
-      It produced 11,733 labels in 14,459 seconds against a 4-hour budget.
+      The first run lost the accept rule. It lost all four statistics against
+      the committed weights, and it lost all four against `heuristic`. The
+      weight files keep their committed values.
 
-      One doubles depth-2 label costs minutes, so a rollout is now the cheaper
-      source as well as the more honest one.
+      The fit is under-confident on the bench positions. `health` fell from
+      2.0030 to 1.0183. It predicts 0.150 where the games give 0.012.
 
-      This item also owns the three bench features of the old item 2. They
-      ship with hand-set weights, and an untrained column cannot move the
-      calibration curve on its own.
+      The pool is not the cause. The fit also loses on the 758 rosters that it
+      read.
 
-      Done when: the fit trains on terminal outcomes, and item 1 improves.
+      Two candidates remain. Test them in this order.
+
+      1. The corpus and the bench use two different players. The corpus plays
+         `TurnPolicy::Search` at 64 iterations and depth 2. The bench plays a
+         softmax over `eval::HAND_POLICY_WEIGHTS`. Measure the fit against
+         `--policy search` before you change the corpus.
+      2. The two kill features are collinear at +0.8971. The fit gives
+         `guaranteed_kill` the value -0.0104. Merge the pair, or add a penalty
+         that holds the split still.
+
+      Done when: a rollout fit lowers the mean absolute error, the Brier score,
+      and the log loss of test 2, and does not raise its expected calibration
+      error by more than 0.005.
+
+- [ ] 3a. Re-time the presets against the 23-feature leaf.
+
+      `bot::PresetLimits` was measured against the 20-feature leaf.
+      The bench features raised the singles leaf cost by 4.2 times.
+      Read `benches/RESULTS.md`, section *The bench features, 2026-08-23*.
+
+      Arithmetic puts the long belief clock 2 to 3 percent over its budget.
+      No preset breaks the 30-second limit on that arithmetic.
+      Arithmetic is not a measurement, so this item measures.
+
+      Singles is the worst case for the ratio, and the presets run doubles.
+      A doubles position holds four active pairs, so the threat features run 16
+      damage calculations against the 16 that the bench adds.
+      The doubles rise should be about 2 times and not 4.
+
+      Measure the doubles leaf cost first.
+      Re-time only the rows that the measurement moves.
+
+      Do this after item 3.
+      The empty-bench convention moves the leaf cost again, and a re-timing run
+      costs hours.
+
+      Update `bot::PresetLimits` and
+      `frontend/src/components/solver/solverSettings.ts` together.
+
+      Done when: every preset row comes from a doubles measurement of the
+      23-feature leaf, and no row exceeds 30 seconds.
+
+- [ ] 3b. Find the side bias of the self-play corpus.
+
+      The rollout play stage reports a P1 win rate of 0.469. It scored 13,476
+      wins of 28,719 games.
+
+      Each opening plays two games, and the second game exchanges the two
+      sides. The rate must sit near 0.500. The standard deviation of the mean
+      is 0.0030, so the measurement is 10.4 standard deviations low.
+
+      The 75 capped games move the rate by at most 0.0026. A game with no
+      winner is dropped, so a draw does not bias the count.
+
+      Every rollout label reads this bias. Fix it before the next fit.
+
+      Check these three first.
+
+      1. `play_rollouts` gives one `mcts::search` to both sides. The search
+         maximizes the value of P1, so the two sides may not read strategies
+         of equal quality.
+      2. The seed of the exchanged game may repeat a draw of the first game.
+      3. The simulator may hold a real first-player edge. A speed tie and a
+         turn order are the two places to look.
+
+      Done when: a paired rollout run of at least 20,000 games reports a P1
+      win rate inside 3 standard deviations of 0.500.
+
+- [ ] 3c. Decide what the refine switch does at the shipped depth.
+
+      `frontend/e2e/refine-profile.spec.ts` fails. The switch is visible and
+      disabled, so the spec cannot check it.
+
+      `DEFAULT_SOLVER_SETTINGS.depth` reads `PRESET_DEPTH`, which is 1. The
+      panel disables the switch at that depth, because a request at the refine
+      base depth has nothing to raise.
+
+      Commit 4b31ea7 moved the exact preset to depth 1 and made this state the
+      default. The user therefore cannot turn refinement on without a manual
+      depth change first.
+
+      Pick one. Hide the switch below the base depth, or let the panel raise
+      the depth when the user turns the switch on, or change the spec to
+      assert the disabled state.
+
+      Done when: `refine-profile.spec.ts` passes and the panel states the rule
+      to the user.
 
 - [ ] 4. Stop the replacement search from multiplying with damage rolls.
 

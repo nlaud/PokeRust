@@ -1439,3 +1439,310 @@ The depth-2 solve of the same position moved from 0.7573 to 0.7561 for
 The accept-rule table above holds the run that came after both fixes. The
 move-type fix moved `fitted` by 0.0001 on the mean absolute error and by 0.0003
 on the expected calibration error.
+
+## 2026-08-23: The rollout label source
+
+`bin/train_eval` gained `--labels rollout`. The source plays whole games with
+the search bot on both sides. Every position of one game takes that game's
+result as its label, so a label is 1 or 0.
+
+The old `--labels search` source labels a position with `solve` at depth 2.
+`solve` scores its own horizon with the committed weights, so that label teaches
+the evaluator its own output through one turn. A depth-1 search asks the
+evaluator to predict the rest of the game, and a depth-2 value does not hold
+that quantity.
+
+### The cost calibration
+
+```sh
+./target/release/train_eval.exe --labels rollout --calibrate \
+  --calibrate-positions 2000 --workers 20 --seed 7 \
+  --teamsheet-dir ../teamsheets/vgcpastes
+```
+
+| Figure | Value |
+|---|---|
+| Openings played | 101 |
+| Games played | 202 |
+| Games that hit the turn cap | 0 |
+| Kept labels | 2,347 |
+| Median game | 1.07 s |
+| Slowest game | 2.81 s |
+| Label rate | 182 labels per second on 20 workers |
+| P1 win rate | 0.480 |
+
+A game returns about 11.6 labels and resolves about 15 steps.
+
+The play policy is `TurnPolicy::Search` at 64 iterations and depth 2. One
+`mcts::search` answers both sides, because the two sides carry the same
+settings.
+
+Each opening plays two games, and the second game exchanges the two sides. The
+P1 win rate of 0.482 is the self-check of that pair.
+
+A rollout label costs far less than a `search` label. A depth-2 doubles solve
+takes minutes. A whole game takes about one second, and it returns about 13
+labels.
+
+### The rate that `--positions` sizes
+
+A `search` run sizes `--positions` by attempted positions. A `rollout` run sizes
+it by kept labels. The reported `labels per second` line counts the same thing
+that the option counts, so `runbook/refresh_and_train.py` reads it without a
+change.
+
+### The held-out split holds whole openings
+
+Every position of one game carries that game's one result. Two positions of one
+game are not independent. A sample split would put both sides of one result in
+the training set and the held-out set.
+
+The two games of one opening are not independent either. They start from one
+drawn position, and the second game exchanges the two sides. `eval::features`
+is antisymmetric, so the first recorded position of the second game is the
+negated first recorded position of the first game. A split by game would train
+on the negated position that it then holds out.
+
+The group of the split is therefore the opening. The `split` line of the report
+names the sample count and the opening count of each side.
+
+The run below split by game. The review of this commit found the mirror and
+changed the group to the opening. The recorded held-out numbers of that run are
+therefore optimistic. Read the split line of the next run for the opening
+count.
+
+### The held-out error changes meaning
+
+A 0 or 1 label gives a held-out mean absolute error near 0.42. A depth-2 search
+label gives one near 0.10. The two numbers measure different quantities. Do not
+compare them across the two label sources.
+
+### The rollout writes no policy file
+
+A rollout holds no root mixture. A one-hot target of the played action would
+teach the policy head its own draw. The run leaves `weights/policy_v1.json` at
+its committed values, and the report says so.
+
+### Two confounds of this run
+
+1. **The empty-bench convention changed in the same commit.**
+   `eval::bench_features` returned 0.0 for `switch_in_damage` when a side had no
+   living bench. The weight of that column is negative, so an empty bench read
+   the best value of the column. An empty bench now reads
+   `NO_SWITCH_IN_DAMAGE` for each living opposing active, which is the worst
+   value of the column. The fit and the accept rule both read the corrected
+   convention. Neither change can be priced on its own from this run.
+2. **The play policy and the accept-rule policy differ.**
+   The corpus plays `TurnPolicy::Search`. The accept-rule bench plays a softmax
+   over `eval::HAND_POLICY_WEIGHTS`. The fit therefore reads positions that a
+   stronger player reached than the positions that the bench scores.
+
+### The two roster pools
+
+The corpus and the accept-rule bench do not read the same rosters.
+
+| Reader | Directory | Rosters |
+|---|---|---|
+| `bin/train_eval`, through `runbook/refresh_and_train.py` | `teamsheets/vgcpastes` | 758 |
+| `benches/eval_calibration`, at its default | `teamsheets` | 14 |
+
+`TeamPool::load` reads the `.txt` files of one directory. It does not descend
+into a subdirectory, so `teamsheets` and `teamsheets/vgcpastes` are two disjoint
+pools.
+
+The accept rule therefore measures rosters that the fit never read. Pass
+`--teamsheet-dir ../teamsheets/vgcpastes` to the bench to measure the pool that
+the fit did read.
+
+### The seed rule
+
+`collect_positions`, `play_rollouts`, and `benches/eval_calibration` build an
+opening seed with one formula. Seed 1 therefore gives all three the same
+openings.
+
+`benches/eval_calibration` is the accept rule. Its default seed is 1. A training
+run must use another seed, or the accept rule reads the openings that the fit
+already read.
+
+This run used seed 7 for the corpus. The accept-rule bench used its default
+seed 1.
+
+The two runs also read two different roster pools, as the section above states.
+The seed rule still applies. A reader must be able to check both facts.
+
+### The labeling run
+
+```sh
+./target/release/train_eval.exe --labels rollout --positions 350000 \
+  --time-budget 1800 --rollout-iterations 64 --rollout-depth 2 \
+  --turn-cap 120 --teamsheet-dir ../teamsheets/vgcpastes --workers 20 --seed 7
+```
+
+| Figure | Value |
+|---|---|
+| Openings played | 14,397 |
+| Games played | 28,794 |
+| Play wall time | 1,801.8 s |
+| Steps resolved | 447,779 |
+| Games that hit the turn cap | 75 |
+| Positions dropped with those games | 8,726 |
+| Kept labels | 335,219 from 28,719 games |
+| Train split | 268,886 samples from 22,975 games |
+| Held-out split | 66,333 samples from 5,744 games |
+
+This run split by game. The group is now the opening, so a rerun reports an
+opening count here. Read the section *The held-out split holds whole openings*.
+
+| Model | Train loss | Train MAE | Held-out loss | Held-out MAE |
+|---|---|---|---|---|
+| `hand` | 0.6167 | 0.4068 | 0.6167 | 0.4066 |
+| `fitted` | 0.5944 | 0.4099 | 0.5936 | 0.4098 |
+| network | 0.5906 | 0.4092 | 0.5912 | 0.4098 |
+
+The fit lowers the held-out log loss from 0.6167 to 0.5936. It raises the
+held-out mean absolute error from 0.4066 to 0.4098. The fit minimizes the log
+loss, so the two lines do not disagree.
+
+The network gains 0.0000 mean absolute error against a 0.0020 margin. The run
+keeps `eval::fitted`.
+
+### The accept rule, 2,638 positions from 400 games
+
+```sh
+cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1
+```
+
+This is the decider. It reads `teamsheets`, which holds 14 rosters. The corpus
+read `teamsheets/vgcpastes`, so this row is out of sample. The bench seed is 1
+and the corpus seed is 7.
+
+| Evaluator | Weights | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|---|
+| `heuristic` | Hand | 0.3842 | 0.1844 | 0.5442 | 0.0450 |
+| `fitted` | Committed | 0.3542 | 0.1751 | 0.5163 | 0.0302 |
+| `fitted` | Rollout fit | 0.3944 | 0.1862 | 0.5494 | 0.0617 |
+| `fitted_mlp` | Committed | 0.3887 | 0.1850 | 0.5462 | 0.0530 |
+| `fitted_mlp` | Rollout fit | 0.4003 | 0.1933 | 0.5674 | 0.0573 |
+
+The rollout fit loses all four statistics. It also loses all four against
+`heuristic`, which reads hand weights. The run therefore rejects the fit.
+`weights/eval_v1.json` and `weights/eval_mlp_v1.json` keep their committed
+values.
+
+### The pool row, informational and in sample
+
+```sh
+cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1 \
+  --teamsheet-dir ../teamsheets/vgcpastes
+```
+
+This row reads the 758 rosters that the corpus read. It is in sample, so it
+does not decide pass or fail. It answers one question: does the roster pool
+explain the loss?
+
+| Evaluator | Weights | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|---|
+| `heuristic` | Hand | 0.3905 | 0.1896 | 0.5601 | 0.0412 |
+| `fitted` | Committed | 0.3635 | 0.1843 | 0.5455 | 0.0402 |
+| `fitted` | Rollout fit | 0.3950 | 0.1847 | 0.5477 | 0.0816 |
+
+The rollout fit also loses on its own rosters. The pool does not explain the
+loss. 2,477 positions from 400 games. P1 won 214 of 400.
+
+### The empty-bench fix, priced alone
+
+The recorded row of 2026-08-23 measured the committed weights before the
+`switch_in_damage` fix. The row above measures the same weights after it.
+
+| Evaluator | MAE | Brier | Log loss | ECE |
+|---|---|---|---|---|
+| `heuristic`, before the fix | 0.3889 | 0.1868 | 0.5507 | 0.0480 |
+| `heuristic`, after the fix | 0.3842 | 0.1844 | 0.5442 | 0.0450 |
+| `fitted`, before the fix | 0.3567 | 0.1751 | 0.5167 | 0.0275 |
+| `fitted`, after the fix | 0.3542 | 0.1751 | 0.5163 | 0.0302 |
+
+The fix lowers the mean absolute error and the log loss of both evaluators. It
+raises the expected calibration error of `fitted` by 0.0027. The fix ships.
+The two rows share one weight vector, so this comparison prices the code change
+alone.
+
+### Why the rollout fit lost
+
+The rollout fit is under-confident on the bench positions. Read its buckets:
+
+| Bucket | n | Predicted | Realized | Gap |
+|---|---|---|---|---|
+| 0.1-0.2 | 161 | 0.150 | 0.012 | 0.137 |
+| 0.2-0.3 | 272 | 0.255 | 0.202 | 0.053 |
+| 0.7-0.8 | 268 | 0.745 | 0.720 | 0.025 |
+| 0.8-0.9 | 165 | 0.849 | 0.970 | 0.121 |
+| 0.9-1.0 | 46 | 0.925 | 1.000 | 0.075 |
+
+Both end buckets miss away from 0.5. The fit predicts 0.150 where the games
+give 0.012, and it predicts 0.849 where the games give 0.970.
+
+The weight vector shows the same effect. `health` falls from 2.0030 to 1.0183,
+and `screens` falls from 0.4728 to 0.1393. A smaller vector pushes every
+prediction toward 0.5.
+
+Two facts explain the compression.
+
+1. **The corpus and the bench use two different players.** The corpus plays
+   `TurnPolicy::Search` at 64 iterations and depth 2. The bench plays a softmax
+   over `eval::HAND_POLICY_WEIGHTS`. A stronger player recovers from a deficit
+   more often, so a health edge predicts the result less well in the corpus
+   than in the bench games. The fit reads that weaker relation and shrinks the
+   weight.
+2. **The two kill features are collinear.** The report gives their correlation
+   as +0.8971. The fit splits their weight between them, and it gives
+   `guaranteed_kill` the value -0.0104.
+
+The pool row rules out the third candidate. The rollout fit loses on the
+rosters that it read, so the roster pool is not the cause.
+
+### The learning curve
+
+| Fraction | Samples | Held-out MAE |
+|---|---|---|
+| 25% | 67,222 | 0.4100 |
+| 50% | 134,443 | 0.4098 |
+| 75% | 201,665 | 0.4097 |
+| 100% | 268,886 | 0.4098 |
+
+Four times the samples moved the error by 0.0002.
+
+`train::subset` takes an evenly spaced stride of the training samples. The
+training split holds 22,975 games, and each game holds about 11.7 positions.
+A stride of 4 therefore keeps about 3 positions of every game. Every point of
+this curve reads the same 22,975 games.
+
+The curve measures positions for each game. It does not measure games. A game
+carries one result, so the game is the independent unit. Do not read this curve
+as evidence that more games cannot help.
+
+The network line is the evidence that the features are the limit. A hidden
+layer over the same 23 features gains 0.0000 held-out mean absolute error. Both
+the flat curve and the flat model class point at the feature set.
+
+The mean absolute error also sits at its noise floor. A label is 1 or 0. A
+perfect predictor of a position with a true win probability of q still reads an
+error of 2q(1-q) there, and the mean predicted value is 0.498. Read the log
+loss for the model comparison, and not the mean absolute error.
+
+### The side bias of the self-play corpus
+
+The play stage reports a P1 win rate of 0.469, from 13,476 wins of 28,719
+scored games.
+
+Each opening plays two games, and the second game exchanges the two sides. The
+rate must therefore sit near 0.500. The standard deviation of the mean is
+0.5/sqrt(28719), which is 0.0030. The measured rate is 10.4 standard deviations
+below 0.500.
+
+The 75 capped games left their mirror unpaired. Those games can move the rate
+by at most 0.0026, so they do not explain the gap.
+
+A game with no winner is dropped and is not scored, so a draw cannot bias the
+count.
+
+`TODO.md` item 3b owns this.

@@ -361,10 +361,28 @@ Nash stays the default of every search.
 
 ## Measuring the evaluator
 
-`solve` scores its own horizon with the weights that `bin/train_eval` fitted,
-and `train_eval` fits those weights from labels that `solve` produced. The
-held-out error of that fit measures agreement with the loop. It does not measure
-agreement with a game result, so it cannot accept or reject a weight change.
+`bin/train_eval` has two label sources. `--labels` chooses between them.
+
+`--labels search` labels each position with `solve` at depth 2. `solve` scores
+its own horizon with the weights that the same binary fitted, so that label
+teaches the evaluator its own output through one turn. The held-out error of
+that fit measures agreement with the loop. It does not measure agreement with a
+game result.
+
+`--labels rollout` plays whole games with the search bot on both sides. Every
+position of one game takes that game's result as its label, so a label is 1 or
+0. A depth-1 search asks the evaluator to predict the rest of the game, and only
+this source holds that quantity.
+
+A rollout label carries no evaluator output. The play still reads the committed
+weights, so a run changes the games that the next run plays.
+
+Neither held-out error can accept or reject a weight change on its own. The
+`search` split measures the loop, and the `rollout` split measures a 1 or 0
+label whose noise floor sits near 0.42.
+
+`src/solver/TRAINING.md` holds the option table of each source, the split rule,
+and the seed rule.
 
 `benches/eval_calibration` measures the second quantity. Run it from
 `poke_rust/`:
@@ -388,6 +406,11 @@ distribution than the fit could not accept or reject the fit.
 then repeats each matchup exactly. A lower mix draws part of the openings from
 the usage cache. `meta::generate_meta_team` reads a `HashMap` order that changes
 with the process, so those openings change with it.
+
+`bin/train_eval` and this benchmark build an opening seed with one formula, so
+seed 1 gives both the same openings. The benchmark is the accept rule of a
+training run, and its default seed is 1. A training run must therefore use
+another seed.
 
 ### How to read the report
 

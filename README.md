@@ -73,24 +73,37 @@ Record new results in `poke_rust/benches/RESULTS.md` after an engine change.
 
 The solver scores a position at its search horizon with a linear model. `poke_rust/weights/eval_v1.json` holds the value weights, and `poke_rust/weights/policy_v1.json` holds the action-policy weights.
 
-Fit both from labeled positions:
+Fit the value model from played game results:
 
 ```sh
 cd poke_rust
-cargo run --release --bin train_eval -- --positions 400 --label-depth 2 --seed 1
+cargo run --release --bin train_eval -- --labels rollout --positions 400 --seed 7
 ```
 
-The trainer generates teams from the usage cache, plays random legal commands, and records the position before each turn. It then labels each position with an exact solve, and it fits both models by gradient descent.
+`--labels` chooses where a value label comes from.
+
+| Source | The corpus | The label |
+|---|---|---|
+| `rollout` | Whole played games | The result of the game, 1 or 0 |
+| `search` | Random legal commands | A depth-2 `solve` |
+| `selfplay` | Random legal commands | A sampled search |
+
+A depth-1 search asks the evaluator to predict the rest of the game. Only a game result holds that quantity, so `rollout` is the source that fits the value model. A `search` label scores its own horizon with the committed weights, so it teaches the evaluator its own output through one turn.
+
+A rollout plays each opening twice and exchanges the two sides in the second game. It writes no policy file, because it holds no root mixture.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--positions` | `400` | Distinct positions to label |
-| `--label-depth` | `2` | Search depth of each label |
-| `--seed` | `1` | Seed of the corpus and of every labeled search |
-| `--labels` | `search` | `search` solves exactly; `selfplay` samples with the MCTS search |
-| `--turns-per-match` | `12` | Turns to play from each generated matchup |
-| `--active-per-side` | `1` | Active Pokemon per side |
-| `--brought-per-side` | `3` | Team members that each side brings |
+| `--labels` | `search` | Where the value labels come from |
+| `--positions` | `8000` | Positions to collect |
+| `--seed` | `7` | Seed of the corpus and of every label |
+| `--rollout-iterations` | `64` | Search iterations of each turn of a rollout game |
+| `--rollout-depth` | `2` | Search depth of each turn of a rollout game |
+| `--turn-cap` | `120` | Steps that one rollout game may take |
+| `--label-depth` | `2` | Search depth of each `search` label |
+| `--turns-per-match` | `12` | Turns to play from each `search` matchup |
+| `--active-per-side` | `2` | Active Pokemon per side |
+| `--brought-per-side` | `4` | Team members that each side brings |
 | `--holdout` | `0.2` | Fraction of the corpus held out of the fit |
 | `--steps` | `400` | Full-batch gradient steps |
 | `--learning-rate` | `0.5` | Step size of each descent step |
@@ -99,11 +112,17 @@ The trainer generates teams from the usage cache, plays random legal commands, a
 | `--out-eval`, `--out-policy` | `weights/*.json` | Where to write each vector |
 | `--dry-run` | False | Report the fit without writing a file |
 
+The trainer refuses an option that its label source ignores. A silent no-op would cost the whole run.
+
+The trainer refuses `--seed 1`. `benches/eval_calibration` is the accept rule of a training run, and it builds its openings from the same formula at that seed.
+
 The trainer needs the usage cache. Run `meta_scraper/update_meta.py` first.
 
-The run prints the training error and the held-out error of the hand-set weights and of the fitted weights. Keep a run only when the fitted weights win on the held-out split.
+The run prints the training error and the held-out error of the hand-set weights and of the fitted weights. Keep a run only when the fitted weights win on the held-out split, and only when the calibration curve improves.
 
-The labels come from a search that scores its own horizon with the committed weights. One run is therefore one improvement step, not a fixed point. Restore both weight files to `eval::HAND_WEIGHTS` and `eval::HAND_POLICY_WEIGHTS` before a rerun, or the next run starts from the last one. Record each run in `poke_rust/benches/RESULTS.md`.
+Restore the weight files to `eval::HAND_WEIGHTS` and `eval::HAND_POLICY_WEIGHTS` before a rerun, or the next run starts from the last one. Record each run in `poke_rust/benches/RESULTS.md`.
+
+`runbook/REFRESH_AND_TRAIN.md` automates the whole procedure. `poke_rust/src/solver/TRAINING.md` holds the manual one.
 
 `cargo test` never runs the trainer. A corpus and its labels cost minutes.
 

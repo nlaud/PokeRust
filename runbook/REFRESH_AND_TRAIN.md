@@ -30,6 +30,61 @@ The script runs six stages in order.
 
 Each stage writes its own progress lines. A failed stage stops the run.
 
+## The label source
+
+`--labels` chooses where a value label comes from. The default is `rollout`.
+
+| Source | The corpus | The label |
+|---|---|---|
+| `rollout` | Whole played games | The result of the game, 1 or 0 |
+| `search` | Random legal commands | A depth-2 `solve` |
+| `selfplay` | Random legal commands | A sampled search |
+
+A depth-1 search asks the evaluator to predict the rest of the game. A `search`
+label does not hold that quantity. It scores its own horizon with the committed
+weights, so it teaches the evaluator its own output through one turn.
+
+A `rollout` label holds the game result, which is the quantity that the leaf has
+to predict.
+
+`train_eval` refuses an option that its label source ignores. The script passes
+the options of the chosen source and nothing else.
+
+These options belong to the rollout source alone.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--rollout-iterations` | 64 | Search iterations of each turn of a game |
+| `--rollout-depth` | 2 | Search depth of each turn of a game |
+| `--turn-cap` | 120 | Steps that one game may take |
+
+A rollout writes no policy file. It holds no root mixture, and a one-hot target
+of the played action would teach the policy head its own draw.
+`poke_rust/weights/policy_v1.json` keeps its committed values.
+
+## The seed rule
+
+`--seed 1` is not allowed. The script exits with an error, and `train_eval`
+refuses that seed as well.
+
+`train_eval` and `poke_rust/benches/eval_calibration` build an opening seed with
+one formula. The benchmark is test 2 of the accept rule, and it uses seed 1. A
+run at seed 1 would give the fit the openings that the accept rule reads.
+
+The default is seed 7. Record the corpus seed and the bench seed in
+`poke_rust/benches/RESULTS.md`.
+
+The two readers also use two roster pools. `TeamPool::load` reads the `.txt`
+files of one directory and does not descend into a subdirectory.
+
+| Reader | Directory | Rosters |
+|---|---|---|
+| This script | `teamsheets/vgcpastes` | 758 |
+| `benches/eval_calibration`, at its default | `teamsheets` | 14 |
+
+The accept rule therefore measures rosters that the fit never read. Record the
+directory of each run in `poke_rust/benches/RESULTS.md`.
+
 ## Common commands
 
 Run everything with the default four-hour budget:
@@ -194,10 +249,23 @@ from the report:
 1. The label rate. It multiplies this rate by `--hours` to size `--positions`.
    It adds 15 percent of headroom, so the corpus does not run dry.
 2. The slowest label. It sets `--label-deadline` above this value, so a normal
-   label is never cut short.
+   label is never cut short. A rollout run ignores this value, because a game
+   runs to `--turn-cap`.
 
-The sample must hold at least three times as many positions as workers. A
-sample that fits in one wave measures the slowest label, not the rate.
+The sample must hold at least three waves of jobs. A sample that fits in one
+wave measures the slowest job, not the rate, and the script then sizes the
+training stage below the real yield.
+
+One `search` job is one position, so a search sample holds three times as many
+positions as workers. One `rollout` job is one opening, and one opening yields
+about 23 labels. A rollout sample therefore holds about 120 labels for each
+worker. `calibration_sample` sizes both.
+
+The rate counts the same thing that `--positions` counts. A `search` run sizes
+`--positions` by attempted positions. A `rollout` run sizes it by kept labels.
+
+A rollout is much cheaper. The measurement of 2026-08-23 read 183 labels per
+second on 20 workers, against about 0.5 for a depth-2 search label.
 
 The script writes the result to `runbook/logs/calibration.json`. A later
 `--only train` reads that file. The record holds the settings that change the
@@ -207,10 +275,23 @@ label cost. A run that changed one of them measures again.
 
 The script collects positions, labels each one, and fits the weights.
 
-The collector plays random legal commands from the paired rosters. A new
-mechanic therefore reaches the corpus without a code change.
+A rollout plays whole games from the paired rosters. A `search` run plays random
+legal commands instead. A new mechanic therefore reaches the corpus without a
+code change in both cases.
 
-These label settings make a depth-2 doubles label affordable:
+One rollout job is one opening, and one opening plays two games. The second game
+exchanges the two sides, so team strength cancels out of the aggregate P1 win
+rate. The report prints that rate, and it must sit near 0.500.
+
+A game that reaches `--turn-cap` has no winner. The rollout drops every position
+of that game.
+
+The held-out split of a rollout run holds whole openings. Every position of one
+game carries the one result of that game. The two games of one opening also
+start from one drawn position, and the second game exchanges the two sides. The
+`split` line names the sample count and the opening count of each side.
+
+These label settings make a depth-2 doubles `search` label affordable:
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -229,7 +310,8 @@ one active label after the budget expires.
 
 ## How to read the report
 
-The report holds six parts.
+The report holds six parts. A rollout run prints its play statistics in place of
+the first two parts.
 
 1. **The depth histogram.** It counts the kept labels at each depth.
 2. **The drop list.** It names each reason that a label left the corpus. A large
@@ -258,6 +340,19 @@ ACCEPT: the fit beat the hand weights by 0.0068.
 Keep a run only when the fitted weights beat the hand-set weights on the
 held-out split. A higher error means that the step overshot.
 
+This is test 1 alone. Test 2 is the calibration curve, and the operator runs it
+by hand from `poke_rust/`:
+
+```sh
+cargo bench --bench eval_calibration -- --policy hand --teamsheet-mix 1
+```
+
+Read `poke_rust/src/solver/TRAINING.md` for the pass rule of test 2.
+
+A rollout label is 1 or 0, so its held-out error sits near 0.42. A search label
+gives one near 0.10. The two numbers measure different quantities. Do not
+compare them across the two label sources.
+
 To discard a run, restore the three files:
 
 ```sh
@@ -275,6 +370,9 @@ Commit these files after an accepted run:
 2. `poke_rust/weights/eval_mlp_v1.json`
 3. `poke_rust/weights/policy_v1.json`
 4. `poke_rust/benches/RESULTS.md`
+
+A rollout run writes no policy file. Commit the first two weight files and
+`poke_rust/benches/RESULTS.md` for that run.
 
 Commit `src/solver/mod.rs` and `src/solver/mcts.rs` only when the model choice
 changes the default evaluator. Commit nothing else from a training run.
